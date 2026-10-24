@@ -3,12 +3,18 @@ name = "agentpilot"
 version = "0.1.0"
 description = "Plateforme expérimentale de déploiement, supervision et évaluation d'agents IA sur la boutique simulée ShopSim"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "httpx>=0.27",
 ]
 
 [tool.pytest.ini_options]
