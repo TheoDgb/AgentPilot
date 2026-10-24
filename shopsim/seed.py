@@ -1,4 +1,4 @@
-"""Données de démo déterministes : 50 clients, 200 commandes.
+"""Données de démo déterministes : 50 clients, 200 commandes et leurs paiements.
 
 Les ids ne sont jamais forcés : les séquences PostgreSQL les génèrent, ce qui
 garde les séquences cohérentes pour les INSERT futurs. Ils restent stables d'une
@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.orm import Session
 
 from shopsim.app.db import Base, SessionLocal, engine
-from shopsim.app.models import Customer, Order, OrderStatus
+from shopsim.app.models import Customer, Order, OrderStatus, Payment, PaymentStatus, Refund
 
 SEED = 42
 N_CUSTOMERS = 50
@@ -27,6 +27,20 @@ LAST_NAMES = [
     "Martin", "Bernard", "Dubois", "Thomas", "Robert", "Richard", "Petit",
     "Durand", "Leroy", "Moreau", "Simon", "Laurent", "Lefebvre", "Michel",
 ]  # fmt: skip
+REFUND_REASONS = [
+    "Article défectueux", "Colis jamais reçu", "Erreur de taille",
+    "Rétractation du client", "Article non conforme",
+]  # fmt: skip
+
+# Statut du paiement cohérent avec celui de la commande
+PAYMENT_STATUS_BY_ORDER_STATUS = {
+    OrderStatus.PENDING: PaymentStatus.PENDING,
+    OrderStatus.PAID: PaymentStatus.SUCCEEDED,
+    OrderStatus.SHIPPED: PaymentStatus.SUCCEEDED,
+    OrderStatus.DELIVERED: PaymentStatus.SUCCEEDED,
+    OrderStatus.CANCELLED: PaymentStatus.FAILED,
+    OrderStatus.REFUNDED: PaymentStatus.REFUNDED,
+}
 
 
 def seed(session: Session) -> None:
@@ -62,6 +76,27 @@ def seed(session: Session) -> None:
             )
         )
     session.add_all(orders)
+    session.flush()
+
+    # Paiements générés après les commandes : clients et commandes restent identiques à J1.1
+    for order in orders:
+        payment = Payment(
+            order=order,
+            status=PAYMENT_STATUS_BY_ORDER_STATUS[order.status],
+            amount_cents=order.total_cents,
+            created_at=order.created_at + timedelta(minutes=rng.randint(1, 30)),
+        )
+        session.add(payment)
+        if order.status == OrderStatus.REFUNDED:
+            session.add(
+                Refund(
+                    payment=payment,
+                    amount_cents=payment.amount_cents,
+                    reason=rng.choice(REFUND_REASONS),
+                    idempotency_key=f"seed-refund-{order.id}",
+                    created_at=payment.created_at + timedelta(days=rng.randint(1, 20)),
+                )
+            )
     session.flush()
 
 

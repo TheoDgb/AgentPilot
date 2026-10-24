@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from shopsim.app.db import init_db
-from shopsim.app.routers import orders
+from shopsim.app.routers import health, orders, payments, refunds
 
 
 @asynccontextmanager
@@ -16,4 +16,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="ShopSim", lifespan=lifespan)
+app.include_router(health.router)
 app.include_router(orders.router)
+app.include_router(payments.router)
+app.include_router(refunds.router)

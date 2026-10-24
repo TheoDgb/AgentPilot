@@ -3,3 +3,5 @@
 /.venv/
 /RAPPELPERSO.md
 /agentpilot.egg-info/
+__pycache__/
+*.py[cod]

@@ -22,11 +22,18 @@ services:
       dockerfile: shopsim/Dockerfile
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-shopsim}:${POSTGRES_PASSWORD:-shopsim}@db:5432/${POSTGRES_DB:-shopsim}
+      PAYMENT_LATENCY_MS: ${PAYMENT_LATENCY_MS:-100}
     ports:
       - "8000:8000"
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      # L'image slim n'a pas curl : on passe par Python
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   pgdata:

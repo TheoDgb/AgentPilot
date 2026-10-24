@@ -35,6 +35,7 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
 <!-- À mettre à jour au fur et à mesure que le projet avance -->
 - Démarrer tout : `docker compose up -d`
 - Base PostgreSQL exposée sur l'hôte au port **5433** (`POSTGRES_PORT`, 5432 étant pris par un PostgreSQL local) ; dans le réseau Docker, l'app utilise `db:5432`
+- Latence simulée du service Paiements : `PAYMENT_LATENCY_MS` (100 ms par défaut, relue à chaque appel ; 0 dans les tests)
 - Tests : `pytest`
 - Tests d'un service : `pytest shopsim/` (idem pour `mcp_server/`, `agentpilot/`)
 - Données de démo : `python shopsim/seed.py`
@@ -69,8 +70,8 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
 Jalon en cours : **J1 — ShopSim**
 
 - [x] J0 : dépôt, Python 3.12 (uv), pyproject, commande /test
-- [x] J1.1 : Docker Compose (PostgreSQL + FastAPI), Customer/Order, `GET /orders/{id}`, seed, premier test  ← prochaine étape
-- [ ] J1.2 : service Paiements
+- [x] J1.1 : Docker Compose (PostgreSQL + FastAPI), Customer/Order, `GET /orders/{id}`, seed, premier test
+- [ ] J1.2 : service Paiements  ← en cours (code écrit, tests à valider contre la base)
 - [ ] J1.3 : service Livraisons
 - [ ] J1.4 : services Clients et Tickets
 - [ ] J1.5 : endpoint Chaos (latence d'abord, puis les 3 autres pannes)
