@@ -70,32 +70,51 @@ def client(session: Session) -> Iterator[TestClient]:
     app.dependency_overrides.clear()
 
 
+MakeOrder = Callable[..., Order]
 MakePayment = Callable[..., Payment]
 
 
 @pytest.fixture
-def make_payment(session: Session) -> MakePayment:
+def make_order(session: Session) -> MakeOrder:
+    """Crée un client et une de ses commandes."""
+
+    def _make(
+        status: OrderStatus = OrderStatus.PAID,
+        total_cents: int = 10_000,
+        created_at: datetime = datetime(2026, 3, 1, tzinfo=UTC),
+    ) -> Order:
+        n = next(_unique)
+        customer = Customer(
+            email=f"client.{n}@example.com",
+            first_name="Test",
+            last_name="Client",
+            created_at=created_at,
+        )
+        order = Order(
+            customer=customer,
+            status=status,
+            total_cents=total_cents,
+            currency="EUR",
+            created_at=created_at,
+        )
+        session.add(order)
+        session.flush()
+        return order
+
+    return _make
+
+
+@pytest.fixture
+def make_payment(session: Session, make_order: MakeOrder) -> MakePayment:
     """Crée client + commande + paiement (statut de commande cohérent avec le paiement)."""
 
     def _make(
         amount_cents: int = 10_000, status: PaymentStatus = PaymentStatus.SUCCEEDED
     ) -> Payment:
-        n = next(_unique)
-        created = datetime(2026, 3, 1, tzinfo=UTC)
-        customer = Customer(
-            email=f"client.{n}@example.com",
-            first_name="Test",
-            last_name="Client",
-            created_at=created,
+        order = make_order(_ORDER_STATUS_BY_PAYMENT_STATUS[status], amount_cents)
+        payment = Payment(
+            order=order, status=status, amount_cents=amount_cents, created_at=order.created_at
         )
-        order = Order(
-            customer=customer,
-            status=_ORDER_STATUS_BY_PAYMENT_STATUS[status],
-            total_cents=amount_cents,
-            currency="EUR",
-            created_at=created,
-        )
-        payment = Payment(order=order, status=status, amount_cents=amount_cents, created_at=created)
         session.add(payment)
         session.flush()
         return payment

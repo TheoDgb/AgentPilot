@@ -1,10 +1,10 @@
 """Schémas Pydantic des requêtes et réponses de l'API."""
 
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from shopsim.app.models import OrderStatus, PaymentStatus
+from shopsim.app.models import OrderStatus, PaymentStatus, ShipmentStatus
 
 
 class OrderRead(BaseModel):
@@ -46,3 +46,25 @@ class RefundRead(BaseModel):
     reason: str
     idempotency_key: str
     created_at: datetime
+
+
+class ShipmentEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    occurred_at: datetime
+    location: str
+    description: str
+
+
+class ShipmentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    order_id: int
+    carrier: str
+    tracking_number: str
+    status: ShipmentStatus
+    estimated_delivery: date
+    delivered_at: datetime | None
+    created_at: datetime
+    events: list[ShipmentEventRead]

@@ -1,9 +1,9 @@
-"""Modèles ShopSim : clients, commandes, paiements et remboursements."""
+"""Modèles ShopSim : clients, commandes, paiements, remboursements et livraisons."""
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String
+from sqlalchemy import Date, DateTime, Enum, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from shopsim.app.db import Base
@@ -23,6 +23,15 @@ class PaymentStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     REFUNDED = "refunded"
+
+
+class ShipmentStatus(StrEnum):
+    LABEL_CREATED = "label_created"
+    IN_TRANSIT = "in_transit"
+    OUT_FOR_DELIVERY = "out_for_delivery"
+    DELIVERED = "delivered"
+    DELAYED = "delayed"
+    LOST = "lost"
 
 
 class Customer(Base):
@@ -52,6 +61,7 @@ class Order(Base):
 
     customer: Mapped[Customer] = relationship(back_populates="orders")
     payment: Mapped["Payment | None"] = relationship(back_populates="order")
+    shipment: Mapped["Shipment | None"] = relationship(back_populates="order")
 
 
 class Payment(Base):
@@ -86,3 +96,37 @@ class Refund(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     payment: Mapped[Payment] = relationship(back_populates="refunds")
+
+
+class Shipment(Base):
+    __tablename__ = "shipments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Une seule livraison par commande
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), unique=True)
+    carrier: Mapped[str] = mapped_column(String(50))
+    tracking_number: Mapped[str] = mapped_column(String(50), unique=True)
+    status: Mapped[ShipmentStatus] = mapped_column(
+        Enum(ShipmentStatus, name="shipment_status", values_callable=lambda e: [m.value for m in e])
+    )
+    estimated_delivery: Mapped[date] = mapped_column(Date)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    order: Mapped[Order] = relationship(back_populates="shipment")
+    # Historique de suivi, toujours dans l'ordre chronologique
+    events: Mapped[list["ShipmentEvent"]] = relationship(
+        back_populates="shipment", order_by="ShipmentEvent.occurred_at"
+    )
+
+
+class ShipmentEvent(Base):
+    __tablename__ = "shipment_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    shipment_id: Mapped[int] = mapped_column(ForeignKey("shipments.id"))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    location: Mapped[str] = mapped_column(String(100))
+    description: Mapped[str] = mapped_column(String(255))
+
+    shipment: Mapped[Shipment] = relationship(back_populates="events")
