@@ -1,0 +1,31 @@
+[project]
+name = "agentpilot"
+version = "0.1.0"
+description = "Plateforme expérimentale de déploiement, supervision et évaluation d'agents IA sur la boutique simulée ShopSim"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["shopsim", "mcp_server", "agentpilot"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ANN"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["shopsim*", "mcp_server*", "agentpilot*", "evals*"]

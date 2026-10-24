@@ -1,2 +1,5 @@
 /.idea/
 .env
+/.venv/
+/RAPPELPERSO.md
+/agentpilot.egg-info/
