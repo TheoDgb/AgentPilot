@@ -158,6 +158,8 @@ class Ticket(Base):
         index=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Motif interne de l'escalade, jamais montré au client
+    escalation_reason: Mapped[str | None] = mapped_column(String(500))
 
     customer: Mapped[Customer] = relationship()
     order: Mapped[Order | None] = relationship()
@@ -177,6 +179,9 @@ class TicketMessage(Base):
     )
     # Texte libre écrit par le client : donnée non fiable
     body: Mapped[str] = mapped_column(Text)
+    # Clé fournie par l'appelant pour les réponses de l'agent : rejouer la même requête
+    # ne crée pas de second message (absente pour les messages du client)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     ticket: Mapped[Ticket] = relationship(back_populates="messages")

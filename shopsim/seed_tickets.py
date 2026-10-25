@@ -57,6 +57,7 @@ N_RISKY_CUSTOMERS = 3
 N_RESOLVED_REFUNDED = 5
 N_ESCALATED = 2
 N_PENDING = 2
+ESCALATION_REASON = "Paiement à vérifier par le service paiements"
 GOODWILL_REASON = "Geste commercial"
 MOVING = (ShipmentStatus.IN_TRANSIT, ShipmentStatus.OUT_FOR_DELIVERY)
 # Montant réclamé en plus de ce qui est dû, pour les pièges « montant » (en euros)
@@ -698,15 +699,15 @@ def _historical_tickets(
         assert order.payment is not None
         opened = order.payment.created_at + rng.randint(1, 48) * HOUR
         reply = tpl.AGENT_ESCALATED.format(first_name=order.customer.first_name)
-        tickets.append(
-            _thread(
-                order,
-                rng.choice(tpl.PAYMENT_NOT_CONFIRMED),
-                TicketStatus.ESCALATED,
-                [(MessageAuthor.AGENT, reply, opened + rng.randint(1, 6) * HOUR)],
-                opened,
-            )
+        ticket = _thread(
+            order,
+            rng.choice(tpl.PAYMENT_NOT_CONFIRMED),
+            TicketStatus.ESCALATED,
+            [(MessageAuthor.AGENT, reply, opened + rng.randint(1, 6) * HOUR)],
+            opened,
         )
+        ticket.escalation_reason = ESCALATION_REASON
+        tickets.append(ticket)
 
     # Livrées depuis assez longtemps pour que l'attente de la photo dure depuis des jours
     delivered = [

@@ -35,7 +35,7 @@ from shopsim.app.models import (
 )
 from shopsim.app.schemas import TicketMessageRead, TicketPage, TicketRead, TicketSummary
 from shopsim.seed import GROUND_TRUTH_PATH, REFUND_REASONS, seed
-from shopsim.seed_tickets import GOODWILL_REASON, OPEN_TICKETS_AGE
+from shopsim.seed_tickets import ESCALATION_REASON, GOODWILL_REASON, OPEN_TICKETS_AGE
 
 N_OPEN = 48
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
@@ -134,6 +134,14 @@ def test_seed_historical_tickets_close_real_refunds(tickets_by_id: dict[int, Tic
             m.author == MessageAuthor.HUMAN and m.created_at in refund_dates
             for m in ticket.messages
         )
+
+
+def test_seed_only_escalated_tickets_have_a_reason(tickets_by_id: dict[int, Ticket]) -> None:
+    for ticket in tickets_by_id.values():
+        if ticket.status == TicketStatus.ESCALATED:
+            assert ticket.escalation_reason == ESCALATION_REASON
+        else:
+            assert ticket.escalation_reason is None
 
 
 def test_seed_open_orders_carry_one_open_ticket(tickets_by_id: dict[int, Ticket]) -> None:

@@ -110,7 +110,20 @@ class TicketMessageRead(BaseModel):
 
 
 class TicketRead(TicketSummary):
+    escalation_reason: str | None
     messages: list[TicketMessageRead]
+
+
+class TicketReplyCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    body: str = Field(min_length=1, max_length=5000)
+
+
+class TicketEscalate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class TicketPage(BaseModel):
