@@ -75,7 +75,7 @@ Jalon en cours : **J1 — ShopSim**
 - [x] J1.2 : service Paiements
 - [x] J1.3 : service Livraisons
 - [x] J1.4a : Clients et Tickets en lecture, ~60 tickets dans le seed, vérité terrain dans `evals/tickets.jsonl` (règles dans `evals/policy.py`)
-- [ ] J1.4 (suite) ← prochaine étap
+- [ ] J1.4 (suite) ← prochaine étape
 - [ ] J1.5 : endpoint Chaos (latence d'abord, puis les 3 autres pannes)
 
 Suite : J2 MCP + agent headless · J3 Agent SDK + validation humaine · J4 Monitoring · J5 Évaluation en CI · J6 Agent Ops + subagents · J7 Livraison et formation
