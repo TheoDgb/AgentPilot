@@ -1,4 +1,5 @@
-"""Modèles ShopSim : clients, commandes, paiements, remboursements, livraisons et tickets."""
+"""Modèles ShopSim : clients, commandes, paiements, remboursements, livraisons, tickets et
+pannes injectées (Chaos)."""
 
 from datetime import date, datetime
 from enum import StrEnum
@@ -45,6 +46,13 @@ class MessageAuthor(StrEnum):
     CUSTOMER = "customer"
     AGENT = "agent"
     HUMAN = "human"
+
+
+class ChaosScenario(StrEnum):
+    PAYMENT_LATENCY = "payment_latency"
+    DB_ERRORS = "db_errors"
+    CONNECTION_SATURATION = "connection_saturation"
+    BAD_DEPLOY = "bad_deploy"
 
 
 class Customer(Base):
@@ -185,3 +193,20 @@ class TicketMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     ticket: Mapped[Ticket] = relationship(back_populates="messages")
+
+
+class ChaosFault(Base):
+    """Panne active : la ligne existe tant que la panne n'est pas arrêtée.
+
+    Stockée en base pour que tous les processus de l'application la voient.
+    """
+
+    __tablename__ = "chaos_faults"
+
+    scenario: Mapped[ChaosScenario] = mapped_column(
+        Enum(ChaosScenario, name="chaos_scenario", values_callable=lambda e: [m.value for m in e]),
+        primary_key=True,
+    )
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Requêtes reçues depuis l'activation (panne connection_saturation)
+    request_count: Mapped[int] = mapped_column(default=0)

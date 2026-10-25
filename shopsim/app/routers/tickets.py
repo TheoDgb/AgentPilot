@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from shopsim.app.chaos import apply_connection_saturation
 from shopsim.app.db import get_session
 from shopsim.app.models import MessageAuthor, Ticket, TicketMessage, TicketStatus
 from shopsim.app.schemas import (
@@ -18,7 +19,10 @@ from shopsim.app.schemas import (
     TicketSummary,
 )
 
-router = APIRouter(prefix="/tickets", tags=["tickets"])
+# Panne Chaos connection_saturation : s'applique à toutes les routes métier
+router = APIRouter(
+    prefix="/tickets", tags=["tickets"], dependencies=[Depends(apply_connection_saturation)]
+)
 
 
 @router.get("", response_model=TicketPage)

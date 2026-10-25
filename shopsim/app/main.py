@@ -6,7 +6,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from shopsim.app.db import init_db
-from shopsim.app.routers import customers, health, orders, payments, refunds, shipments, tickets
+from shopsim.app.routers import (
+    chaos,
+    customers,
+    health,
+    orders,
+    payments,
+    refunds,
+    shipments,
+    tickets,
+)
 
 
 @asynccontextmanager
@@ -23,3 +32,4 @@ app.include_router(refunds.router)
 app.include_router(shipments.router)
 app.include_router(customers.router)
 app.include_router(tickets.router)
+app.include_router(chaos.router)

@@ -6,11 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from shopsim.app.chaos import apply_connection_saturation
 from shopsim.app.db import get_session
 from shopsim.app.models import Shipment
 from shopsim.app.schemas import ShipmentRead
 
-router = APIRouter(prefix="/shipments", tags=["shipments"])
+# Panne Chaos connection_saturation : s'applique à toutes les routes métier
+router = APIRouter(
+    prefix="/shipments", tags=["shipments"], dependencies=[Depends(apply_connection_saturation)]
+)
 
 
 @router.get("/{order_id}", response_model=ShipmentRead)

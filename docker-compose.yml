@@ -23,6 +23,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-shopsim}:${POSTGRES_PASSWORD:-shopsim}@db:5432/${POSTGRES_DB:-shopsim}
       PAYMENT_LATENCY_MS: ${PAYMENT_LATENCY_MS:-100}
+      # Jeton des endpoints Chaos ; vide = Chaos fermé
+      CHAOS_TOKEN: ${CHAOS_TOKEN:-}
     ports:
       - "8000:8000"
     depends_on:

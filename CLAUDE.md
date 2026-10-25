@@ -41,7 +41,11 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
 - Tests d'un service : `pytest shopsim/` (idem pour `mcp_server/`, `agentpilot/`)
 - Données de démo : `python shopsim/seed.py`
 - Évaluation : `python evals/run_eval.py`
-- Activer une panne : `curl -X POST localhost:8000/chaos/<scenario>`
+- Pannes (Chaos) : `curl -X POST -H "X-Chaos-Token: $CHAOS_TOKEN" localhost:8000/chaos/<scenario>` pour activer, `DELETE` pour arrêter, `GET /chaos` pour lister. Jeton `CHAOS_TOKEN` dans `.env` (vide = Chaos fermé), jamais donné aux agents
+  - `payment_latency` : Paiements répond en 4 s au lieu de 100 ms
+  - `db_errors` : les lectures des commandes renvoient 500
+  - `connection_saturation` : chaque requête attend 50 ms de plus que la précédente (plafond 5 s)
+  - `bad_deploy` : seuls les remboursements échouent (500)
 - Activer l'environnement : `source .venv/bin/activate`
 - Installer les dépendances : `uv pip install -e ".[dev]"` (venv créé avec uv, pas de pip)
 
@@ -68,7 +72,7 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
 
 ## Avancement
 
-Jalon en cours : **J1 — ShopSim**
+Jalon en cours : **J2 — MCP + agent headless** (J1 terminé : les API de ShopSim ne changent plus sans accord)
 
 - [x] J0 : dépôt, Python 3.12 (uv), pyproject, commande /test
 - [x] J1.1 : Docker Compose (PostgreSQL + FastAPI), Customer/Order, `GET /orders/{id}`, seed, premier test
@@ -76,6 +80,6 @@ Jalon en cours : **J1 — ShopSim**
 - [x] J1.3 : service Livraisons
 - [x] J1.4a : Clients et Tickets en lecture, ~60 tickets dans le seed, vérité terrain dans `evals/tickets.jsonl` (règles dans `evals/policy.py`)
 - [x] J1.4b : actions sur les tickets (répondre avec `Idempotency-Key`, escalader, résoudre ; rejouer une action déjà faite renvoie 200, répondre ou escalader un ticket résolu renvoie 409)
-- [ ] J1.5 : endpoint Chaos (latence d'abord, puis les 3 autres pannes) ← prochaine étape
+- [x] J1.5 : endpoint Chaos (4 pannes, état en base, jeton `X-Chaos-Token`)
 
 Suite : J2 MCP + agent headless · J3 Agent SDK + validation humaine · J4 Monitoring · J5 Évaluation en CI · J6 Agent Ops + subagents · J7 Livraison et formation

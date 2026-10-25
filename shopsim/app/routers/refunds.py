@@ -8,12 +8,16 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from shopsim.app.chaos import apply_connection_saturation, raise_if_bad_deploy
 from shopsim.app.db import get_session
 from shopsim.app.latency import simulate_payment_latency
 from shopsim.app.models import OrderStatus, Payment, PaymentStatus, Refund
 from shopsim.app.schemas import RefundCreate, RefundRead
 
-router = APIRouter(prefix="/refunds", tags=["refunds"])
+# Panne Chaos connection_saturation : s'applique à toutes les routes métier
+router = APIRouter(
+    prefix="/refunds", tags=["refunds"], dependencies=[Depends(apply_connection_saturation)]
+)
 
 
 def _find_by_key(session: Session, key: str) -> Refund | None:
@@ -52,9 +56,11 @@ def create_refund(
     session: Annotated[Session, Depends(get_session)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=255)] = None,
 ) -> Refund:
+    # Panne Chaos bad_deploy : le service de remboursement est mal configuré
+    raise_if_bad_deploy(session)
     if idempotency_key is None or not idempotency_key.strip():
         raise HTTPException(status_code=400, detail="Idempotency-Key header is required")
-    simulate_payment_latency()
+    simulate_payment_latency(session)
 
     existing = _find_by_key(session, idempotency_key)
     if existing is not None:

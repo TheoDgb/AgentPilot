@@ -6,12 +6,16 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from shopsim.app.chaos import apply_connection_saturation, raise_if_db_errors
 from shopsim.app.clock import SIMULATION_NOW
 from shopsim.app.db import get_session
 from shopsim.app.models import Customer, Order, Payment, Refund, Ticket, TicketStatus
 from shopsim.app.schemas import CustomerRead, OrderRead
 
-router = APIRouter(prefix="/customers", tags=["customers"])
+# Panne Chaos connection_saturation : s'applique à toutes les routes métier
+router = APIRouter(
+    prefix="/customers", tags=["customers"], dependencies=[Depends(apply_connection_saturation)]
+)
 
 
 def _get_customer(session: Session, customer_id: int) -> Customer:
@@ -54,6 +58,8 @@ def get_customer(
 def list_customer_orders(
     customer_id: int, session: Annotated[Session, Depends(get_session)]
 ) -> list[Order]:
+    # Panne Chaos db_errors : la lecture échoue avant même de trouver le client
+    raise_if_db_errors(session)
     _get_customer(session, customer_id)
     # Les plus récentes d'abord
     return list(

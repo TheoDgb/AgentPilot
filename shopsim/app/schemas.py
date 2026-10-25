@@ -5,6 +5,7 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from shopsim.app.models import (
+    ChaosScenario,
     MessageAuthor,
     OrderStatus,
     PaymentStatus,
@@ -131,3 +132,14 @@ class TicketPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class ChaosFaultRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    scenario: ChaosScenario
+    activated_at: datetime
+
+
+class ChaosState(BaseModel):
+    active: list[ChaosFaultRead]
