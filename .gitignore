@@ -5,3 +5,5 @@
 /agentpilot.egg-info/
 __pycache__/
 *.py[cod]
+.claude/settings.local.json
+.uv-cache/

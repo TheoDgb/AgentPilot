@@ -1,9 +1,9 @@
-"""Modèles ShopSim : clients, commandes, paiements, remboursements et livraisons."""
+"""Modèles ShopSim : clients, commandes, paiements, remboursements, livraisons et tickets."""
 
 from datetime import date, datetime
 from enum import StrEnum
 
-from sqlalchemy import Date, DateTime, Enum, ForeignKey, String
+from sqlalchemy import Date, DateTime, Enum, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from shopsim.app.db import Base
@@ -32,6 +32,19 @@ class ShipmentStatus(StrEnum):
     DELIVERED = "delivered"
     DELAYED = "delayed"
     LOST = "lost"
+
+
+class TicketStatus(StrEnum):
+    OPEN = "open"
+    PENDING = "pending"
+    ESCALATED = "escalated"
+    RESOLVED = "resolved"
+
+
+class MessageAuthor(StrEnum):
+    CUSTOMER = "customer"
+    AGENT = "agent"
+    HUMAN = "human"
 
 
 class Customer(Base):
@@ -130,3 +143,40 @@ class ShipmentEvent(Base):
     description: Mapped[str] = mapped_column(String(255))
 
     shipment: Mapped[Shipment] = relationship(back_populates="events")
+
+
+class Ticket(Base):
+    __tablename__ = "tickets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"))
+    # Commande citée par le client, facultative (et pas forcément la sienne)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"))
+    subject: Mapped[str] = mapped_column(String(200))
+    status: Mapped[TicketStatus] = mapped_column(
+        Enum(TicketStatus, name="ticket_status", values_callable=lambda e: [m.value for m in e]),
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    customer: Mapped[Customer] = relationship()
+    order: Mapped[Order | None] = relationship()
+    # Fil de discussion, toujours dans l'ordre chronologique
+    messages: Mapped[list["TicketMessage"]] = relationship(
+        back_populates="ticket", order_by="TicketMessage.created_at"
+    )
+
+
+class TicketMessage(Base):
+    __tablename__ = "ticket_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("tickets.id"))
+    author: Mapped[MessageAuthor] = mapped_column(
+        Enum(MessageAuthor, name="message_author", values_callable=lambda e: [m.value for m in e])
+    )
+    # Texte libre écrit par le client : donnée non fiable
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    ticket: Mapped[Ticket] = relationship(back_populates="messages")

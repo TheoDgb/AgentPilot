@@ -4,7 +4,27 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from shopsim.app.models import OrderStatus, PaymentStatus, ShipmentStatus
+from shopsim.app.models import (
+    MessageAuthor,
+    OrderStatus,
+    PaymentStatus,
+    ShipmentStatus,
+    TicketStatus,
+)
+
+
+class CustomerRead(BaseModel):
+    id: int
+    email: str
+    first_name: str
+    last_name: str
+    created_at: datetime
+    # Ancienneté en jours à la date de référence de la simulation
+    tenure_days: int
+    # Tickets résolus : le ticket en cours de traitement n'est pas compté
+    resolved_tickets_count: int
+    # Remboursements reçus, toutes commandes confondues
+    refunds_count: int
 
 
 class OrderRead(BaseModel):
@@ -68,3 +88,33 @@ class ShipmentRead(BaseModel):
     delivered_at: datetime | None
     created_at: datetime
     events: list[ShipmentEventRead]
+
+
+class TicketSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    customer_id: int
+    order_id: int | None
+    subject: str
+    status: TicketStatus
+    created_at: datetime
+
+
+class TicketMessageRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    author: MessageAuthor
+    body: str
+    created_at: datetime
+
+
+class TicketRead(TicketSummary):
+    messages: list[TicketMessageRead]
+
+
+class TicketPage(BaseModel):
+    items: list[TicketSummary]
+    total: int
+    limit: int
+    offset: int

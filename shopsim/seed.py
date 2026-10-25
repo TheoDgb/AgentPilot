@@ -1,4 +1,4 @@
-"""Données de démo déterministes : 50 clients, 200 commandes, paiements et livraisons.
+"""Données de démo déterministes : 50 clients, 204 commandes, paiements, livraisons et tickets.
 
 Les ids ne sont jamais forcés : les séquences PostgreSQL les génèrent, ce qui
 garde les séquences cohérentes pour les INSERT futurs. Ils restent stables d'une
@@ -7,13 +7,20 @@ l'ordre d'insertion est fixe.
 
 Toutes les dates sont calculées à partir de `SIMULATION_NOW` (jamais `now()`),
 et sont cohérentes avec le statut de la commande.
+
+La vérité terrain des tickets open est écrite dans `evals/tickets.jsonl`, jamais
+en base : voir `shopsim/seed_tickets.py`.
 """
 
 import random
+from collections import Counter
 from datetime import UTC, datetime, time, timedelta
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from evals.ground_truth import TicketGroundTruth
+from evals.policy import APPROVAL_THRESHOLD_CENTS, is_risky_customer
 from shopsim.app.clock import SIMULATION_NOW, simulation_today
 from shopsim.app.db import Base, SessionLocal, engine
 from shopsim.app.models import (
@@ -27,6 +34,7 @@ from shopsim.app.models import (
     ShipmentEvent,
     ShipmentStatus,
 )
+from shopsim.seed_tickets import seed_tickets
 
 SEED = 42
 N_CUSTOMERS = 50
@@ -34,6 +42,10 @@ N_ORDERS = 200
 BASE_DATE = datetime(2026, 1, 1, tzinfo=UTC)
 DELAYED_SHARE = 0.15
 N_LOST = 2
+# Petites commandes livrées récemment, ajoutées en J1.4 après les 200 commandes :
+# elles donnent des remboursements et des renvois automatiques (sous le seuil)
+N_SMALL_ORDERS = 4
+SMALL_ORDER_MIN_CENTS = 500
 
 FIRST_NAMES = [
     "Alice", "Bruno", "Chloé", "David", "Emma", "Farid", "Gaëlle", "Hugo",
@@ -85,6 +97,9 @@ ORDER_AGE_BY_STATUS = {
 MIN_AGE_DELAYED = 5 * DAY
 # Le dernier événement d'un colis perdu date d'au moins 4 jours
 LOST_SILENCE = 4 * DAY
+# Âge (min, max) des petites commandes : livrées dans le délai de remboursement
+SMALL_ORDER_AGE = (6 * DAY, 24 * DAY)
+GROUND_TRUTH_PATH = Path(__file__).resolve().parents[1] / "evals" / "tickets.jsonl"
 
 
 def _minutes(delta: timedelta) -> int:
@@ -142,6 +157,14 @@ def _shipped_statuses(
                 rng.choice([ShipmentStatus.IN_TRANSIT, ShipmentStatus.OUT_FOR_DELIVERY])
             )
     return statuses
+
+
+def _tracking_number(rng: random.Random, prefix: str, used: set[str]) -> str:
+    tracking_number = f"{prefix}{rng.randrange(10**10):010d}"
+    while tracking_number in used:
+        tracking_number = f"{prefix}{rng.randrange(10**10):010d}"
+    used.add(tracking_number)
+    return tracking_number
 
 
 def _build_shipment(
@@ -209,12 +232,15 @@ def _build_shipment(
     )
 
 
-def seed(session: Session) -> None:
-    """Insère les données de démo dans la session (sans commit)."""
+def seed(session: Session) -> list[TicketGroundTruth]:
+    """Insère les données de démo (sans commit) et renvoie la vérité terrain des tickets open."""
     rng = random.Random(SEED)
     # Générateur séparé pour les dates et les livraisons : la suite de `rng` (clients,
     # statuts, montants, motifs de remboursement) reste celle de J1.1/J1.2
     timeline_rng = random.Random(SEED + 1)
+    # Idem pour les tickets et les petites commandes, ajoutés en J1.4
+    ticket_rng = random.Random(SEED + 2)
+    small_rng = random.Random(SEED + 3)
 
     customers: list[Customer] = []
     for i in range(1, N_CUSTOMERS + 1):
@@ -285,22 +311,88 @@ def seed(session: Session) -> None:
         else:
             continue
         carrier = timeline_rng.choice(list(CARRIERS))
-        prefix = CARRIERS[carrier]
-        tracking_number = f"{prefix}{timeline_rng.randrange(10**10):010d}"
-        while tracking_number in tracking_numbers:
-            tracking_number = f"{prefix}{timeline_rng.randrange(10**10):010d}"
-        tracking_numbers.add(tracking_number)
+        tracking_number = _tracking_number(timeline_rng, CARRIERS[carrier], tracking_numbers)
         session.add(_build_shipment(timeline_rng, order, status, carrier, tracking_number))
     session.flush()
+
+    orders += _add_small_orders(session, small_rng, customers, tracking_numbers)
+    return seed_tickets(session, ticket_rng, customers, orders)
+
+
+def _add_small_orders(
+    session: Session, rng: random.Random, customers: list[Customer], tracking_numbers: set[str]
+) -> list[Order]:
+    """Commandes livrées sous le seuil, chez des clients sans autre commande en cours de
+    livraison ou livrée : ils ne deviennent pas clients à risque (voir seed_tickets)."""
+    candidates = [
+        c
+        for c in customers
+        if not any(o.status in (OrderStatus.SHIPPED, OrderStatus.DELIVERED) for o in c.orders)
+        and not is_risky_customer(
+            [r.created_at for o in c.orders if o.payment for r in o.payment.refunds],
+            SIMULATION_NOW,
+        )
+    ]
+    if len(candidates) < N_SMALL_ORDERS:
+        raise ValueError(
+            f"{len(candidates)} clients pour les petites commandes, {N_SMALL_ORDERS} requis"
+        )
+
+    orders = []
+    min_age, max_age = SMALL_ORDER_AGE
+    for customer in rng.sample(candidates, N_SMALL_ORDERS):
+        created_at = _random_between(rng, SIMULATION_NOW - max_age, SIMULATION_NOW - min_age)
+        total_cents = rng.randint(SMALL_ORDER_MIN_CENTS, APPROVAL_THRESHOLD_CENTS)
+        order = Order(
+            customer=customer,
+            status=OrderStatus.DELIVERED,
+            total_cents=total_cents,
+            currency="EUR",
+            created_at=created_at,
+        )
+        session.add(order)
+        session.add(
+            Payment(
+                order=order,
+                status=PaymentStatus.SUCCEEDED,
+                amount_cents=total_cents,
+                created_at=created_at + timedelta(minutes=rng.randint(1, 30)),
+            )
+        )
+        carrier = rng.choice(list(CARRIERS))
+        tracking_number = _tracking_number(rng, CARRIERS[carrier], tracking_numbers)
+        session.add(_build_shipment(rng, order, ShipmentStatus.DELIVERED, carrier, tracking_number))
+        orders.append(order)
+    session.flush()
+    return orders
+
+
+def write_ground_truth(truths: list[TicketGroundTruth], path: Path = GROUND_TRUTH_PATH) -> None:
+    """Une ligne JSON par ticket open, triée par id : fichier stable d'un seed à l'autre."""
+    lines = [gt.model_dump_json() for gt in sorted(truths, key=lambda gt: gt.ticket_id)]
+    path.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+
+
+def print_distribution(truths: list[TicketGroundTruth]) -> None:
+    print(f"{len(truths)} tickets open dans {GROUND_TRUTH_PATH.name}")
+    print("Par catégorie :")
+    for category, n in sorted(Counter(gt.category for gt in truths).items()):
+        print(f"  {category:<28} {n:>3}")
+    print("Par action attendue :")
+    for action, n in sorted(Counter(gt.expected_action for gt in truths).items()):
+        print(f"  {action:<28} {n:>3}")
+    print(f"Avec validation humaine : {sum(gt.requires_human_approval for gt in truths)}")
 
 
 def main() -> None:
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     with SessionLocal() as session:
-        seed(session)
+        truths = seed(session)
         session.commit()
-    print(f"Seed OK : {N_CUSTOMERS} clients, {N_ORDERS} commandes")
+    write_ground_truth(truths)
+    print(f"Seed OK : {N_CUSTOMERS} clients, {N_ORDERS + N_SMALL_ORDERS} commandes")
+    print_distribution(truths)
 
 
 if __name__ == "__main__":

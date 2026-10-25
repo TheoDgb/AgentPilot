@@ -4,11 +4,13 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from evals.policy import APPROVAL_THRESHOLD_CENTS, REFUND_WINDOW
 from shopsim.app.clock import SIMULATION_NOW, simulation_today
 from shopsim.app.models import Customer, Order, OrderStatus, Refund, Shipment, ShipmentStatus
 from shopsim.seed import (
     N_CUSTOMERS,
     N_ORDERS,
+    N_SMALL_ORDERS,
     ORDER_AGE_BY_STATUS,
     PAYMENT_STATUS_BY_ORDER_STATUS,
     seed,
@@ -29,7 +31,7 @@ def test_insert_order_without_id_after_seed(session: Session) -> None:
     seed(session)
     assert session.scalar(select(func.count()).select_from(Customer)) == N_CUSTOMERS
     seeded_ids = set(session.scalars(select(Order.id)))
-    assert len(seeded_ids) == N_ORDERS
+    assert len(seeded_ids) == N_ORDERS + N_SMALL_ORDERS
 
     # Les séquences doivent suivre le seed : un INSERT sans id ne doit pas entrer en collision
     customer = session.scalars(select(Customer).limit(1)).one()
@@ -50,20 +52,24 @@ def test_seed_payments_match_order_status(session: Session) -> None:
     seed(session)
 
     orders = session.scalars(select(Order)).all()
-    assert len(orders) == N_ORDERS
+    assert len(orders) == N_ORDERS + N_SMALL_ORDERS
     for order in orders:
         assert order.payment is not None
         assert order.payment.amount_cents == order.total_cents
         assert order.payment.status == PAYMENT_STATUS_BY_ORDER_STATUS[order.status]
-        expected_refunded = order.total_cents if order.status == OrderStatus.REFUNDED else 0
-        assert order.payment.refunded_cents == expected_refunded
+        if order.status == OrderStatus.REFUNDED:
+            assert order.payment.refunded_cents == order.total_cents
+        else:
+            # Gestes commerciaux partiels des clients à risque (J1.4) : jamais le total
+            assert 0 <= order.payment.refunded_cents < order.total_cents
 
 
 def test_seed_keeps_customers_statuses_and_amounts(session: Session) -> None:
-    """Non-régression : redater les commandes (J1.3) n'a changé ni statuts ni montants."""
+    """Non-régression : redater les commandes (J1.3) n'a changé ni statuts ni montants, et les
+    petites commandes (J1.4) s'ajoutent après les 200 premières sans les modifier."""
     seed(session)
 
-    orders = session.scalars(select(Order)).all()
+    orders = session.scalars(select(Order).order_by(Order.id).limit(N_ORDERS)).all()
     assert Counter(o.status for o in orders) == {
         OrderStatus.PAID: 41,
         OrderStatus.CANCELLED: 38,
@@ -95,8 +101,8 @@ def test_seed_delivered_orders_straddle_refund_window(session: Session) -> None:
         select(Shipment).where(Shipment.status == ShipmentStatus.DELIVERED)
     ).all()
     ages = [SIMULATION_NOW - s.delivered_at for s in shipments if s.delivered_at is not None]
-    assert any(age <= timedelta(days=30) for age in ages)
-    assert any(age > timedelta(days=30) for age in ages)
+    assert any(age <= REFUND_WINDOW for age in ages)
+    assert any(age > REFUND_WINDOW for age in ages)
 
 
 def test_seed_shipments_match_order_status(session: Session) -> None:
@@ -147,3 +153,15 @@ def test_seed_has_about_15_percent_delayed_shipments(session: Session) -> None:
     shipments = session.scalars(select(Shipment)).all()
     delayed = sum(s.status == ShipmentStatus.DELAYED for s in shipments)
     assert 0.12 <= delayed / len(shipments) <= 0.18
+
+
+def test_seed_small_orders_are_recent_and_under_threshold(session: Session) -> None:
+    seed(session)
+
+    small = session.scalars(select(Order).order_by(Order.id).offset(N_ORDERS)).all()
+    assert len(small) == N_SMALL_ORDERS
+    for order in small:
+        assert order.status == OrderStatus.DELIVERED
+        assert order.total_cents <= APPROVAL_THRESHOLD_CENTS
+        assert order.shipment is not None and order.shipment.delivered_at is not None
+        assert SIMULATION_NOW - order.shipment.delivered_at <= REFUND_WINDOW

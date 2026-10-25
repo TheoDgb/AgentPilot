@@ -13,7 +13,17 @@ from sqlalchemy.orm import Session
 
 from shopsim.app.db import Base, get_session
 from shopsim.app.main import app
-from shopsim.app.models import Customer, Order, OrderStatus, Payment, PaymentStatus
+from shopsim.app.models import (
+    Customer,
+    MessageAuthor,
+    Order,
+    OrderStatus,
+    Payment,
+    PaymentStatus,
+    Ticket,
+    TicketMessage,
+    TicketStatus,
+)
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql+psycopg://shopsim:shopsim@localhost:5433/shopsim_test"
@@ -70,26 +80,40 @@ def client(session: Session) -> Iterator[TestClient]:
     app.dependency_overrides.clear()
 
 
+MakeCustomer = Callable[..., Customer]
 MakeOrder = Callable[..., Order]
 MakePayment = Callable[..., Payment]
+MakeTicket = Callable[..., Ticket]
 
 
 @pytest.fixture
-def make_order(session: Session) -> MakeOrder:
-    """Crée un client et une de ses commandes."""
+def make_customer(session: Session) -> MakeCustomer:
+    def _make(created_at: datetime = datetime(2026, 1, 15, tzinfo=UTC)) -> Customer:
+        customer = Customer(
+            email=f"client.{next(_unique)}@example.com",
+            first_name="Test",
+            last_name="Client",
+            created_at=created_at,
+        )
+        session.add(customer)
+        session.flush()
+        return customer
+
+    return _make
+
+
+@pytest.fixture
+def make_order(session: Session, make_customer: MakeCustomer) -> MakeOrder:
+    """Crée une commande, pour un nouveau client si aucun n'est donné."""
 
     def _make(
         status: OrderStatus = OrderStatus.PAID,
         total_cents: int = 10_000,
         created_at: datetime = datetime(2026, 3, 1, tzinfo=UTC),
+        customer: Customer | None = None,
     ) -> Order:
-        n = next(_unique)
-        customer = Customer(
-            email=f"client.{n}@example.com",
-            first_name="Test",
-            last_name="Client",
-            created_at=created_at,
-        )
+        if customer is None:
+            customer = make_customer(created_at)
         order = Order(
             customer=customer,
             status=status,
@@ -118,5 +142,36 @@ def make_payment(session: Session, make_order: MakeOrder) -> MakePayment:
         session.add(payment)
         session.flush()
         return payment
+
+    return _make
+
+
+@pytest.fixture
+def make_ticket(session: Session) -> MakeTicket:
+    """Crée un ticket ; sans messages donnés, un seul message du client à sa création."""
+
+    def _make(
+        customer: Customer,
+        order: Order | None = None,
+        status: TicketStatus = TicketStatus.OPEN,
+        created_at: datetime = datetime(2026, 7, 5, 9, 0, tzinfo=UTC),
+        messages: list[tuple[MessageAuthor, str, datetime]] | None = None,
+    ) -> Ticket:
+        if messages is None:
+            messages = [(MessageAuthor.CUSTOMER, "Bonjour, une question.", created_at)]
+        ticket = Ticket(
+            customer=customer,
+            order=order,
+            subject="Question",
+            status=status,
+            created_at=created_at,
+            messages=[
+                TicketMessage(author=author, body=body, created_at=at)
+                for author, body, at in messages
+            ],
+        )
+        session.add(ticket)
+        session.flush()
+        return ticket
 
     return _make
