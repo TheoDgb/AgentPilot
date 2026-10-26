@@ -4,11 +4,15 @@ Même isolement que `run_support.py` (CLI) :
 - aucun réglage du disque (`setting_sources=[]`), aucune skill ni plugin, aucun CLAUDE.md :
   la consigne et la politique sont passées dans `system_prompt`, qui remplace celle de
   Claude Code ;
-- aucun outil intégré (`tools=[]`, plus une liste d'interdits) : seuls les 8 outils de
-  lecture du serveur MCP shopsim, en lecture seule forcée ;
+- aucun outil intégré (`tools=[]`, plus une liste d'interdits) : seuls les outils du serveur
+  MCP shopsim ;
 - dossier de travail et configuration de Claude Code vides et temporaires ;
 - la liste des outils réellement disponibles est vérifiée à l'initialisation, avant toute
   décision.
+
+Contrairement à la CLI, l'agent a les outils d'action (8 de lecture + 5 d'action), toujours
+sous les hooks de `agentpilot/hooks.py` : validation humaine des actions sensibles et
+journal de chaque appel. Sans hooks, le lancement est refusé.
 
 Une exécution ne lève pas d'exception pour un échec de l'agent : `AgentResult.error` le dit,
 avec ce qui a été mesuré jusque-là (coût, outils appelés), pour être enregistré tel quel.
@@ -18,7 +22,7 @@ import asyncio
 import os
 import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -29,21 +33,19 @@ from claude_agent_sdk import (
     ClaudeSDKError,
     ResultMessage,
     SystemMessage,
-    ToolResultBlock,
-    ToolUseBlock,
-    UserMessage,
 )
 from claude_agent_sdk import query as sdk_query
 from pydantic import BaseModel
 
 from agentpilot import support_agent
+from agentpilot.hooks import SupportHooks
+from agentpilot.journal import Journal
 from agentpilot.schemas import ContextCheck, SupportDecision
 from agentpilot.support_agent import (
     CHECK_PROMPT,
     DEFAULT_SHOPSIM_URL,
     MCP_SERVER,
-    READ_TOOL_NAMES,
-    STRUCTURED_OUTPUT_TOOL,
+    SUPPORT_TOOL_NAMES,
     AgentRunError,
 )
 
@@ -89,7 +91,6 @@ class AgentResult:
     duration_ms: int | None = None
     num_turns: int | None = None
     available_tools: list[str] | None = None
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
 def build_options(
@@ -100,6 +101,7 @@ def build_options(
     shopsim_url: str,
     workdir: Path,
     model: str,
+    hooks: SupportHooks,
 ) -> ClaudeAgentOptions:
     cwd = workdir / "cwd"
     config_dir = workdir / "claude-config"
@@ -112,11 +114,13 @@ def build_options(
         skills=[],
         plugins=[],
         strict_mcp_config=True,
-        mcp_servers={MCP_SERVER: support_agent.mcp_server_config(shopsim_url)},
+        mcp_servers={MCP_SERVER: support_agent.mcp_server_config(shopsim_url, actions=True)},
         tools=[],
-        allowed_tools=sorted(READ_TOOL_NAMES),
+        allowed_tools=sorted(SUPPORT_TOOL_NAMES),
         disallowed_tools=BUILTIN_TOOLS,
         permission_mode="dontAsk",
+        # Avant chaque outil : validation des actions ; après : journal
+        hooks=hooks.matchers(),
         output_format={"type": "json_schema", "schema": schema.model_json_schema()},
         model=model,
         max_turns=MAX_TURNS,
@@ -128,7 +132,6 @@ def build_options(
             # Ni ~/.claude.json ni la mémoire automatique de l'utilisateur
             "CLAUDE_CONFIG_DIR": str(config_dir),
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
-            "SHOPSIM_MCP_ACTIONS": "0",
         },
     )
 
@@ -147,28 +150,20 @@ def _record_final(result: AgentResult, final: ResultMessage) -> None:
 
 
 async def _collect(messages: AsyncIterator[Any], result: AgentResult) -> None:
-    """Parcourt les messages : contrôle des outils à l'initialisation, outils appelés,
-    résultat final."""
-    calls: dict[str, dict[str, Any]] = {}
+    """Parcourt les messages : contrôle des outils à l'initialisation, résultat final.
+    Les appels d'outils sont journalisés par les hooks."""
     finished = False
     async for message in messages:
         if isinstance(message, SystemMessage) and message.subtype == "init":
             result.model = message.data.get("model")
             result.available_tools = support_agent.check_tools(
-                message.data.get("tools", []), message.data.get("mcp_servers", [])
+                message.data.get("tools", []),
+                message.data.get("mcp_servers", []),
+                SUPPORT_TOOL_NAMES,
             )
         elif isinstance(message, AssistantMessage):
             if result.available_tools is None:
                 raise AgentRunError("L'agent a répondu avant l'initialisation")
-            for block in message.content:
-                if isinstance(block, ToolUseBlock) and block.name != STRUCTURED_OUTPUT_TOOL:
-                    call = {"name": block.name, "input": block.input, "is_error": None}
-                    calls[block.id] = call
-                    result.tool_calls.append(call)
-        elif isinstance(message, UserMessage) and isinstance(message.content, list):
-            for block in message.content:
-                if isinstance(block, ToolResultBlock) and block.tool_use_id in calls:
-                    calls[block.tool_use_id]["is_error"] = bool(block.is_error)
         elif isinstance(message, ResultMessage):
             _record_final(result, message)
             finished = True
@@ -183,6 +178,7 @@ async def run_agent(
     schema: type[BaseModel],
     today: date,
     *,
+    hooks: SupportHooks | None,
     environ: Mapping[str, str] = os.environ,
     query: QueryFn = sdk_query,
     model: str = DEFAULT_MODEL,
@@ -190,6 +186,9 @@ async def run_agent(
 ) -> AgentResult:
     """Lance l'agent ; renvoie la sortie structurée brute (non validée) ou l'erreur."""
     result = AgentResult(simulation_date=today)
+    if hooks is None:
+        result.error = "Outils d'action sans hooks de validation : lancement refusé"
+        return result
     try:
         api_key = support_agent.load_api_key(environ)
         shopsim_url = environ.get("SHOPSIM_URL", DEFAULT_SHOPSIM_URL)
@@ -201,6 +200,7 @@ async def run_agent(
                 shopsim_url=shopsim_url,
                 workdir=Path(workdir),
                 model=model,
+                hooks=hooks,
             )
             async with asyncio.timeout(timeout_s):
                 await _collect(query(prompt=prompt, options=options), result)
@@ -224,6 +224,7 @@ async def _today(environ: Mapping[str, str]) -> date:
 async def decide_ticket(
     ticket_id: int,
     *,
+    journal: Journal,
     environ: Mapping[str, str] = os.environ,
     query: QueryFn = sdk_query,
     model: str = DEFAULT_MODEL,
@@ -237,6 +238,7 @@ async def decide_ticket(
         support_agent.ticket_prompt(ticket_id),
         SupportDecision,
         today,
+        hooks=SupportHooks(ticket_id, journal),
         environ=environ,
         query=query,
         model=model,
@@ -254,17 +256,25 @@ async def decide_ticket(
 
 async def check_context(
     *,
+    journal: Journal,
     environ: Mapping[str, str] = os.environ,
     query: QueryFn = sdk_query,
     model: str = DEFAULT_MODEL,
 ) -> AgentResult:
-    """Preuve d'isolement : consigne, politique et date reçues, rien du CLAUDE.md développeur."""
+    """Preuve d'isolement : consigne, politique et date reçues, rien du CLAUDE.md développeur.
+    Sans ticket : les hooks refusent toute action."""
     try:
         today = await _today(environ)
     except AgentRunError as exc:
         return AgentResult(error=str(exc))
     result = await run_agent(
-        CHECK_PROMPT, ContextCheck, today, environ=environ, query=query, model=model
+        CHECK_PROMPT,
+        ContextCheck,
+        today,
+        hooks=SupportHooks(None, journal),
+        environ=environ,
+        query=query,
+        model=model,
     )
     if result.error is None:
         try:

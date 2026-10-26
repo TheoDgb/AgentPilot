@@ -25,7 +25,11 @@ class UsedFact(BaseModel):
 
 
 class SupportDecision(BaseModel):
-    """Décision de l'agent Support sur un ticket, sans action réelle."""
+    """Décision de l'agent Support sur un ticket : son compte rendu.
+
+    Ce qui a réellement été fait est dans le journal des appels d'outils et les actions en
+    attente (service AgentPilot) ; la CLI, en lecture seule, n'agit pas.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -38,7 +42,7 @@ class SupportDecision(BaseModel):
     )
     # Mêmes limites que POST /tickets/{id}/reply et /escalate de ShopSim
     customer_reply: str = Field(
-        min_length=1, max_length=5000, description="Brouillon de réponse au client"
+        min_length=1, max_length=5000, description="Réponse envoyée (ou proposée) au client"
     )
     escalation_reason: str | None = Field(
         default=None, min_length=1, max_length=500, description="Pour escalate seulement"

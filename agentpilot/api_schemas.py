@@ -7,12 +7,43 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from agentpilot.models import AgentKind, RunStatus
+from agentpilot.models import AgentKind, CallOutcome, PendingStatus, RunStatus
 
 
 class RunCreated(BaseModel):
     id: uuid.UUID
     status: RunStatus
+
+
+class ToolCallRead(BaseModel):
+    """Appel d'outil inscrit au journal par les hooks."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    seq: int
+    tool: str
+    input: dict[str, Any]
+    outcome: CallOutcome
+    response: Any
+    error: str | None
+    duration_ms: int | None
+    pending_action_id: uuid.UUID | None
+
+
+class PendingActionRead(BaseModel):
+    """Action sensible arrêtée par le hook, en attente d'un humain."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    ticket_id: int
+    tool: str
+    params: dict[str, Any]
+    reasons: list[str]
+    facts: dict[str, Any]
+    idempotency_key: str
+    status: PendingStatus
+    created_at: datetime
 
 
 class RunRead(BaseModel):
@@ -32,6 +63,7 @@ class RunRead(BaseModel):
     num_turns: int | None
     session_id: str | None
     available_tools: list[str] | None
-    tool_calls: list[dict[str, Any]]
+    tool_calls: list[ToolCallRead]
+    pending_actions: list[PendingActionRead]
     created_at: datetime
     finished_at: datetime | None

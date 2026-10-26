@@ -15,10 +15,10 @@ from agentpilot.support_agent import expected_context
 from agentpilot.tests.conftest import (
     TODAY,
     FakeQuery,
+    HookDrivingQuery,
+    call,
     init_message,
     result_message,
-    tool_result,
-    tool_use,
 )
 from shopsim.app.db import Base as ShopSimBase
 
@@ -49,14 +49,13 @@ def use_query(fake: FakeQuery) -> FakeQuery:
     return fake
 
 
+async def fake_tool(name: str, arguments: dict[str, object]) -> dict[str, object]:
+    return {"order_id": 60, "status": "delivered"}
+
+
 def test_support_run_is_recorded(client: TestClient) -> None:
     use_query(
-        FakeQuery(
-            init_message(),
-            tool_use("t1", "mcp__shopsim__get_shipment", order_id=60),
-            tool_result("t1"),
-            result_message(DECISION),
-        )
+        HookDrivingQuery(call("get_shipment", order_id=60), output=DECISION, executor=fake_tool)
     )
 
     created = client.post("/runs/support/21")
@@ -73,10 +72,21 @@ def test_support_run_is_recorded(client: TestClient) -> None:
     assert run["model"] == "claude-sonnet-5-5"
     assert float(run["total_cost_usd"]) == 0.0217
     assert (run["duration_ms"], run["num_turns"]) == (8_000, 4)
-    assert len(run["available_tools"]) == 9
+    assert len(run["available_tools"]) == 14
+    # Journal écrit par les hooks
     assert run["tool_calls"] == [
-        {"name": "mcp__shopsim__get_shipment", "input": {"order_id": 60}, "is_error": False}
+        {
+            "seq": 1,
+            "tool": "mcp__shopsim__get_shipment",
+            "input": {"order_id": 60},
+            "outcome": "succeeded",
+            "response": {"order_id": 60, "status": "delivered"},
+            "error": None,
+            "duration_ms": 5,
+            "pending_action_id": None,
+        }
     ]
+    assert run["pending_actions"] == []
     assert run["finished_at"] is not None
 
 
@@ -144,7 +154,6 @@ def test_running_runs_are_interrupted_at_startup(
                 agent=AgentKind.SUPPORT,
                 ticket_id=21,
                 status=RunStatus.RUNNING,
-                tool_calls=[],
                 created_at=datetime.now(UTC),
             )
         )

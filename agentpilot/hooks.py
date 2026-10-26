@@ -1,0 +1,184 @@
+"""Hooks de l'agent Support : validation humaine des actions sensibles et journal des appels.
+
+- `PreToolUse` : une action passe, est refusée, ou est mise en attente d'un humain selon
+  `agentpilot/approval.py`. Un refus ou une mise en attente renvoie `deny` à l'agent, avec un
+  message clair ; l'appel n'atteint jamais ShopSim.
+- `PostToolUse` / `PostToolUseFailure` : chaque appel exécuté est inscrit au journal.
+
+Pour laisser passer, le hook ne renvoie rien (`{}`), jamais `allow` : un `allow` de hook
+court-circuiterait les règles de permission (`dontAsk`, `allowed_tools`), qui restent la
+seule porte d'entrée des outils.
+"""
+
+import asyncio
+import itertools
+import json
+from collections.abc import Mapping
+from typing import Any
+
+from claude_agent_sdk import HookContext, HookMatcher
+from claude_agent_sdk.types import HookEvent, HookInput, HookJSONOutput
+
+from agentpilot import approval
+from agentpilot.approval import Kind
+from agentpilot.journal import CallEntry, Journal, PendingEntry
+from agentpilot.models import CallOutcome
+from agentpilot.support_agent import ACTION_TOOL_NAMES, READ_TOOL_NAMES, STRUCTURED_OUTPUT_TOOL
+from mcp_server.shopsim_client import ShopSimError
+
+# Réponse d'outil gardée au journal (au-delà : texte tronqué)
+MAX_RESPONSE_CHARS = 4_000
+# Délai des hooks : les lectures dans ShopSim peuvent subir une panne de latence
+HOOK_TIMEOUT_S = 60
+
+
+def _deny(message: str) -> HookJSONOutput:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": message,
+        }
+    }
+
+
+def clip(response: Any) -> Any:  # noqa: ANN401
+    """Réponse sérialisable en JSON, tronquée si elle est longue.
+
+    Claude Code transmet la réponse d'un outil MCP sous forme de texte JSON : on la décode
+    pour qu'elle soit lisible et interrogeable en base. Un texte qui n'est pas du JSON reste
+    tel quel.
+    """
+    if isinstance(response, str):
+        try:
+            response = json.loads(response)
+        except json.JSONDecodeError:
+            pass
+    text = json.dumps(response, ensure_ascii=False, default=str)
+    if len(text) <= MAX_RESPONSE_CHARS:
+        return json.loads(text)
+    return {"truncated": text[:MAX_RESPONSE_CHARS]}
+
+
+class SupportHooks:
+    """Hooks d'une exécution : ticket traité et journal propres à cette exécution."""
+
+    def __init__(self, ticket_id: int | None, journal: Journal) -> None:
+        self.ticket_id = ticket_id
+        self.journal = journal
+        self._seq = itertools.count(1)
+
+    async def _record(self, entry_fields: Mapping[str, Any]) -> None:
+        # Numéro attribué dans la boucle : l'ordre des appels est gardé
+        entry = CallEntry(seq=next(self._seq), **entry_fields)
+        await asyncio.to_thread(self.journal.record_call, entry)
+
+    async def _refuse(
+        self, name: str, tool_input: dict[str, Any], tool_use_id: str | None, message: str
+    ) -> HookJSONOutput:
+        await self._record(
+            {
+                "tool_use_id": tool_use_id,
+                "tool": name,
+                "input": tool_input,
+                "outcome": CallOutcome.DENIED,
+                "error": message,
+            }
+        )
+        return _deny(message)
+
+    async def pre_tool_use(
+        self, data: HookInput, tool_use_id: str | None, context: HookContext
+    ) -> HookJSONOutput:
+        name: str = data["tool_name"]  # type: ignore[typeddict-item]
+        tool_input: dict[str, Any] = data["tool_input"]  # type: ignore[typeddict-item]
+        tool_use_id = tool_use_id or data.get("tool_use_id")  # type: ignore[assignment]
+        if name in READ_TOOL_NAMES or name == STRUCTURED_OUTPUT_TOOL:
+            return {}
+        if name not in ACTION_TOOL_NAMES:
+            # Défense en profondeur : les permissions l'empêchent déjà
+            return await self._refuse(name, tool_input, tool_use_id, f"Outil {name} interdit.")
+
+        tool = approval.short_name(name)
+        facts: approval.OrderFacts | None = None
+        verdict = approval.check_ticket(tool, tool_input, self.ticket_id)
+        if verdict.kind is Kind.ALLOW:
+            try:
+                if tool in approval.GATED:
+                    facts = await approval.gather_facts(tool, tool_input)
+                pending = (
+                    await asyncio.to_thread(self.journal.has_pending, self.ticket_id)
+                    if tool == approval.RESOLVE and self.ticket_id is not None
+                    else False
+                )
+            except (ShopSimError, ValueError) as exc:
+                # On ferme : sans faits vérifiés, rien n'est exécuté ni mis en attente
+                return await self._refuse(
+                    name, tool_input, tool_use_id, approval.unverifiable_message(exc)
+                )
+            verdict = approval.evaluate(
+                tool,
+                tool_input,
+                run_ticket_id=self.ticket_id,
+                facts=facts,
+                pending_on_ticket=pending,
+            )
+
+        if verdict.kind is Kind.ALLOW:
+            return {}
+        if verdict.kind is Kind.DENY:
+            return await self._refuse(name, tool_input, tool_use_id, verdict.message)
+
+        # Mise en attente : de quoi exécuter l'action plus tard, avec la même clé
+        assert facts is not None and self.ticket_id is not None
+        pending_id, created = await asyncio.to_thread(
+            self.journal.hold,
+            PendingEntry(
+                ticket_id=self.ticket_id,
+                tool=tool,
+                params=dict(tool_input),
+                reasons=[str(r) for r in verdict.reasons],
+                facts=facts.record() | {"value_cents": verdict.value_cents},
+                idempotency_key=approval.idempotency_key(tool, tool_input),
+            ),
+        )
+        message = approval.hold_message(verdict, already_pending=not created)
+        await self._record(
+            {
+                "tool_use_id": tool_use_id,
+                "tool": name,
+                "input": tool_input,
+                "outcome": CallOutcome.HELD,
+                "error": message,
+                "pending_action_id": pending_id,
+            }
+        )
+        return _deny(message)
+
+    async def post_tool_use(
+        self, data: HookInput, tool_use_id: str | None, context: HookContext
+    ) -> HookJSONOutput:
+        name: str = data["tool_name"]  # type: ignore[typeddict-item]
+        if name == STRUCTURED_OUTPUT_TOOL:
+            return {}
+        failed = data["hook_event_name"] == "PostToolUseFailure"
+        await self._record(
+            {
+                "tool_use_id": tool_use_id or data.get("tool_use_id"),
+                "tool": name,
+                "input": data["tool_input"],  # type: ignore[typeddict-item]
+                "outcome": CallOutcome.FAILED if failed else CallOutcome.SUCCEEDED,
+                "response": None if failed else clip(data.get("tool_response")),
+                "error": data.get("error") if failed else None,
+                "duration_ms": data.get("duration_ms"),
+            }
+        )
+        return {}
+
+    def matchers(self) -> dict[HookEvent, list[HookMatcher]]:
+        """Pour `ClaudeAgentOptions.hooks` : tous les outils passent par ces hooks."""
+        return {
+            "PreToolUse": [HookMatcher(hooks=[self.pre_tool_use], timeout=HOOK_TIMEOUT_S)],
+            "PostToolUse": [HookMatcher(hooks=[self.post_tool_use], timeout=HOOK_TIMEOUT_S)],
+            "PostToolUseFailure": [HookMatcher(hooks=[self.post_tool_use], timeout=HOOK_TIMEOUT_S)],
+        }

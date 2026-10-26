@@ -24,7 +24,8 @@ from agentpilot.support_agent import (
 TODAY = date(2026, 7, 6)
 
 # Liste réelle observée avec claude 2.1.310 : `StructuredOutput` vient de --json-schema
-SHOPSIM_TOOLS = ["StructuredOutput", "mcp__shopsim__get_ticket", "mcp__shopsim__get_order"]
+# La CLI reste en lecture seule : exactement les 8 outils de lecture
+SHOPSIM_TOOLS = ["StructuredOutput", *sorted(support_agent.READ_TOOL_NAMES)]
 DECISION = {
     "ticket_id": 36,
     "category": "trap_other_customer_order",
@@ -189,8 +190,8 @@ def test_decision_is_validated_and_saved(monkeypatch: pytest.MonkeyPatch, tmp_pa
     [
         ((init_event(SHOPSIM_TOOLS + ["Bash", "WebFetch"]), result_event()), "Bash, WebFetch"),
         ((init_event(status="failed"), result_event()), "non connecté (failed)"),
-        ((init_event([]), result_event()), "aucun outil shopsim"),
-        ((init_event(["StructuredOutput"]), result_event()), "aucun outil shopsim"),
+        ((init_event([]), result_event()), "Outils shopsim manquants"),
+        ((init_event(["StructuredOutput"]), result_event()), "Outils shopsim manquants"),
         ((init_event(SHOPSIM_TOOLS + ["Skill"]), result_event()), "interdits : Skill"),
         (
             (init_event(SHOPSIM_TOOLS + ["mcp__shopsim__refund_order"]), result_event()),

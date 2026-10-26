@@ -1,4 +1,5 @@
-"""Exécutions d'agents enregistrées par AgentPilot (schéma `agentpilot`)."""
+"""Exécutions d'agents enregistrées par AgentPilot (schéma `agentpilot`) : exécutions,
+journal des appels d'outils et actions en attente de validation humaine."""
 
 import uuid
 from datetime import date, datetime
@@ -6,9 +7,9 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import Date, DateTime, Enum, Numeric, String, Text
+from sqlalchemy import Date, DateTime, Enum, ForeignKey, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agentpilot.db import SCHEMA, Base
 
@@ -25,6 +26,23 @@ class AgentKind(StrEnum):
     SUPPORT = "support"
     # Vérification de l'isolement de l'agent Support (consigne, politique, outils)
     SUPPORT_CHECK = "support_check"
+
+
+class CallOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    # Refusé par le hook et mis en attente de validation humaine
+    HELD = "held"
+    # Refusé par le hook (autre ticket, autre client, vérification impossible)
+    DENIED = "denied"
+
+
+class PendingStatus(StrEnum):
+    PENDING = "pending"
+    # Décision humaine et exécution : J3.4
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXECUTED = "executed"
 
 
 def _enum(enum: type[StrEnum], name: str) -> Enum:
@@ -48,9 +66,64 @@ class Run(Base):
     duration_ms: Mapped[int | None]
     num_turns: Mapped[int | None]
     session_id: Mapped[str | None] = mapped_column(String(100))
-    # Outils réellement disponibles (événement d'initialisation) et outils appelés, dans l'ordre
+    # Outils réellement disponibles (événement d'initialisation)
     available_tools: Mapped[list[str] | None] = mapped_column(JSONB)
-    tool_calls: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
     # Heure réelle : horloge de la plateforme, pas celle de la simulation
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    tool_calls: Mapped[list["ToolCall"]] = relationship(
+        order_by="ToolCall.seq", viewonly=True, lazy="selectin"
+    )
+    pending_actions: Mapped[list["PendingAction"]] = relationship(
+        order_by="PendingAction.created_at", viewonly=True, lazy="selectin"
+    )
+
+
+class PendingAction(Base):
+    """Action sensible arrêtée par le hook, en attente d'un humain.
+
+    De quoi l'exécuter plus tard (J3.4) à l'identique : l'outil, les paramètres exacts de
+    l'agent et la clé d'idempotence que le serveur MCP aurait envoyée à ShopSim.
+    """
+
+    __tablename__ = "pending_actions"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey(f"{SCHEMA}.runs.id"), index=True)
+    ticket_id: Mapped[int] = mapped_column(index=True)
+    # Nom court de l'outil MCP : refund_order ou resend_order
+    tool: Mapped[str] = mapped_column(String(100))
+    params: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    # Raisons de la mise en attente : over_threshold, risky_customer
+    reasons: Mapped[list[str]] = mapped_column(JSONB)
+    # Ce que le hook a lu lui-même dans ShopSim pour décider
+    facts: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    idempotency_key: Mapped[str] = mapped_column(String(200), unique=True)
+    status: Mapped[PendingStatus] = mapped_column(
+        _enum(PendingStatus, "pending_status"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ToolCall(Base):
+    """Journal de l'exécution : un appel d'outil, écrit dès qu'il a eu lieu."""
+
+    __tablename__ = "tool_calls"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey(f"{SCHEMA}.runs.id"), index=True)
+    # Ordre des appels dans l'exécution
+    seq: Mapped[int]
+    tool_use_id: Mapped[str | None] = mapped_column(String(100))
+    tool: Mapped[str] = mapped_column(String(200))
+    input: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    outcome: Mapped[CallOutcome] = mapped_column(_enum(CallOutcome, "call_outcome"))
+    # Réponse de l'outil, tronquée ; message du hook ou de l'outil en cas de refus ou d'échec
+    response: Mapped[Any] = mapped_column(JSONB, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text)
+    duration_ms: Mapped[int | None]
+    pending_action_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(f"{SCHEMA}.pending_actions.id")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

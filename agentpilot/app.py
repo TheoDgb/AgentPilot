@@ -2,8 +2,10 @@
 
 Lancement (local) : `.venv/bin/uvicorn agentpilot.app:app --port 8001`.
 
-- `POST /runs/support/{ticket_id}` lance l'agent Support en tâche de fond (202) ;
-- `GET /runs/{id}` et `GET /runs` renvoient les exécutions enregistrées ;
+- `POST /runs/support/{ticket_id}` lance l'agent Support en tâche de fond (202), avec les
+  outils d'action sous hooks : les actions sensibles sont mises en attente d'un humain ;
+- `GET /runs/{id}` et `GET /runs` renvoient les exécutions enregistrées, avec leur journal
+  d'appels d'outils et leurs actions en attente ;
 - `POST /checks/support` vérifie l'isolement de l'agent (consigne, politique, outils).
 """
 
@@ -22,6 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from agentpilot import sdk_runner
 from agentpilot.api_schemas import RunCreated, RunRead
 from agentpilot.db import SessionLocal, engine, init_db
+from agentpilot.journal import DbJournal
 from agentpilot.models import AgentKind, Run, RunStatus
 from agentpilot.sdk_runner import AgentResult
 
@@ -69,7 +72,6 @@ def _new_run(session: Session, agent: AgentKind, ticket_id: int | None) -> Run:
         agent=agent,
         ticket_id=ticket_id,
         status=RunStatus.RUNNING,
-        tool_calls=[],
         created_at=datetime.now(UTC),
     )
     session.add(run)
@@ -90,7 +92,6 @@ def _finish(session: Session, run: Run, result: AgentResult) -> None:
     run.num_turns = result.num_turns
     run.session_id = result.session_id
     run.available_tools = result.available_tools
-    run.tool_calls = result.tool_calls
     run.finished_at = datetime.now(UTC)
     session.commit()
 
@@ -115,11 +116,13 @@ def start_support_run(
 ) -> RunCreated:
     run = _new_run(session, AgentKind.SUPPORT, ticket_id)
     query = request.app.state.query
+    factory = request.app.state.session_factory
+    journal = DbJournal(factory, run.id)
     background.add_task(
         _execute,
-        request.app.state.session_factory,
+        factory,
         run.id,
-        lambda: sdk_runner.decide_ticket(ticket_id, query=query),
+        lambda: sdk_runner.decide_ticket(ticket_id, journal=journal, query=query),
     )
     return RunCreated(id=run.id, status=run.status)
 
@@ -129,13 +132,11 @@ async def check_support(request: Request, session: SessionDep) -> Run:
     """Vérification d'isolement, exécutée tout de suite (courte) et enregistrée."""
     run = _new_run(session, AgentKind.SUPPORT_CHECK, None)
     query = request.app.state.query
-    await _execute(
-        request.app.state.session_factory,
-        run.id,
-        lambda: sdk_runner.check_context(query=query),
-    )
-    session.refresh(run)
-    return run
+    factory = request.app.state.session_factory
+    journal = DbJournal(factory, run.id)
+    await _execute(factory, run.id, lambda: sdk_runner.check_context(journal=journal, query=query))
+    session.expire_all()
+    return session.get_one(Run, run.id)
 
 
 @app.get("/runs/{run_id}", response_model=RunRead)

@@ -1,7 +1,8 @@
 """Agent Support : ce qui est commun à tous ses lancements (CLI `claude -p` et Agent SDK).
 
-Consigne assemblée, configuration MCP en lecture seule, contrôle des outils réellement
-disponibles, validation de la décision et vérification de la consigne reçue (`--check`).
+Consigne assemblée, configuration MCP (lecture seule pour la CLI, actions pour le service
+sous hooks), contrôle des outils réellement disponibles, validation de la décision et
+vérification de la consigne reçue (`--check`).
 """
 
 from collections.abc import Iterable, Mapping
@@ -14,6 +15,7 @@ from pydantic import ValidationError
 
 from agentpilot.schemas import ContextCheck, SupportDecision
 from evals.policy import APPROVAL_THRESHOLD_CENTS, REFUND_WINDOW, RISK_MIN_REFUNDS, RISK_WINDOW
+from mcp_server.action_tools import ACTION_TOOLS
 from mcp_server.read_tools import READ_TOOLS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -27,8 +29,11 @@ SIGNATURE = "Le service client Lumen"
 MCP_SERVER = "shopsim"
 # Outil interne ajouté par la sortie structurée : l'agent l'appelle pour rendre sa décision
 STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
-# Seuls outils MCP autorisés : la lecture. Un outil d'action fait échouer le lancement.
+# Outils MCP : la lecture pour tous les lancements ; les actions pour le service seulement,
+# toujours sous les hooks de validation (`agentpilot/hooks.py`)
 READ_TOOL_NAMES = frozenset(f"mcp__{MCP_SERVER}__{tool.__name__}" for tool in READ_TOOLS)
+ACTION_TOOL_NAMES = frozenset(f"mcp__{MCP_SERVER}__{tool.__name__}" for tool in ACTION_TOOLS)
+SUPPORT_TOOL_NAMES = READ_TOOL_NAMES | ACTION_TOOL_NAMES
 
 # Informations qui n'existent que dans le CLAUDE.md développeur : l'agent ne doit pas les
 # connaître (sinon ce fichier lui a été chargé). Un test vérifie qu'elles y sont toujours.
@@ -100,8 +105,9 @@ def simulation_today(shopsim_url: str) -> date:
 # --- Configuration -----------------------------------------------------------------------
 
 
-def mcp_server_config(shopsim_url: str) -> dict[str, Any]:
-    """Serveur MCP shopsim en chemins absolus, lecture seule forcée."""
+def mcp_server_config(shopsim_url: str, actions: bool = False) -> dict[str, Any]:
+    """Serveur MCP shopsim en chemins absolus ; lecture seule sauf `actions` (service
+    AgentPilot, avec hooks)."""
     return {
         "type": "stdio",
         "command": str(REPO_ROOT / ".venv" / "bin" / "python"),
@@ -109,8 +115,8 @@ def mcp_server_config(shopsim_url: str) -> dict[str, Any]:
         "env": {
             "PYTHONPATH": str(REPO_ROOT),
             "SHOPSIM_URL": shopsim_url,
-            # Lecture seule forcée (J3.1) : aucun outil d'action pour cet agent
-            "SHOPSIM_MCP_ACTIONS": "0",
+            # Valeur exacte : « 1 » seulement si demandé, sinon lecture seule forcée
+            "SHOPSIM_MCP_ACTIONS": "1" if actions else "0",
         },
     }
 
@@ -132,19 +138,25 @@ def load_api_key(environ: Mapping[str, str], env_file: Path | None = None) -> st
 # --- Vérifications -----------------------------------------------------------------------
 
 
-def check_tools(tools: Iterable[str], mcp_servers: Iterable[Mapping[str, Any]]) -> list[str]:
-    """L'agent n'a que les outils de lecture shopsim (et la sortie structurée), et le serveur
-    MCP est bien connecté. À appliquer à l'événement d'initialisation, avant toute décision."""
+def check_tools(
+    tools: Iterable[str],
+    mcp_servers: Iterable[Mapping[str, Any]],
+    expected: frozenset[str] = READ_TOOL_NAMES,
+) -> list[str]:
+    """L'agent a exactement les outils shopsim attendus (et la sortie structurée), et le
+    serveur MCP est connecté. À appliquer à l'événement d'initialisation, avant toute
+    décision."""
     tools = [str(tool) for tool in tools]
-    forbidden = [t for t in tools if t not in READ_TOOL_NAMES and t != STRUCTURED_OUTPUT_TOOL]
+    forbidden = [t for t in tools if t not in expected and t != STRUCTURED_OUTPUT_TOOL]
     if forbidden:
         raise AgentRunError(f"L'agent a accès à des outils interdits : {', '.join(forbidden)}")
     servers = {s.get("name"): s.get("status") for s in mcp_servers}
     if servers.get(MCP_SERVER) != "connected":
         status = servers.get(MCP_SERVER, "absent")
         raise AgentRunError(f"Serveur MCP {MCP_SERVER} non connecté ({status})")
-    if not any(tool in READ_TOOL_NAMES for tool in tools):
-        raise AgentRunError("L'agent n'a aucun outil shopsim")
+    missing = sorted(expected - set(tools))
+    if missing:
+        raise AgentRunError(f"Outils shopsim manquants : {', '.join(missing)}")
     return tools
 
 

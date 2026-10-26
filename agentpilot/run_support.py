@@ -6,11 +6,12 @@ Usage :
 
 L'agent est isolé : `--bare` ignore le CLAUDE.md du dépôt, les hooks, plugins, skills et la
 mémoire ; sa consigne et sa politique lui sont passées explicitement ; il n'a que les outils
-en lecture du serveur MCP shopsim. Chaque sortie est vérifiée (outils réellement disponibles,
-schéma Pydantic) avant d'être enregistrée dans `runs/support/`.
+en lecture du serveur MCP shopsim. La CLI n'a pas les hooks de validation : elle reste donc
+en lecture seule et ne fait que proposer une décision. Chaque sortie est vérifiée (outils
+réellement disponibles, schéma Pydantic) avant d'être enregistrée dans `runs/support/`.
 
-Le service AgentPilot lance le même agent par l'Agent SDK (`agentpilot/sdk_runner.py`) ;
-le code commun est dans `agentpilot/support_agent.py`.
+Le service AgentPilot lance le même agent par l'Agent SDK (`agentpilot/sdk_runner.py`),
+avec les outils d'action sous hooks ; le code commun est dans `agentpilot/support_agent.py`.
 """
 
 import argparse

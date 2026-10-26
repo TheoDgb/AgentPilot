@@ -8,10 +8,12 @@ import pytest
 from claude_agent_sdk import CLINotFoundError, ProcessError
 
 from agentpilot import sdk_runner
-from agentpilot.sdk_runner import check_context, decide_ticket
+from agentpilot.hooks import SupportHooks
+from agentpilot.sdk_runner import check_context
 from agentpilot.support_agent import (
-    READ_TOOL_NAMES,
+    ACTION_TOOL_NAMES,
     REPO_ROOT,
+    SUPPORT_TOOL_NAMES,
     build_system_prompt,
     expected_context,
 )
@@ -20,6 +22,7 @@ from agentpilot.tests.conftest import (
     MODEL,
     TODAY,
     FakeQuery,
+    MemoryJournal,
     init_message,
     result_message,
     tool_result,
@@ -42,6 +45,10 @@ DECISION = {
     "customer_reply": "Bonjour, le délai de remboursement est dépassé.\n\nLe service client Lumen",
     "facts_used": [{"tool": "get_shipment", "field": "days_since_delivery", "value": 46}],
 }
+
+
+async def decide_ticket(ticket_id: int, **kwargs: Any) -> sdk_runner.AgentResult:  # noqa: ANN401
+    return await sdk_runner.decide_ticket(ticket_id, journal=MemoryJournal(), **kwargs)
 
 
 def happy_path(output: Any = DECISION) -> FakeQuery:  # noqa: ANN401
@@ -76,9 +83,17 @@ async def test_options_isolate_the_agent() -> None:
     # Consigne de l'agent seule (remplace celle de Claude Code), avec la date de l'horloge
     assert options.system_prompt == build_system_prompt(TODAY)
     assert "Aujourd'hui, nous sommes le 2026-07-06." in options.system_prompt
-    # Aucun outil intégré ; seuls les 8 outils de lecture sont autorisés
+    # Aucun outil intégré ; seuls les outils shopsim (8 de lecture, 5 d'action)
     assert options.tools == []
-    assert options.allowed_tools == sorted(READ_TOOL_NAMES)
+    assert options.allowed_tools == sorted(SUPPORT_TOOL_NAMES)
+    assert len(options.allowed_tools) == 13
+    # Les actions passent toujours par les hooks : avant (validation) et après (journal)
+    assert options.hooks is not None
+    assert set(options.hooks) == {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+    pre = options.hooks["PreToolUse"][0]
+    assert pre.matcher is None
+    assert isinstance(pre.hooks[0].__self__, SupportHooks)  # type: ignore[attr-defined]
+    assert pre.hooks[0].__self__.ticket_id == 21  # type: ignore[attr-defined]
     assert {"Bash", "Read", "WebFetch", "Agent", "Skill"} <= set(options.disallowed_tools)
     assert "StructuredOutput" not in options.disallowed_tools
     assert options.permission_mode == "dontAsk"
@@ -88,7 +103,7 @@ async def test_options_isolate_the_agent() -> None:
     assert options.max_budget_usd == sdk_runner.MAX_BUDGET_USD
 
 
-async def test_options_use_empty_temporary_dirs_and_read_only_mcp() -> None:
+async def test_options_use_empty_temporary_dirs_and_mcp_with_actions() -> None:
     fake = happy_path()
 
     await decide_ticket(21, environ=ENVIRON, query=fake)
@@ -104,9 +119,10 @@ async def test_options_use_empty_temporary_dirs_and_read_only_mcp() -> None:
     assert options.env["ANTHROPIC_API_KEY"] == "sk-ant-test"
     server = options.mcp_servers["shopsim"]  # type: ignore[index]
     assert server["command"] == str(REPO_ROOT / ".venv" / "bin" / "python")
-    assert server["env"]["SHOPSIM_MCP_ACTIONS"] == "0"
-    assert options.env["SHOPSIM_MCP_ACTIONS"] == "0"
-    # Aucun secret ni ouverture des actions transmis
+    # Actions ouvertes pour le serveur MCP de cet agent seulement (valeur exacte)
+    assert server["env"]["SHOPSIM_MCP_ACTIONS"] == "1"
+    assert "SHOPSIM_MCP_ACTIONS" not in options.env
+    # Aucun secret transmis
     everything = repr(options)
     assert "chaos-secret" not in everything
     assert "CHAOS_TOKEN" not in everything
@@ -115,7 +131,7 @@ async def test_options_use_empty_temporary_dirs_and_read_only_mcp() -> None:
 # --- Réussite --------------------------------------------------------------------------
 
 
-async def test_decision_is_validated_with_metrics_and_tool_calls() -> None:
+async def test_decision_is_validated_with_metrics() -> None:
     result = await decide_ticket(21, environ=ENVIRON, query=happy_path())
 
     assert result.error is None
@@ -126,11 +142,6 @@ async def test_decision_is_validated_with_metrics_and_tool_calls() -> None:
     assert (result.duration_ms, result.num_turns) == (8_000, 4)
     assert result.session_id == "session-test"
     assert result.available_tools == INIT_TOOLS
-    # Outils de l'agent dans l'ordre, sans l'outil interne de sortie structurée
-    assert result.tool_calls == [
-        {"name": "mcp__shopsim__get_ticket", "input": {"ticket_id": 21}, "is_error": False},
-        {"name": "mcp__shopsim__get_payment", "input": {"order_id": 999}, "is_error": True},
-    ]
 
 
 # --- Échecs : enregistrés avec ce qui a été mesuré -------------------------------------
@@ -141,8 +152,15 @@ async def test_decision_is_validated_with_metrics_and_tool_calls() -> None:
     [
         ((init_message([*INIT_TOOLS, "Bash"]), result_message(DECISION)), "interdits : Bash"),
         (
-            (init_message([*INIT_TOOLS, "mcp__shopsim__refund_order"]), result_message(DECISION)),
-            "interdits : mcp__shopsim__refund_order",
+            (init_message([*INIT_TOOLS, "mcp__shopsim__drop_orders"]), result_message(DECISION)),
+            "interdits : mcp__shopsim__drop_orders",
+        ),
+        (
+            (
+                init_message([t for t in INIT_TOOLS if t != "mcp__shopsim__refund_order"]),
+                result_message(DECISION),
+            ),
+            "manquants : mcp__shopsim__refund_order",
         ),
         ((init_message(status="failed"), result_message(DECISION)), "non connecté (failed)"),
         ((result_message(DECISION),), "sans événement d'initialisation"),
@@ -169,7 +187,7 @@ async def test_forbidden_tool_stops_the_run_before_any_decision() -> None:
     result = await decide_ticket(21, environ=ENVIRON, query=fake)
 
     assert "interdits : Bash" in (result.error or "")
-    assert result.tool_calls == []
+    assert result.output is None
 
 
 async def test_failed_result_keeps_its_cost() -> None:
@@ -202,7 +220,13 @@ async def test_timeout_is_readable(monkeypatch: pytest.MonkeyPatch) -> None:
             await asyncio.sleep(5)
 
     result = await sdk_runner.run_agent(
-        "x", sdk_runner.SupportDecision, TODAY, environ=ENVIRON, query=Slow(), timeout_s=0.05
+        "x",
+        sdk_runner.SupportDecision,
+        TODAY,
+        hooks=SupportHooks(21, MemoryJournal()),
+        environ=ENVIRON,
+        query=Slow(),
+        timeout_s=0.05,
     )
 
     assert result.error == "L'agent n'a pas répondu en 0.05 s"
@@ -235,7 +259,7 @@ async def test_check_passes_with_the_right_answers() -> None:
     answer = expected_context(TODAY).model_dump()
     fake = FakeQuery(init_message(), result_message(answer))
 
-    result = await check_context(environ=ENVIRON, query=fake)
+    result = await check_context(journal=MemoryJournal(), environ=ENVIRON, query=fake)
 
     assert result.error is None
     assert result.output == answer
@@ -254,7 +278,45 @@ async def test_check_fails_on_wrong_answers(changes: dict[str, Any], message: st
     answer = expected_context(TODAY).model_dump() | changes
 
     result = await check_context(
-        environ=ENVIRON, query=FakeQuery(init_message(), result_message(answer))
+        journal=MemoryJournal(),
+        environ=ENVIRON,
+        query=FakeQuery(init_message(), result_message(answer)),
     )
 
     assert message in (result.error or "")
+
+
+async def test_check_runs_without_ticket() -> None:
+    """Pendant la vérification, les hooks n'ont pas de ticket : toute action est refusée."""
+    fake = FakeQuery(init_message(), result_message(expected_context(TODAY).model_dump()))
+
+    await check_context(journal=MemoryJournal(), environ=ENVIRON, query=fake)
+
+    assert fake.options is not None and fake.options.hooks is not None
+    hooks = fake.options.hooks["PreToolUse"][0].hooks[0].__self__  # type: ignore[attr-defined]
+    assert hooks.ticket_id is None
+
+
+# --- Jamais d'action sans hooks --------------------------------------------------------
+
+
+async def test_actions_without_hooks_are_refused() -> None:
+    fake = happy_path()
+
+    result = await sdk_runner.run_agent(
+        "x", sdk_runner.SupportDecision, TODAY, hooks=None, environ=ENVIRON, query=fake
+    )
+
+    assert result.error == "Outils d'action sans hooks de validation : lancement refusé"
+    # L'agent n'a pas été lancé
+    assert fake.options is None
+
+
+def test_action_tools_are_the_mcp_action_tools() -> None:
+    assert ACTION_TOOL_NAMES == {
+        "mcp__shopsim__reply_to_ticket",
+        "mcp__shopsim__refund_order",
+        "mcp__shopsim__resend_order",
+        "mcp__shopsim__escalate_ticket",
+        "mcp__shopsim__resolve_ticket",
+    }
