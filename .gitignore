@@ -3,6 +3,8 @@
 /.venv/
 /RAPPELPERSO.md
 /agentpilot.egg-info/
+# Sorties des lancements d'agents
+/runs/
 __pycache__/
 *.py[cod]
 .claude/settings.local.json

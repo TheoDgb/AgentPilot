@@ -1,7 +1,8 @@
 """Règles métier du support Lumen : seule source des seuils et des délais.
 
-Le seed s'en sert pour calculer la vérité terrain. La skill `refund-policy` de
-l'agent Support devra reprendre ces mêmes règles (J2).
+Le seed s'en sert pour calculer la vérité terrain. La skill de l'agent Support
+(`agents/support/skills/refund-policy/SKILL.md`) reprend ces mêmes règles ; le test
+`agentpilot/tests/test_refund_policy_skill.py` vérifie que ses valeurs restent identiques.
 
 Produit défectueux : le renvoi n'est pas limité aux 30 jours du remboursement
 (garantie légale de conformité).

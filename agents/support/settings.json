@@ -1,1 +1,21 @@
-{}
+{
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "allow": ["mcp__shopsim__*"],
+    "deny": [
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
+      "Agent",
+      "Task",
+      "Skill",
+      "TodoWrite"
+    ]
+  }
+}
