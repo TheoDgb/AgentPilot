@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "shopsim": {
+      "command": ".venv/bin/python",
+      "args": ["-m", "mcp_server.server"],
+      "env": {
+        "SHOPSIM_URL": "http://localhost:8000"
+      }
+    }
+  }
+}

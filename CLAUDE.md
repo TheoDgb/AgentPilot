@@ -46,8 +46,9 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
   - `db_errors` : les lectures des commandes renvoient 500
   - `connection_saturation` : chaque requête attend 50 ms de plus que la précédente (plafond 5 s)
   - `bad_deploy` : seuls les remboursements échouent (500)
+- Serveur MCP (stdio, lancé par Claude Code via `.mcp.json`) : `.venv/bin/python -m mcp_server.server`. Variables `SHOPSIM_URL` (`http://localhost:8000` par défaut) et `SHOPSIM_TIMEOUT_S` (10 s par défaut)
 - Activer l'environnement : `source .venv/bin/activate`
-- Installer les dépendances : `uv pip install -e ".[dev]"` (venv créé avec uv, pas de pip)
+- Installer les dépendances : `uv pip install -e ".[dev,mcp]"` (venv créé avec uv, pas de pip ; l'extra `mcp` n'est pas installé dans l'image ShopSim)
 
 ## Stack et conventions
 
@@ -72,7 +73,7 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
 
 ## Avancement
 
-Jalon en cours : **J2 — MCP + agent headless** (J1 terminé : les API de ShopSim ne changent plus sans accord)
+Jalon en cours : **J2 — MCP + agent headless**
 
 - [x] J0 : dépôt, Python 3.12 (uv), pyproject, commande /test
 - [x] J1.1 : Docker Compose (PostgreSQL + FastAPI), Customer/Order, `GET /orders/{id}`, seed, premier test
@@ -81,5 +82,8 @@ Jalon en cours : **J2 — MCP + agent headless** (J1 terminé : les API de ShopS
 - [x] J1.4a : Clients et Tickets en lecture, ~60 tickets dans le seed, vérité terrain dans `evals/tickets.jsonl` (règles dans `evals/policy.py`)
 - [x] J1.4b : actions sur les tickets (répondre avec `Idempotency-Key`, escalader, résoudre ; rejouer une action déjà faite renvoie 200, répondre ou escalader un ticket résolu renvoie 409)
 - [x] J1.5 : endpoint Chaos (4 pannes, état en base, jeton `X-Chaos-Token`)
+- [x] J1 global : ShopSim terminé (commandes, paiements, livraisons, clients, tickets, 4 pannes Chaos, vérité terrain dans `evals/`). Ses API ne changent plus sans accord.
+- [x] J2.1 : serveur MCP en lecture seule (appelle l'API HTTP de ShopSim, `.mcp.json` à la racine, 8 outils, erreurs lisibles). Ajout validé à ShopSim après J1 : `GET /customers/{id}/refunds` (dates des remboursements, pour la règle « client à risque »)
+- [ ] J2.2 : agent Support en headless sur un ticket, sortie JSON validée, sans action  ← prochaine étape
 
-Suite : J2 MCP + agent headless · J3 Agent SDK + validation humaine · J4 Monitoring · J5 Évaluation en CI · J6 Agent Ops + subagents · J7 Livraison et formation
+Suite : J3 Agent SDK + validation humaine · J4 Monitoring + générateur de trafic · J5 Évaluation en CI · J6 Agent Ops + subagents · J7 Livraison et formation

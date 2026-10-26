@@ -7,3 +7,11 @@ __pycache__/
 *.py[cod]
 .claude/settings.local.json
 .uv-cache/
+# Points de montage du bac à sable de Claude Code (fichiers vides, jamais du projet)
+/.bashrc
+/.bash_profile
+/.profile
+/.zshrc
+/.zprofile
+/.gitconfig
+/.ripgreprc

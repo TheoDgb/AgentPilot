@@ -14,7 +14,13 @@ from shopsim.app.models import (
 from shopsim.tests.conftest import MakeCustomer, MakeOrder, MakeTicket
 
 
-def _refund(session: Session, order: Order, amount_cents: int, key: str) -> None:
+def _refund(
+    session: Session,
+    order: Order,
+    amount_cents: int,
+    key: str,
+    created_at: datetime | None = None,
+) -> None:
     payment = Payment(
         order=order,
         status=PaymentStatus.SUCCEEDED,
@@ -27,7 +33,7 @@ def _refund(session: Session, order: Order, amount_cents: int, key: str) -> None
             amount_cents=amount_cents,
             reason="Geste commercial",
             idempotency_key=key,
-            created_at=order.created_at,
+            created_at=created_at or order.created_at,
         )
     )
     session.flush()
@@ -118,6 +124,45 @@ def test_list_orders_of_customer_without_orders(
 
 def test_list_orders_of_missing_customer_returns_404(client: TestClient) -> None:
     response = client.get("/customers/999999/orders")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Customer not found"}
+
+
+def test_list_customer_refunds_most_recent_first(
+    client: TestClient, session: Session, make_customer: MakeCustomer, make_order: MakeOrder
+) -> None:
+    customer = make_customer()
+    first = make_order(OrderStatus.DELIVERED, customer=customer)
+    second = make_order(OrderStatus.DELIVERED, customer=customer)
+    _refund(session, first, 1000, "test-refunds-old", datetime(2026, 4, 2, tzinfo=UTC))
+    _refund(session, second, 2500, "test-refunds-recent", datetime(2026, 6, 20, tzinfo=UTC))
+    # Remboursement d'un autre client : jamais listé
+    _refund(session, make_order(OrderStatus.DELIVERED), 500, "test-refunds-other")
+
+    response = client.get(f"/customers/{customer.id}/refunds")
+
+    assert response.status_code == 200
+    body = response.json()
+    refunds = [(r["order_id"], r["amount_cents"]) for r in body]
+    assert refunds == [(second.id, 2500), (first.id, 1000)]
+    assert body[0]["created_at"].startswith("2026-06-20")
+    assert body[0]["reason"] == "Geste commercial"
+    # La clé d'idempotence ne sert à rien à l'agent
+    assert "idempotency_key" not in body[0]
+
+
+def test_list_refunds_of_customer_without_refunds(
+    client: TestClient, make_customer: MakeCustomer
+) -> None:
+    response = client.get(f"/customers/{make_customer().id}/refunds")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_list_refunds_of_missing_customer_returns_404(client: TestClient) -> None:
+    response = client.get("/customers/999999/refunds")
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Customer not found"}

@@ -10,7 +10,7 @@ from shopsim.app.chaos import apply_connection_saturation, raise_if_db_errors
 from shopsim.app.clock import SIMULATION_NOW
 from shopsim.app.db import get_session
 from shopsim.app.models import Customer, Order, Payment, Refund, Ticket, TicketStatus
-from shopsim.app.schemas import CustomerRead, OrderRead
+from shopsim.app.schemas import CustomerRead, CustomerRefundRead, OrderRead
 
 # Panne Chaos connection_saturation : s'applique à toutes les routes métier
 router = APIRouter(
@@ -69,3 +69,29 @@ def list_customer_orders(
             .order_by(Order.created_at.desc(), Order.id.desc())
         )
     )
+
+
+@router.get("/{customer_id}/refunds", response_model=list[CustomerRefundRead])
+def list_customer_refunds(
+    customer_id: int, session: Annotated[Session, Depends(get_session)]
+) -> list[CustomerRefundRead]:
+    """Ajout validé après J1 : dates des remboursements, pour la règle « client à risque »."""
+    _get_customer(session, customer_id)
+    rows = session.execute(
+        select(Refund, Payment.order_id)
+        .join(Payment, Refund.payment_id == Payment.id)
+        .join(Order, Payment.order_id == Order.id)
+        .where(Order.customer_id == customer_id)
+        # Les plus récents d'abord
+        .order_by(Refund.created_at.desc(), Refund.id.desc())
+    )
+    return [
+        CustomerRefundRead(
+            id=refund.id,
+            order_id=order_id,
+            amount_cents=refund.amount_cents,
+            reason=refund.reason,
+            created_at=refund.created_at,
+        )
+        for refund, order_id in rows
+    ]
