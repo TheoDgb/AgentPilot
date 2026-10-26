@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from evals.ground_truth import TicketGroundTruth
 from evals.policy import APPROVAL_THRESHOLD_CENTS, is_risky_customer
+from shopsim.app import clock
 from shopsim.app.clock import SIMULATION_NOW, simulation_today
 from shopsim.app.db import Base, SessionLocal, engine
 from shopsim.app.models import (
@@ -316,7 +317,11 @@ def seed(session: Session) -> list[TicketGroundTruth]:
     session.flush()
 
     orders += _add_small_orders(session, small_rng, customers, tracking_numbers)
-    return seed_tickets(session, ticket_rng, customers, orders)
+    truths = seed_tickets(session, ticket_rng, customers, orders)
+    # La simulation repart du 2026-07-06 12:00 à chaque seed (seule donnée non déterministe :
+    # l'heure réelle de l'ancre, qui n'apparaît dans aucune donnée métier)
+    clock.start(session)
+    return truths
 
 
 def _add_small_orders(

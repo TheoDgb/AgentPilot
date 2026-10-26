@@ -13,6 +13,7 @@ from shopsim.app.routers import (
     orders,
     payments,
     refunds,
+    resends,
     shipments,
     tickets,
 )
@@ -29,6 +30,7 @@ app.include_router(health.router)
 app.include_router(orders.router)
 app.include_router(payments.router)
 app.include_router(refunds.router)
+app.include_router(resends.router)
 app.include_router(shipments.router)
 app.include_router(customers.router)
 app.include_router(tickets.router)

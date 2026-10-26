@@ -3,7 +3,7 @@
 import itertools
 import os
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,6 +11,7 @@ from sqlalchemy import Engine, create_engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from shopsim.app import clock
 from shopsim.app.db import Base, get_session
 from shopsim.app.main import app
 from shopsim.app.models import (
@@ -20,6 +21,9 @@ from shopsim.app.models import (
     OrderStatus,
     Payment,
     PaymentStatus,
+    Shipment,
+    ShipmentEvent,
+    ShipmentStatus,
     Ticket,
     TicketMessage,
     TicketStatus,
@@ -84,6 +88,7 @@ MakeCustomer = Callable[..., Customer]
 MakeOrder = Callable[..., Order]
 MakePayment = Callable[..., Payment]
 MakeTicket = Callable[..., Ticket]
+MakeShipment = Callable[..., Shipment]
 
 
 @pytest.fixture
@@ -175,3 +180,60 @@ def make_ticket(session: Session) -> MakeTicket:
         return ticket
 
     return _make
+
+
+@pytest.fixture
+def make_shipment(session: Session) -> MakeShipment:
+    """Crée une livraison et son historique de suivi pour une commande."""
+
+    def _make(
+        order: Order,
+        status: ShipmentStatus = ShipmentStatus.IN_TRANSIT,
+        delivered_at: datetime | None = None,
+    ) -> Shipment:
+        shipment = Shipment(
+            order=order,
+            carrier="Rapidis",
+            tracking_number=f"RPD{next(_unique):010d}",
+            status=status,
+            estimated_delivery=date(2026, 7, 8),
+            delivered_at=delivered_at,
+            created_at=datetime(2026, 7, 2, 8, 0, tzinfo=UTC),
+            events=[
+                ShipmentEvent(
+                    occurred_at=datetime(2026, 7, 2, 8, 0, tzinfo=UTC),
+                    location="Lyon",
+                    description="Colis pris en charge",
+                ),
+                ShipmentEvent(
+                    occurred_at=datetime(2026, 7, 3, 14, 0, tzinfo=UTC),
+                    location="Paris",
+                    description="En cours d'acheminement",
+                ),
+            ],
+        )
+        session.add(shipment)
+        session.flush()
+        return shipment
+
+    return _make
+
+
+class SimClock:
+    """Horloge réelle figée : la simulation part de SIMULATION_NOW, `elapse` la fait avancer."""
+
+    REAL_START = datetime(2026, 10, 26, 9, 0, tzinfo=UTC)
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, session: Session) -> None:
+        self._monkeypatch = monkeypatch
+        self.elapse(timedelta(0))
+        clock.start(session)
+        session.flush()
+
+    def elapse(self, delta: timedelta) -> None:
+        self._monkeypatch.setattr(clock, "real_now", lambda: self.REAL_START + delta)
+
+
+@pytest.fixture
+def sim_clock(monkeypatch: pytest.MonkeyPatch, session: Session) -> SimClock:
+    return SimClock(monkeypatch, session)

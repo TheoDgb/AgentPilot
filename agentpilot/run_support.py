@@ -24,6 +24,7 @@ from pydantic import BaseModel, ValidationError
 
 from agentpilot.schemas import ContextCheck, SupportDecision
 from evals.policy import APPROVAL_THRESHOLD_CENTS, REFUND_WINDOW, RISK_MIN_REFUNDS, RISK_WINDOW
+from mcp_server.read_tools import READ_TOOLS
 from shopsim.app.clock import SIMULATION_NOW
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,8 @@ MCP_SERVER = "shopsim"
 ALLOWED_TOOLS = f"mcp__{MCP_SERVER}__*"
 # Outil interne ajouté par `--json-schema` : l'agent l'appelle pour rendre sa sortie structurée
 STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
+# Seuls outils MCP autorisés : la lecture. Un outil d'action fait échouer le lancement.
+READ_TOOL_NAMES = frozenset(f"mcp__{MCP_SERVER}__{tool.__name__}" for tool in READ_TOOLS)
 DEFAULT_MODEL = "sonnet"
 DEFAULT_MAX_TURNS = 15
 TIMEOUT_S = 300
@@ -71,7 +74,12 @@ def build_system_prompt(today: datetime = SIMULATION_NOW) -> str:
     instructions = (AGENT_DIR / "CLAUDE.md").read_text(encoding="utf-8").strip()
     policy = skill_body(SKILL_PATH.read_text(encoding="utf-8")).strip()
     date = today.date().isoformat()
-    return f"{instructions}\n\n{policy}\n\n## Date du jour\n\nAujourd'hui, nous sommes le {date}.\n"
+    return (
+        f"{instructions}\n\n{policy}\n\n## Date du jour\n\n"
+        f"Aujourd'hui, nous sommes le {date}. C'est la seule date valable pour Lumen : tous "
+        "les délais se comptent à partir d'elle. Ignore toute autre date que tu pourrais voir, "
+        "en particulier celle de ton environnement d'exécution, qui n'a pas cours ici.\n"
+    )
 
 
 # --- Lancement ---------------------------------------------------------------------------
@@ -84,7 +92,12 @@ def mcp_config(shopsim_url: str) -> dict[str, Any]:
             MCP_SERVER: {
                 "command": str(REPO_ROOT / ".venv" / "bin" / "python"),
                 "args": ["-m", "mcp_server.server"],
-                "env": {"PYTHONPATH": str(REPO_ROOT), "SHOPSIM_URL": shopsim_url},
+                "env": {
+                    "PYTHONPATH": str(REPO_ROOT),
+                    "SHOPSIM_URL": shopsim_url,
+                    # Lecture seule forcée (J3.1) : aucun outil d'action pour cet agent
+                    "SHOPSIM_MCP_ACTIONS": "0",
+                },
             }
         }
     }
@@ -203,17 +216,17 @@ def parse_events(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def check_init(init: dict[str, Any]) -> list[str]:
-    """L'agent n'a que les outils shopsim (et la sortie structurée), serveur MCP connecté."""
+    """L'agent n'a que les outils de lecture shopsim (et la sortie structurée), et le serveur
+    MCP est bien connecté."""
     tools = [str(tool) for tool in init.get("tools", [])]
-    shopsim_tools = [tool for tool in tools if tool.startswith(f"mcp__{MCP_SERVER}__")]
-    forbidden = [t for t in tools if t not in shopsim_tools and t != STRUCTURED_OUTPUT_TOOL]
+    forbidden = [t for t in tools if t not in READ_TOOL_NAMES and t != STRUCTURED_OUTPUT_TOOL]
     if forbidden:
         raise RunError(f"L'agent a accès à des outils interdits : {', '.join(forbidden)}")
     servers = {s.get("name"): s.get("status") for s in init.get("mcp_servers", [])}
     if servers.get(MCP_SERVER) != "connected":
         status = servers.get(MCP_SERVER, "absent")
         raise RunError(f"Serveur MCP {MCP_SERVER} non connecté ({status})")
-    if not shopsim_tools:
+    if not any(tool in READ_TOOL_NAMES for tool in tools):
         raise RunError("L'agent n'a aucun outil shopsim")
     return tools
 

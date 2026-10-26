@@ -1,6 +1,5 @@
 """Endpoint de remboursement idempotent (service Paiements)."""
 
-from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
@@ -8,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from shopsim.app import clock
 from shopsim.app.chaos import apply_connection_saturation, raise_if_bad_deploy
 from shopsim.app.db import get_session
 from shopsim.app.latency import simulate_payment_latency
@@ -100,7 +100,7 @@ def create_refund(
         amount_cents=body.amount_cents,
         reason=body.reason,
         idempotency_key=idempotency_key,
-        created_at=datetime.now(UTC),
+        created_at=clock.now(session),
     )
     try:
         with session.begin_nested():

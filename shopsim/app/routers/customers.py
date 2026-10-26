@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from shopsim.app import clock
 from shopsim.app.chaos import apply_connection_saturation, raise_if_db_errors
-from shopsim.app.clock import SIMULATION_NOW
 from shopsim.app.db import get_session
 from shopsim.app.models import Customer, Order, Payment, Refund, Ticket, TicketStatus
 from shopsim.app.schemas import CustomerRead, CustomerRefundRead, OrderRead
@@ -48,7 +48,7 @@ def get_customer(
         first_name=customer.first_name,
         last_name=customer.last_name,
         created_at=customer.created_at,
-        tenure_days=(SIMULATION_NOW - customer.created_at).days,
+        tenure_days=(clock.now(session) - customer.created_at).days,
         resolved_tickets_count=resolved_tickets or 0,
         refunds_count=refunds or 0,
     )

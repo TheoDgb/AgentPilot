@@ -86,8 +86,9 @@ class FakeClaude:
 @pytest.fixture(autouse=True)
 def api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    # Ne doit jamais atteindre l'agent ni le serveur MCP
+    # Ne doivent jamais atteindre l'agent ni le serveur MCP
     monkeypatch.setenv("CHAOS_TOKEN", "chaos-secret")
+    monkeypatch.setenv("SHOPSIM_MCP_ACTIONS", "1")
 
 
 def install(monkeypatch: pytest.MonkeyPatch, fake: FakeClaude) -> FakeClaude:
@@ -112,6 +113,9 @@ def test_system_prompt_contains_instructions_policy_and_date() -> None:
     # L'en-tête YAML de la skill n'est pas transmis
     assert "name: refund-policy" not in prompt
     assert "Aujourd'hui, nous sommes le 2026-07-06." in prompt
+    # Claude Code ajoute la date réelle à sa consigne, même en --bare : seule la date de la
+    # simulation compte (observé : sans cette phrase, l'agent a pris la date réelle)
+    assert "Ignore toute autre date" in prompt
 
 
 def test_command_locks_the_agent_down(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -145,6 +149,9 @@ def test_mcp_config_uses_absolute_paths_and_no_secret(
     assert Path(server["command"]).is_absolute()
     assert server["args"] == ["-m", "mcp_server.server"]
     assert server["env"]["PYTHONPATH"] == str(REPO_ROOT)
+    # Lecture seule forcée, même si la variable traîne dans l'environnement de l'utilisateur
+    assert server["env"]["SHOPSIM_MCP_ACTIONS"] == "0"
+    assert "SHOPSIM_MCP_ACTIONS" not in fake.kwargs["env"]
     # La clé d'API ne passe que par l'environnement de `claude`, jamais sur la ligne de commande
     assert "CHAOS_TOKEN" not in fake.kwargs["env"]
     assert "chaos-secret" not in " ".join(fake.command)
@@ -179,6 +186,10 @@ def test_decision_is_validated_and_saved(monkeypatch: pytest.MonkeyPatch, tmp_pa
         ((init_event([]), result_event()), "aucun outil shopsim"),
         ((init_event(["StructuredOutput"]), result_event()), "aucun outil shopsim"),
         ((init_event(SHOPSIM_TOOLS + ["Skill"]), result_event()), "interdits : Skill"),
+        (
+            (init_event(SHOPSIM_TOOLS + ["mcp__shopsim__refund_order"]), result_event()),
+            "interdits : mcp__shopsim__refund_order",
+        ),
         ((init_event(), result_event(None)), "Décision invalide"),
         ((init_event(), NO_OUTPUT), "pas rendu de sortie structurée"),
         ((init_event(), result_event(subtype="error_max_turns", is_error=True)), "a échoué"),
@@ -345,3 +356,16 @@ def test_check_fails_when_the_agent_lacks_its_instructions(
     assert run_support.main(["--check"], runs_dir=tmp_path) == 1
 
     assert message in capsys.readouterr().err
+
+
+def test_read_tool_names_match_the_mcp_server() -> None:
+    assert run_support.READ_TOOL_NAMES == {
+        "mcp__shopsim__list_open_tickets",
+        "mcp__shopsim__get_ticket",
+        "mcp__shopsim__get_order",
+        "mcp__shopsim__get_customer",
+        "mcp__shopsim__list_customer_orders",
+        "mcp__shopsim__list_customer_refunds",
+        "mcp__shopsim__get_payment",
+        "mcp__shopsim__get_shipment",
+    }

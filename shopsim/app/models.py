@@ -1,5 +1,5 @@
-"""Modèles ShopSim : clients, commandes, paiements, remboursements, livraisons, tickets et
-pannes injectées (Chaos)."""
+"""Modèles ShopSim : clients, commandes, paiements, remboursements, renvois, livraisons,
+tickets, pannes injectées (Chaos) et ancre de l'horloge de simulation."""
 
 from datetime import date, datetime
 from enum import StrEnum
@@ -193,6 +193,33 @@ class TicketMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     ticket: Mapped[Ticket] = relationship(back_populates="messages")
+
+
+class SimulationClock(Base):
+    """Ancre de l'horloge de simulation : heure réelle du dernier seed (une seule ligne)."""
+
+    __tablename__ = "simulation_clock"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Resend(Base):
+    """Renvoi d'un article : une commande de remplacement, avec sa propre livraison."""
+
+    __tablename__ = "resends"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Commande d'origine : un seul renvoi par commande
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), unique=True)
+    replacement_order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), unique=True)
+    reason: Mapped[str] = mapped_column(String(500))
+    # Clé fournie par l'appelant : rejouer la même requête ne crée pas de second renvoi
+    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    order: Mapped[Order] = relationship(foreign_keys=[order_id])
+    replacement_order: Mapped[Order] = relationship(foreign_keys=[replacement_order_id])
 
 
 class ChaosFault(Base):

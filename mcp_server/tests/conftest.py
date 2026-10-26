@@ -9,7 +9,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable, Iterator
-from datetime import UTC, date, datetime
+from datetime import datetime
 
 import pytest
 import uvicorn
@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from shopsim.app.db import get_session
 from shopsim.app.main import app
-from shopsim.app.models import Order, Payment, Refund, Shipment, ShipmentEvent, ShipmentStatus
+from shopsim.app.models import Payment, Refund
 from shopsim.tests import conftest as shopsim_fixtures
 
 # Fixtures des tests de ShopSim, réexportées : base de test, transaction annulée, `make_*`
@@ -28,10 +28,17 @@ make_customer = shopsim_fixtures.make_customer
 make_order = shopsim_fixtures.make_order
 make_payment = shopsim_fixtures.make_payment
 make_ticket = shopsim_fixtures.make_ticket
+make_shipment = shopsim_fixtures.make_shipment
 
-MakeShipment = Callable[..., Shipment]
+MakeShipment = shopsim_fixtures.MakeShipment
 MakeRefund = Callable[..., Refund]
 _unique = itertools.count(1)
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    """Tests asynchrones (outils MCP) sur asyncio."""
+    return "asyncio"
 
 
 def _free_port() -> int:
@@ -68,39 +75,6 @@ def shopsim(
     monkeypatch.setenv("SHOPSIM_URL", shopsim_server)
     yield shopsim_server
     app.dependency_overrides.clear()
-
-
-@pytest.fixture
-def make_shipment(session: Session) -> MakeShipment:
-    """Crée une livraison et son historique de suivi pour une commande."""
-
-    def _make(order: Order, status: ShipmentStatus = ShipmentStatus.IN_TRANSIT) -> Shipment:
-        shipment = Shipment(
-            order=order,
-            carrier="Colissimo",
-            tracking_number=f"TEST{next(_unique):08d}",
-            status=status,
-            estimated_delivery=date(2026, 7, 8),
-            delivered_at=None,
-            created_at=datetime(2026, 7, 2, 8, 0, tzinfo=UTC),
-            events=[
-                ShipmentEvent(
-                    occurred_at=datetime(2026, 7, 2, 8, 0, tzinfo=UTC),
-                    location="Lyon",
-                    description="Colis pris en charge",
-                ),
-                ShipmentEvent(
-                    occurred_at=datetime(2026, 7, 3, 14, 0, tzinfo=UTC),
-                    location="Paris",
-                    description="En cours d'acheminement",
-                ),
-            ],
-        )
-        session.add(shipment)
-        session.flush()
-        return shipment
-
-    return _make
 
 
 @pytest.fixture

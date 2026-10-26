@@ -1,6 +1,5 @@
 """Endpoints Chaos : activer, arrêter et lister les pannes (jeton obligatoire)."""
 
-from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response
@@ -8,6 +7,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from shopsim.app import clock
 from shopsim.app.chaos import active_faults, require_chaos_token
 from shopsim.app.db import get_session
 from shopsim.app.models import ChaosFault, ChaosScenario
@@ -40,7 +40,7 @@ def activate_fault(
     # ON CONFLICT : deux activations simultanées ne créent pas d'erreur
     inserted = session.execute(
         insert(ChaosFault)
-        .values(scenario=scenario, activated_at=datetime.now(UTC), request_count=0)
+        .values(scenario=scenario, activated_at=clock.now(session), request_count=0)
         .on_conflict_do_nothing()
         .returning(ChaosFault.scenario)
     ).scalar_one_or_none()

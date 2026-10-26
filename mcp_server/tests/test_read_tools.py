@@ -38,11 +38,6 @@ READ_TOOL_NAMES = {
 }
 
 
-@pytest.fixture
-def anyio_backend() -> str:
-    return "asyncio"
-
-
 async def call(name: str, **arguments: Any) -> CallToolResult:  # noqa: ANN401
     async with Client(mcp) as client:
         return await client.call_tool(name, arguments)

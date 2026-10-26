@@ -1,6 +1,5 @@
 """Endpoints du service Tickets : lecture, réponse idempotente, escalade et résolution."""
 
-from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
@@ -8,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from shopsim.app import clock
 from shopsim.app.chaos import apply_connection_saturation
 from shopsim.app.db import get_session
 from shopsim.app.models import MessageAuthor, Ticket, TicketMessage, TicketStatus
@@ -134,7 +134,7 @@ def reply_to_ticket(
         author=MessageAuthor.AGENT,
         body=reply.body,
         idempotency_key=idempotency_key,
-        created_at=datetime.now(UTC),
+        created_at=clock.now(session),
     )
     try:
         with session.begin_nested():

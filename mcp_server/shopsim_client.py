@@ -1,7 +1,7 @@
 """Client HTTP vers l'API de ShopSim : le serveur MCP ne touche jamais la base.
 
-Toute erreur (404, 5xx, délai dépassé, service injoignable) devient une `ShopSimError`
-dont le message, lisible, est renvoyé tel quel à l'agent.
+Toute erreur (404, 409, 422, 5xx, délai dépassé, service injoignable) devient une
+`ShopSimError` dont le message, lisible, est renvoyé tel quel à l'agent.
 Aucun accès au Chaos : ce client n'envoie jamais `X-Chaos-Token`.
 """
 
@@ -32,12 +32,47 @@ def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(base_url=shopsim_url(), timeout=timeout_s())
 
 
-async def get_json(path: str, not_found: str, params: dict[str, Any] | None = None) -> Any:  # noqa: ANN401
-    """GET sur ShopSim ; `not_found` est le message renvoyé si la ressource n'existe pas."""
-    endpoint = f"GET {path}"
+class ShopSimConflict(ShopSimError):
+    """409 de ShopSim : action incompatible avec l'état actuel ou avec une clé déjà utilisée."""
+
+    def __init__(self, message: str, detail: str) -> None:
+        super().__init__(message)
+        self.detail = detail
+
+
+def _detail(response: httpx.Response) -> str:
+    """Motif lisible d'un refus de ShopSim (champ `detail` de FastAPI)."""
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return response.text[:200]
+    if isinstance(detail, dict):
+        # Ex. remboursement trop élevé : {"message", "remaining_cents"}
+        extra = ", ".join(f"{k} = {v}" for k, v in detail.items() if k != "message")
+        return f"{detail.get('message', '')} ({extra})" if extra else str(detail.get("message"))
+    if isinstance(detail, list):
+        # Erreurs de validation : champ et message
+        return "; ".join(
+            f"{'.'.join(str(p) for p in e.get('loc', [])[1:])} : {e.get('msg')}" for e in detail
+        )
+    return str(detail)
+
+
+async def _send(
+    method: str,
+    path: str,
+    not_found: str,
+    *,
+    params: dict[str, Any] | None = None,
+    body: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
+) -> httpx.Response:
+    """Appel à ShopSim ; toute réponse autre que 200 ou 201 devient une `ShopSimError`."""
+    endpoint = f"{method} {path}"
+    headers = {"Idempotency-Key": idempotency_key} if idempotency_key is not None else None
     try:
         async with _client() as client:
-            response = await client.get(path, params=params)
+            response = await client.request(method, path, params=params, json=body, headers=headers)
     except httpx.TimeoutException as exc:
         raise ShopSimError(
             f"ShopSim n'a pas répondu en {timeout_s():g} s sur {endpoint} (service lent). "
@@ -46,19 +81,43 @@ async def get_json(path: str, not_found: str, params: dict[str, Any] | None = No
     except httpx.TransportError as exc:
         raise ShopSimError(f"ShopSim est injoignable à {shopsim_url()}.") from exc
 
-    if response.status_code == 404:
+    status = response.status_code
+    if status in (200, 201):
+        return response
+    if status == 404:
         raise ShopSimError(not_found)
-    if response.status_code >= 500:
+    if status >= 500:
         raise ShopSimError(
-            f"ShopSim a renvoyé une erreur interne ({response.status_code}) sur {endpoint}. "
+            f"ShopSim a renvoyé une erreur interne ({status}) sur {endpoint}. "
             "Le service est peut-être en panne : réessayer plus tard ou escalader."
         )
-    if response.status_code != 200:
-        raise ShopSimError(
-            f"ShopSim a refusé la requête ({response.status_code}) sur {endpoint} : "
-            f"{response.text[:200]}"
-        )
+    detail = _detail(response)
+    if status == 409:
+        raise ShopSimConflict(f"ShopSim a refusé l'action (409) sur {endpoint} : {detail}", detail)
+    raise ShopSimError(f"ShopSim a refusé la requête ({status}) sur {endpoint} : {detail}")
+
+
+def _json(response: httpx.Response) -> Any:  # noqa: ANN401
     try:
         return response.json()
     except ValueError as exc:
-        raise ShopSimError(f"Réponse illisible de ShopSim sur {endpoint}.") from exc
+        request = response.request
+        raise ShopSimError(
+            f"Réponse illisible de ShopSim sur {request.method} {request.url.path}."
+        ) from exc
+
+
+async def get_json(path: str, not_found: str, params: dict[str, Any] | None = None) -> Any:  # noqa: ANN401
+    """GET sur ShopSim ; `not_found` est le message renvoyé si la ressource n'existe pas."""
+    return _json(await _send("GET", path, not_found, params=params))
+
+
+async def post_json(
+    path: str,
+    not_found: str,
+    body: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
+) -> tuple[int, Any]:
+    """POST sur ShopSim ; renvoie le code (201 = créé, 200 = rejeu ou déjà fait) et le JSON."""
+    response = await _send("POST", path, not_found, body=body, idempotency_key=idempotency_key)
+    return response.status_code, _json(response)

@@ -79,6 +79,24 @@ class CustomerRefundRead(BaseModel):
     created_at: datetime
 
 
+class ResendCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ResendRead(BaseModel):
+    id: int
+    # Commande d'origine, et commande de remplacement qui porte la nouvelle livraison
+    order_id: int
+    replacement_order_id: int
+    carrier: str
+    tracking_number: str
+    reason: str
+    idempotency_key: str
+    created_at: datetime
+
+
 class ShipmentEventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
