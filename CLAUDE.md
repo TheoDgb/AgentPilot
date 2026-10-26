@@ -74,7 +74,7 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
 
 ## Avancement
 
-Jalon en cours : **J2 — MCP + agent headless**
+Jalon en cours : **J3 — Agent SDK + validation humaine**
 
 - [x] J0 : dépôt, Python 3.12 (uv), pyproject, commande /test
 - [x] J1.1 : Docker Compose (PostgreSQL + FastAPI), Customer/Order, `GET /orders/{id}`, seed, premier test
@@ -86,5 +86,11 @@ Jalon en cours : **J2 — MCP + agent headless**
 - [x] J1 global : ShopSim terminé (commandes, paiements, livraisons, clients, tickets, 4 pannes Chaos, vérité terrain dans `evals/`). Ses API ne changent plus sans accord.
 - [x] J2.1 : serveur MCP en lecture seule (appelle l'API HTTP de ShopSim, `.mcp.json` à la racine, 8 outils, erreurs lisibles). Ajout validé à ShopSim après J1 : `GET /customers/{id}/refunds` (dates des remboursements, pour la règle « client à risque »)
 - [x] J2.2 : agent Support en headless sur un ticket, sortie JSON validée, sans action (`agents/support/`, schéma `agentpilot/schemas.py`, script `agentpilot/run_support.py`)
+- [x] J2 global : serveur MCP en lecture seule (8 outils, `.mcp.json`) et agent Support en headless (`agents/support/`, `agentpilot/run_support.py`, isolement prouvé par `--check`)
+- [ ] J3.1 : outils d'action dans le serveur MCP (répondre, rembourser, renvoyer, escalader, résoudre), avec clés d'idempotence  ← prochaine étape
+- [ ] J3.2 : agent Support lancé par le Claude Agent SDK dans le service AgentPilot (FastAPI), exécutions enregistrées en base
+- [ ] J3.3 : hooks : mise en attente des actions sensibles (plus de 50 €, client à risque, escalade) et journal de chaque appel d'outil
+- [ ] J3.4 : interface web d'approbation (approuver ou refuser une action en attente)
+- [ ] J3.5 : traitement continu de la file de tickets, reprise après interruption sans double action, arrêt d'urgence
 
-Suite : J3 Agent SDK + validation humaine · J4 Monitoring + générateur de trafic · J5 Évaluation en CI · J6 Agent Ops + subagents · J7 Livraison et formation
+Suite : J4 Monitoring + générateur de trafic · J5 Évaluation en CI · J6 Agent Ops + subagents · J7 Livraison et formation
