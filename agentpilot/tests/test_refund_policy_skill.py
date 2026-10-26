@@ -2,7 +2,7 @@
 
 import re
 
-from agentpilot.run_support import SKILL_PATH, skill_body
+from agentpilot.support_agent import SKILL_PATH, skill_body
 from evals.policy import APPROVAL_THRESHOLD_CENTS, REFUND_WINDOW, RISK_MIN_REFUNDS, RISK_WINDOW
 
 SKILL = SKILL_PATH.read_text(encoding="utf-8")

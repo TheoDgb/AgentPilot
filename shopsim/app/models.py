@@ -173,7 +173,9 @@ class Ticket(Base):
     order: Mapped[Order | None] = relationship()
     # Fil de discussion, toujours dans l'ordre chronologique
     messages: Mapped[list["TicketMessage"]] = relationship(
-        back_populates="ticket", order_by="TicketMessage.created_at"
+        back_populates="ticket",
+        # L'id départage deux messages de même date (horloge figée)
+        order_by=lambda: [TicketMessage.created_at, TicketMessage.id],
     )
 
 

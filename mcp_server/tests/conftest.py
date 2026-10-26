@@ -29,6 +29,7 @@ make_order = shopsim_fixtures.make_order
 make_payment = shopsim_fixtures.make_payment
 make_ticket = shopsim_fixtures.make_ticket
 make_shipment = shopsim_fixtures.make_shipment
+sim_clock = shopsim_fixtures.sim_clock
 
 MakeShipment = shopsim_fixtures.MakeShipment
 MakeRefund = Callable[..., Refund]

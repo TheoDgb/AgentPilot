@@ -22,6 +22,10 @@ mcp = [
     "mcp>=2.3,<3",
     "httpx>=0.27",
 ]
+# Claude Agent SDK (embarque le binaire Claude Code) pour le service AgentPilot
+agent = [
+    "claude-agent-sdk>=0.2.174,<0.3",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["shopsim", "mcp_server", "agentpilot"]

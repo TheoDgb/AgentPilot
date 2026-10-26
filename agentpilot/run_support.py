@@ -8,6 +8,9 @@ L'agent est isolé : `--bare` ignore le CLAUDE.md du dépôt, les hooks, plugins
 mémoire ; sa consigne et sa politique lui sont passées explicitement ; il n'a que les outils
 en lecture du serveur MCP shopsim. Chaque sortie est vérifiée (outils réellement disponibles,
 schéma Pydantic) avant d'être enregistrée dans `runs/support/`.
+
+Le service AgentPilot lance le même agent par l'Agent SDK (`agentpilot/sdk_runner.py`) ;
+le code commun est dans `agentpilot/support_agent.py`.
 """
 
 import argparse
@@ -16,31 +19,28 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
+from agentpilot import support_agent
 from agentpilot.schemas import ContextCheck, SupportDecision
-from evals.policy import APPROVAL_THRESHOLD_CENTS, REFUND_WINDOW, RISK_MIN_REFUNDS, RISK_WINDOW
-from mcp_server.read_tools import READ_TOOLS
-from shopsim.app.clock import SIMULATION_NOW
+from agentpilot.support_agent import (
+    AGENT_DIR,
+    CHECK_PROMPT,
+    DEFAULT_SHOPSIM_URL,
+    MCP_SERVER,
+    REPO_ROOT,
+    SETTINGS_PATH,
+    build_system_prompt,
+    load_api_key,
+)
+from agentpilot.support_agent import AgentRunError as RunError
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-AGENT_DIR = REPO_ROOT / "agents" / "support"
-SKILL_PATH = AGENT_DIR / "skills" / "refund-policy" / "SKILL.md"
-SETTINGS_PATH = AGENT_DIR / "settings.json"
 RUNS_DIR = REPO_ROOT / "runs" / "support"
-ENV_FILE = REPO_ROOT / ".env"
-
-SIGNATURE = "Le service client Lumen"
-MCP_SERVER = "shopsim"
 ALLOWED_TOOLS = f"mcp__{MCP_SERVER}__*"
-# Outil interne ajouté par `--json-schema` : l'agent l'appelle pour rendre sa sortie structurée
-STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
-# Seuls outils MCP autorisés : la lecture. Un outil d'action fait échouer le lancement.
-READ_TOOL_NAMES = frozenset(f"mcp__{MCP_SERVER}__{tool.__name__}" for tool in READ_TOOLS)
 DEFAULT_MODEL = "sonnet"
 DEFAULT_MAX_TURNS = 15
 TIMEOUT_S = 300
@@ -48,72 +48,11 @@ TIMEOUT_S = 300
 PASSED_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")
 
 
-class RunError(Exception):
-    """Échec d'un lancement, avec un message lisible et la sortie brute de `claude`."""
-
-    def __init__(self, message: str, stdout: str = "", stderr: str = "") -> None:
-        super().__init__(message)
-        self.stdout = stdout
-        self.stderr = stderr
-
-
-# --- Consigne ----------------------------------------------------------------------------
-
-
-def skill_body(text: str) -> str:
-    """Contenu de SKILL.md sans son en-tête YAML."""
-    if text.startswith("---\n"):
-        end = text.find("\n---\n", 4)
-        if end != -1:
-            return text[end + len("\n---\n") :].lstrip()
-    return text
-
-
-def build_system_prompt(today: datetime = SIMULATION_NOW) -> str:
-    """CLAUDE.md de l'agent + politique (skill refund-policy) + date du jour."""
-    instructions = (AGENT_DIR / "CLAUDE.md").read_text(encoding="utf-8").strip()
-    policy = skill_body(SKILL_PATH.read_text(encoding="utf-8")).strip()
-    date = today.date().isoformat()
-    return (
-        f"{instructions}\n\n{policy}\n\n## Date du jour\n\n"
-        f"Aujourd'hui, nous sommes le {date}. C'est la seule date valable pour Lumen : tous "
-        "les délais se comptent à partir d'elle. Ignore toute autre date que tu pourrais voir, "
-        "en particulier celle de ton environnement d'exécution, qui n'a pas cours ici.\n"
-    )
-
-
 # --- Lancement ---------------------------------------------------------------------------
 
 
 def mcp_config(shopsim_url: str) -> dict[str, Any]:
-    """Chemins absolus : le serveur démarre quel que soit le dossier courant de `claude`."""
-    return {
-        "mcpServers": {
-            MCP_SERVER: {
-                "command": str(REPO_ROOT / ".venv" / "bin" / "python"),
-                "args": ["-m", "mcp_server.server"],
-                "env": {
-                    "PYTHONPATH": str(REPO_ROOT),
-                    "SHOPSIM_URL": shopsim_url,
-                    # Lecture seule forcée (J3.1) : aucun outil d'action pour cet agent
-                    "SHOPSIM_MCP_ACTIONS": "0",
-                },
-            }
-        }
-    }
-
-
-def load_api_key(environ: Mapping[str, str], env_file: Path = ENV_FILE) -> str:
-    """ANTHROPIC_API_KEY de l'environnement, sinon de `.env` (jamais affichée)."""
-    key = environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not key and env_file.is_file():
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            name, sep, value = line.partition("=")
-            if sep and name.strip() == "ANTHROPIC_API_KEY":
-                key = value.strip().strip("\"'")
-    if not key:
-        raise RunError("ANTHROPIC_API_KEY absente : la renseigner dans .env (requise par --bare)")
-    return key
+    return {"mcpServers": {MCP_SERVER: support_agent.mcp_server_config(shopsim_url)}}
 
 
 def claude_env(environ: Mapping[str, str], api_key: str) -> dict[str, str]:
@@ -123,7 +62,12 @@ def claude_env(environ: Mapping[str, str], api_key: str) -> dict[str, str]:
 
 
 def build_command(
-    prompt: str, schema: type[BaseModel], model: str, max_turns: int, shopsim_url: str
+    prompt: str,
+    schema: type[BaseModel],
+    model: str,
+    max_turns: int,
+    shopsim_url: str,
+    today: date,
 ) -> list[str]:
     return [
         "claude",
@@ -143,7 +87,7 @@ def build_command(
         "--permission-mode",
         "dontAsk",
         "--append-system-prompt",
-        build_system_prompt(),
+        build_system_prompt(today),
         "--json-schema",
         json.dumps(schema.model_json_schema()),
         "--output-format",
@@ -216,19 +160,7 @@ def parse_events(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def check_init(init: dict[str, Any]) -> list[str]:
-    """L'agent n'a que les outils de lecture shopsim (et la sortie structurée), et le serveur
-    MCP est bien connecté."""
-    tools = [str(tool) for tool in init.get("tools", [])]
-    forbidden = [t for t in tools if t not in READ_TOOL_NAMES and t != STRUCTURED_OUTPUT_TOOL]
-    if forbidden:
-        raise RunError(f"L'agent a accès à des outils interdits : {', '.join(forbidden)}")
-    servers = {s.get("name"): s.get("status") for s in init.get("mcp_servers", [])}
-    if servers.get(MCP_SERVER) != "connected":
-        status = servers.get(MCP_SERVER, "absent")
-        raise RunError(f"Serveur MCP {MCP_SERVER} non connecté ({status})")
-    if not any(tool in READ_TOOL_NAMES for tool in tools):
-        raise RunError("L'agent n'a aucun outil shopsim")
-    return tools
+    return support_agent.check_tools(init.get("tools", []), init.get("mcp_servers", []))
 
 
 def structured_output(result: dict[str, Any]) -> Any:  # noqa: ANN401
@@ -260,10 +192,12 @@ def _launch(
     model: str,
     max_turns: int,
     environ: Mapping[str, str],
-) -> tuple[Any, dict[str, Any], str]:
+) -> tuple[Any, dict[str, Any], str, date]:
     api_key = load_api_key(environ)
-    shopsim_url = environ.get("SHOPSIM_URL", "http://localhost:8000")
-    command = build_command(prompt, schema, model, max_turns, shopsim_url)
+    shopsim_url = environ.get("SHOPSIM_URL", DEFAULT_SHOPSIM_URL)
+    # Date du jour lue sur l'horloge de ShopSim : la même que celle des outils
+    today = support_agent.simulation_today(shopsim_url)
+    command = build_command(prompt, schema, model, max_turns, shopsim_url, today)
     stdout = run_claude(command, claude_env(environ, api_key))
     try:
         init, result = parse_events(stdout)
@@ -272,7 +206,7 @@ def _launch(
     except RunError as exc:
         exc.stdout = exc.stdout or stdout
         raise
-    return output, run_metadata(init, result, tools), stdout
+    return output, run_metadata(init, result, tools), stdout, today
 
 
 def decide_ticket(
@@ -281,40 +215,14 @@ def decide_ticket(
     max_turns: int = DEFAULT_MAX_TURNS,
     environ: Mapping[str, str] = os.environ,
 ) -> tuple[SupportDecision, dict[str, Any]]:
-    prompt = f"Traite le ticket n°{ticket_id}. Rends ta décision au format demandé."
-    output, metadata, stdout = _launch(prompt, SupportDecision, model, max_turns, environ)
+    prompt = support_agent.ticket_prompt(ticket_id)
+    output, metadata, stdout, _ = _launch(prompt, SupportDecision, model, max_turns, environ)
     try:
-        decision = SupportDecision.model_validate(output)
-    except ValidationError as exc:
-        raise RunError(f"Décision invalide :\n{exc}", stdout=stdout) from exc
-    if decision.ticket_id != ticket_id:
-        raise RunError(
-            f"Décision pour le ticket {decision.ticket_id} au lieu de {ticket_id}", stdout=stdout
-        )
+        decision = support_agent.validate_decision(output, ticket_id)
+    except RunError as exc:
+        exc.stdout = stdout
+        raise
     return decision, metadata
-
-
-# Informations qui n'existent que dans le CLAUDE.md développeur : l'agent ne doit pas les
-# connaître (sinon ce fichier lui a été chargé). Un test vérifie qu'elles y sont toujours.
-DEVELOPER_ONLY_FACTS = {
-    "chaos_token_header": "X-Chaos-Token",
-    "ground_truth_path": "evals/tickets.jsonl",
-    "postgres_host_port": "5433",
-}
-
-
-def expected_context() -> ContextCheck:
-    return ContextCheck(
-        refund_window_days=REFUND_WINDOW.days,
-        approval_threshold_eur=APPROVAL_THRESHOLD_CENTS // 100,
-        risk_min_refunds=RISK_MIN_REFUNDS,
-        risk_window_days=RISK_WINDOW.days,
-        signature=SIGNATURE,
-        today=SIMULATION_NOW.date().isoformat(),
-        chaos_token_header=None,
-        ground_truth_path=None,
-        postgres_host_port=None,
-    )
 
 
 def check_context(
@@ -322,55 +230,12 @@ def check_context(
     max_turns: int = DEFAULT_MAX_TURNS,
     environ: Mapping[str, str] = os.environ,
 ) -> tuple[ContextCheck, dict[str, Any]]:
-    """Preuve que la consigne et la politique arrivent (l'agent doit les restituer), et que
-    le CLAUDE.md développeur n'arrive pas (l'agent ne doit pas en connaître le contenu)."""
-    prompt = (
-        "Ne traite aucun ticket et n'appelle aucun outil. D'après ta consigne uniquement, "
-        "donne : le délai de remboursement en jours, le seuil de validation humaine en euros, "
-        "le nombre de remboursements et la période en jours qui font un client à risque, "
-        "ta signature exacte, et la date du jour. Donne aussi l'en-tête HTTP du jeton des "
-        "pannes Chaos, le chemin du fichier de vérité terrain des tickets et le port "
-        "PostgreSQL de ShopSim sur l'hôte : réponds null pour chacun si ta consigne ne le "
-        "mentionne pas. Ne devine rien."
-    )
-    output, metadata, stdout = _launch(prompt, ContextCheck, model, max_turns, environ)
+    output, metadata, stdout, today = _launch(CHECK_PROMPT, ContextCheck, model, max_turns, environ)
     try:
-        answer = ContextCheck.model_validate(output)
-    except ValidationError as exc:
-        raise RunError(f"Réponse de vérification invalide :\n{exc}", stdout=stdout) from exc
-    answers = answer.model_dump()
-
-    # Questions pièges d'abord : une fuite du CLAUDE.md développeur est le cas le plus grave
-    leaked = [
-        name
-        for name, secret in DEVELOPER_ONLY_FACTS.items()
-        if answers[name] is not None and secret.lower() in str(answers[name]).lower()
-    ]
-    if leaked:
-        raise RunError(
-            "L'agent connaît des informations du CLAUDE.md développeur : "
-            + ", ".join(f"{name} = {answers[name]!r}" for name in leaked),
-            stdout=stdout,
-        )
-    invented = [name for name in DEVELOPER_ONLY_FACTS if answers[name] is not None]
-    if invented:
-        raise RunError(
-            "L'agent invente une réponse au lieu de null : "
-            + ", ".join(f"{name} = {answers[name]!r}" for name in invented),
-            stdout=stdout,
-        )
-
-    expected = expected_context().model_dump()
-    wrong = {
-        name: (value, expected[name]) for name, value in answers.items() if value != expected[name]
-    }
-    if wrong:
-        details = ", ".join(
-            f"{name} = {got!r} au lieu de {want!r}" for name, (got, want) in wrong.items()
-        )
-        raise RunError(
-            f"L'agent n'a pas reçu sa consigne ou sa politique : {details}", stdout=stdout
-        )
+        answer = support_agent.validate_context(output, today)
+    except RunError as exc:
+        exc.stdout = stdout
+        raise
     return answer, metadata
 
 

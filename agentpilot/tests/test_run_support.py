@@ -2,13 +2,14 @@
 
 import json
 import subprocess
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from agentpilot import run_support
-from agentpilot.run_support import (
+from agentpilot import run_support, support_agent
+from agentpilot.support_agent import (
     AGENT_DIR,
     DEVELOPER_ONLY_FACTS,
     REPO_ROOT,
@@ -18,6 +19,9 @@ from agentpilot.run_support import (
     load_api_key,
     skill_body,
 )
+
+# Date de l'horloge de ShopSim (GET /clock), remplacée dans les tests
+TODAY = date(2026, 7, 6)
 
 # Liste réelle observée avec claude 2.1.310 : `StructuredOutput` vient de --json-schema
 SHOPSIM_TOOLS = ["StructuredOutput", "mcp__shopsim__get_ticket", "mcp__shopsim__get_order"]
@@ -85,6 +89,8 @@ class FakeClaude:
 
 @pytest.fixture(autouse=True)
 def api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Horloge de ShopSim : pas d'appel réseau dans ces tests
+    monkeypatch.setattr(support_agent, "simulation_today", lambda url: TODAY)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     # Ne doivent jamais atteindre l'agent ni le serveur MCP
     monkeypatch.setenv("CHAOS_TOKEN", "chaos-secret")
@@ -106,7 +112,7 @@ def saved(runs_dir: Path, pattern: str) -> dict[str, Any]:
 
 
 def test_system_prompt_contains_instructions_policy_and_date() -> None:
-    prompt = build_system_prompt()
+    prompt = build_system_prompt(TODAY)
 
     assert (AGENT_DIR / "CLAUDE.md").read_text(encoding="utf-8").strip() in prompt
     assert skill_body(SKILL_PATH.read_text(encoding="utf-8")).strip() in prompt
@@ -131,7 +137,7 @@ def test_command_locks_the_agent_down(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert fake.option("--allowedTools") == "mcp__shopsim__*"
     assert fake.option("--permission-mode") == "dontAsk"
     assert fake.option("--settings") == str(AGENT_DIR / "settings.json")
-    assert fake.option("--append-system-prompt") == build_system_prompt()
+    assert fake.option("--append-system-prompt") == build_system_prompt(TODAY)
     assert json.loads(fake.option("--json-schema"))["title"] == "SupportDecision"
     assert fake.option("--output-format") == "stream-json"
     assert fake.kwargs["cwd"] == AGENT_DIR
@@ -270,18 +276,18 @@ def test_missing_api_key_is_readable(tmp_path: Path) -> None:
 def test_check_passes_with_the_right_answers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    answer = expected_context().model_dump()
+    answer = expected_context(TODAY).model_dump()
     fake = install(monkeypatch, FakeClaude(init_event(), result_event(answer)))
 
     assert run_support.main(["--check"], runs_dir=tmp_path) == 0
 
     assert json.loads(fake.option("--json-schema"))["title"] == "ContextCheck"
-    assert fake.option("--append-system-prompt") == build_system_prompt()
+    assert fake.option("--append-system-prompt") == build_system_prompt(TODAY)
     assert saved(tmp_path, "check-*.json")["check"] == answer
 
 
 def test_expected_context_comes_from_policy() -> None:
-    assert expected_context().model_dump() == {
+    assert expected_context(TODAY).model_dump() == {
         "refund_window_days": 30,
         "approval_threshold_eur": 50,
         "risk_min_refunds": 3,
@@ -297,7 +303,7 @@ def test_expected_context_comes_from_policy() -> None:
 def test_trap_questions_target_developer_only_facts() -> None:
     """Chaque information piège est dans le CLAUDE.md développeur, jamais dans la consigne."""
     developer_instructions = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-    agent_prompt = build_system_prompt()
+    agent_prompt = build_system_prompt(TODAY)
 
     for secret in DEVELOPER_ONLY_FACTS.values():
         assert secret in developer_instructions
@@ -326,7 +332,7 @@ def test_check_fails_when_the_agent_knows_developer_instructions(
     changes: dict[str, Any],
     message: str,
 ) -> None:
-    answer = expected_context().model_dump() | changes
+    answer = expected_context(TODAY).model_dump() | changes
     install(monkeypatch, FakeClaude(init_event(), result_event(answer)))
 
     assert run_support.main(["--check"], runs_dir=tmp_path) == 1
@@ -350,7 +356,7 @@ def test_check_fails_when_the_agent_lacks_its_instructions(
     changes: dict[str, Any],
     message: str,
 ) -> None:
-    answer = expected_context().model_dump() | changes
+    answer = expected_context(TODAY).model_dump() | changes
     install(monkeypatch, FakeClaude(init_event(), result_event(answer)))
 
     assert run_support.main(["--check"], runs_dir=tmp_path) == 1
@@ -359,7 +365,7 @@ def test_check_fails_when_the_agent_lacks_its_instructions(
 
 
 def test_read_tool_names_match_the_mcp_server() -> None:
-    assert run_support.READ_TOOL_NAMES == {
+    assert support_agent.READ_TOOL_NAMES == {
         "mcp__shopsim__list_open_tickets",
         "mcp__shopsim__get_ticket",
         "mcp__shopsim__get_order",

@@ -8,8 +8,12 @@ même date simulée, et elle ne recule pas au redémarrage de l'application.
 
 Toute écriture datée (remboursement, réponse, renvoi, panne) utilise `now(session)`, jamais
 `datetime.now()` : un test le vérifie dans tout le code de ShopSim.
+
+`SHOPSIM_FREEZE_CLOCK=1` (valeur exacte) fige l'horloge à `SIMULATION_NOW` : pour les
+évaluations, dont la vérité terrain est calculée à cette date.
 """
 
+import os
 from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import select
@@ -38,8 +42,15 @@ def start(session: Session) -> None:
     session.merge(SimulationClock(id=1, started_at=real_now()))
 
 
+def is_frozen() -> bool:
+    # Relue à chaque appel ; seule la valeur exacte « 1 » fige l'horloge
+    return os.environ.get("SHOPSIM_FREEZE_CLOCK") == "1"
+
+
 def now(session: Session) -> datetime:
     """Date simulée : `SIMULATION_NOW` + temps réel écoulé depuis le dernier seed."""
+    if is_frozen():
+        return SIMULATION_NOW
     started_at = session.scalar(select(SimulationClock.started_at).where(SimulationClock.id == 1))
     elapsed = real_now() - (started_at or _PROCESS_START)
     # Jamais avant le début de la simulation, même si l'horloge système recule

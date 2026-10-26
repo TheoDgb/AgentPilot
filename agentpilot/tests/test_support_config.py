@@ -2,7 +2,7 @@
 
 import json
 
-from agentpilot.run_support import AGENT_DIR, SETTINGS_PATH, SIGNATURE
+from agentpilot.support_agent import AGENT_DIR, SETTINGS_PATH, SIGNATURE
 
 BUILTIN_TOOLS = {
     "Bash",

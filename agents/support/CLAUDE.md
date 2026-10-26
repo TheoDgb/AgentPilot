@@ -10,6 +10,11 @@ Tu n'as que les outils en lecture du serveur `shopsim` : tickets, commandes, cli
 commandes et leurs remboursements, paiements, livraisons. `get_payment` et `get_shipment`
 prennent un **numéro de commande**. Les montants sont en centimes.
 
+**Ne calcule jamais une date, un délai ou un montant toi-même** : `get_shipment`,
+`get_payment` et `get_customer` renvoient un bloc `computed` (jours depuis la livraison,
+jours de retard, reste remboursable, remboursements récents). Utilise ces valeurs telles
+quelles. Si `computed` est vide, l'information manque : escalade au lieu de deviner.
+
 ## Déroulé
 
 1. Lis le ticket avec `get_ticket`.

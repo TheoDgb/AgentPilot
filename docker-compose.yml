@@ -25,6 +25,8 @@ services:
       PAYMENT_LATENCY_MS: ${PAYMENT_LATENCY_MS:-100}
       # Jeton des endpoints Chaos ; vide = Chaos fermé
       CHAOS_TOKEN: ${CHAOS_TOKEN:-}
+      # 1 = horloge figée au 2026-07-06 12:00 (évaluations) ; sinon elle avance depuis le seed
+      SHOPSIM_FREEZE_CLOCK: ${SHOPSIM_FREEZE_CLOCK:-0}
     ports:
       - "8000:8000"
     depends_on:

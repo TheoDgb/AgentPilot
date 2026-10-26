@@ -186,3 +186,54 @@ def test_tenure_follows_the_simulation_clock(
     sim_clock.elapse(timedelta(days=2))
 
     assert client.get(f"/customers/{customer.id}").json()["tenure_days"] == 12
+
+
+# --- GET /clock et horloge figée -------------------------------------------------------
+
+
+def test_clock_endpoint_follows_the_simulation(client: TestClient, sim_clock: SimClock) -> None:
+    sim_clock.elapse(timedelta(hours=2))
+
+    response = client.get("/clock")
+
+    assert response.status_code == 200
+    assert response.json() == {"now": "2026-07-06T14:00:00Z", "frozen": False}
+
+
+@pytest.mark.parametrize(("value", "frozen"), [("1", True), ("0", False), ("true", False)])
+def test_freeze_variable(
+    client: TestClient,
+    session: Session,
+    sim_clock: SimClock,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+    frozen: bool,
+) -> None:
+    monkeypatch.setenv("SHOPSIM_FREEZE_CLOCK", value)
+    sim_clock.elapse(timedelta(days=3))
+
+    expected = SIMULATION_NOW if frozen else SIMULATION_NOW + timedelta(days=3)
+    assert clock.now(session) == expected
+    assert client.get("/clock").json()["frozen"] is frozen
+
+
+def test_frozen_clock_keeps_reply_order(
+    client: TestClient,
+    make_customer: MakeCustomer,
+    make_ticket: MakeTicket,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Horloge figée : deux réponses ont la même date, l'id garde leur ordre."""
+    monkeypatch.setenv("SHOPSIM_FREEZE_CLOCK", "1")
+    ticket = make_ticket(make_customer())
+    for n, body in enumerate(["Première", "Deuxième", "Troisième"]):
+        client.post(
+            f"/tickets/{ticket.id}/reply",
+            json={"body": body},
+            headers={"Idempotency-Key": f"frozen-{n}"},
+        )
+
+    messages = client.get(f"/tickets/{ticket.id}").json()["messages"]
+
+    assert [m["body"] for m in messages][1:] == ["Première", "Deuxième", "Troisième"]
+    assert {m["created_at"] for m in messages[1:]} == {"2026-07-06T12:00:00Z"}

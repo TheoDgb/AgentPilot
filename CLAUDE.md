@@ -36,7 +36,7 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
 - Démarrer tout : `docker compose up -d`
 - Base PostgreSQL exposée sur l'hôte au port **5433** (`POSTGRES_PORT`, 5432 étant pris par un PostgreSQL local) ; dans le réseau Docker, l'app utilise `db:5432`
 - Latence simulée du service Paiements : `PAYMENT_LATENCY_MS` (100 ms par défaut, relue à chaque appel ; 0 dans les tests)
-- Horloge de ShopSim (`shopsim/app/clock.py`) : le seed est figé au 2026-07-06 12:00 UTC (`SIMULATION_NOW`), puis le temps avance au rythme réel depuis le dernier seed. Toute écriture datée utilise `clock.now(session)`, jamais `datetime.now()` (un test le vérifie). Relancer le seed juste avant une évaluation, pour que la vérité terrain (calculée au 2026-07-06) reste juste
+- Horloge de ShopSim (`shopsim/app/clock.py`) : le seed est figé au 2026-07-06 12:00 UTC (`SIMULATION_NOW`), puis le temps avance au rythme réel depuis le dernier seed. Toute écriture datée utilise `clock.now(session)`, jamais `datetime.now()` (un test le vérifie). `GET /clock` donne la date simulée. Pour une évaluation : relancer le seed et figer l'horloge avec `SHOPSIM_FREEZE_CLOCK=1` (valeur exacte), car la vérité terrain est calculée au 2026-07-06
 - Tests : `pytest`
 - Tests d'un service : `pytest shopsim/` (idem pour `mcp_server/`, `agentpilot/`)
 - Données de démo : `python shopsim/seed.py`
@@ -48,8 +48,9 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
   - `bad_deploy` : seuls les remboursements échouent (500)
 - Serveur MCP (stdio, lancé par Claude Code via `.mcp.json`) : `.venv/bin/python -m mcp_server.server`. Variables `SHOPSIM_URL` (`http://localhost:8000` par défaut) et `SHOPSIM_TIMEOUT_S` (10 s par défaut). Lecture seule par défaut ; `SHOPSIM_MCP_ACTIONS=1` (valeur exacte) ajoute les outils d'action (répondre, rembourser, renvoyer, escalader, résoudre), avec des clés d'idempotence calculées par le serveur. Jamais pour l'agent Ops ni dans `.mcp.json`
 - Agent Support sur un ticket (headless, sans action) : `python -m agentpilot.run_support <ticket>` ; décision validée et enregistrée dans `runs/support/` (non versionné). `--check` vérifie que l'agent reçoit sa consigne, sa politique et seulement les outils shopsim, et qu'il ne connaît rien du CLAUDE.md développeur (questions pièges). Exige `ANTHROPIC_API_KEY` dans `.env` (mode `--bare`)
+- Service AgentPilot (local, pas encore dans Docker) : `.venv/bin/uvicorn agentpilot.app:app --port 8001`. `POST /runs/support/{ticket_id}` lance l'agent Support par le Claude Agent SDK (202), `GET /runs/{id}` et `GET /runs?ticket_id=` renvoient les exécutions (schéma `agentpilot` de la base), `POST /checks/support` vérifie son isolement. Même agent et même isolement que la CLI ; code commun dans `agentpilot/support_agent.py`. Exige `ANTHROPIC_API_KEY` dans `.env`
 - Activer l'environnement : `source .venv/bin/activate`
-- Installer les dépendances : `uv pip install -e ".[dev,mcp]"` (venv créé avec uv, pas de pip ; l'extra `mcp` n'est pas installé dans l'image ShopSim)
+- Installer les dépendances : `uv pip install -e ".[dev,mcp,agent]"` (venv créé avec uv, pas de pip ; les extras `mcp` et `agent` ne sont pas installés dans l'image ShopSim)
 
 ## Stack et conventions
 
@@ -88,8 +89,8 @@ Jalon en cours : **J3 — Agent SDK + validation humaine**
 - [x] J2.2 : agent Support en headless sur un ticket, sortie JSON validée, sans action (`agents/support/`, schéma `agentpilot/schemas.py`, script `agentpilot/run_support.py`)
 - [x] J2 global : serveur MCP en lecture seule (8 outils, `.mcp.json`) et agent Support en headless (`agents/support/`, `agentpilot/run_support.py`, isolement prouvé par `--check`)
 - [x] J3.1 : outils d'action dans le serveur MCP (répondre, rembourser, renvoyer, escalader, résoudre), avec clés d'idempotence, activés par `SHOPSIM_MCP_ACTIONS=1`. Ajouts validés à ShopSim : `POST /orders/{id}/resend` (commande de remplacement, `Idempotency-Key`) et horloge de simulation unique pour toutes les écritures
-- [ ] J3.2 : agent Support lancé par le Claude Agent SDK dans le service AgentPilot (FastAPI), exécutions enregistrées en base  ← prochaine étape
-- [ ] J3.3 : hooks : mise en attente des actions sensibles (plus de 50 €, client à risque, escalade) et journal de chaque appel d'outil
+- [x] J3.2 : agent Support lancé par le Claude Agent SDK dans le service AgentPilot (FastAPI), exécutions enregistrées en base (schéma `agentpilot`). Outils de lecture enrichis de valeurs calculées (`computed` : jours depuis la livraison, retard, reste remboursable, remboursements dans la fenêtre de risque). Ajout validé à ShopSim : `GET /clock` et `SHOPSIM_FREEZE_CLOCK`
+- [ ] J3.3 : hooks : mise en attente des actions sensibles (plus de 50 €, client à risque, escalade) et journal de chaque appel d'outil  ← prochaine étape
 - [ ] J3.4 : interface web d'approbation (approuver ou refuser une action en attente)
 - [ ] J3.5 : traitement continu de la file de tickets, reprise après interruption sans double action, arrêt d'urgence
 

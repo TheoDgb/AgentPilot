@@ -2,7 +2,7 @@
 
 import socket
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -11,7 +11,7 @@ from mcp import Client
 from mcp_types import CallToolResult
 from sqlalchemy.orm import Session
 
-from mcp_server import shopsim_client
+from mcp_server import read_tools, shopsim_client
 from mcp_server.server import mcp
 from mcp_server.tests.conftest import MakeRefund, MakeShipment
 from shopsim.app.models import (
@@ -22,7 +22,13 @@ from shopsim.app.models import (
     ShipmentStatus,
     TicketStatus,
 )
-from shopsim.tests.conftest import MakeCustomer, MakeOrder, MakePayment, MakeTicket
+from shopsim.tests.conftest import (
+    MakeCustomer,
+    MakeOrder,
+    MakePayment,
+    MakeTicket,
+    SimClock,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -158,6 +164,7 @@ async def test_get_payment(shopsim: str, make_payment: MakePayment) -> None:
     assert body["id"] == payment.id
     assert body["status"] == "succeeded"
     assert body["amount_cents"] == 7_500
+    assert body["computed"] == {"remaining_refundable_cents": 7_500}
 
 
 async def test_get_shipment(
@@ -259,8 +266,100 @@ async def test_tools_never_reach_chaos(monkeypatch: pytest.MonkeyPatch) -> None:
         }.get(name, {"customer_id": 1})
         await call(name, **argument)
 
-    assert len(requests) == len(READ_TOOL_NAMES)
+    # Au moins un appel par outil (certains lisent aussi l'horloge ou les remboursements)
+    assert len(requests) >= len(READ_TOOL_NAMES)
     for request in requests:
         assert request.method == "GET"
         assert "x-chaos-token" not in request.headers
         assert not request.url.path.startswith("/chaos")
+
+
+# --- Valeurs calculées (le code calcule, le modèle juge) -------------------------------
+
+
+async def test_shipment_computed_values(
+    shopsim: str, make_order: MakeOrder, make_shipment: MakeShipment, sim_clock: SimClock
+) -> None:
+    delivered = make_order(OrderStatus.DELIVERED)
+    make_shipment(delivered, ShipmentStatus.DELIVERED, datetime(2026, 6, 5, 15, 0, tzinfo=UTC))
+    late = make_order(OrderStatus.SHIPPED)
+    make_shipment(late, ShipmentStatus.DELAYED)  # livraison estimée le 2026-07-08
+    sim_clock.elapse(timedelta(days=4))  # 2026-07-10 12:00
+
+    body = data(await call("get_shipment", order_id=delivered.id))
+    computed = data(await call("get_shipment", order_id=late.id))["computed"]
+
+    assert body["computed"] == {
+        "as_of": "2026-07-10T12:00:00+00:00",
+        # 34 jours et 21 h : 35 jours entamés
+        "days_since_delivery": 35,
+        # Livraison estimée le 2026-07-08 (fabrique make_shipment)
+        "days_past_estimated_delivery": 2,
+    }
+    assert computed["days_since_delivery"] is None
+    assert computed["days_past_estimated_delivery"] == 2
+
+
+async def test_shipment_not_late_yet(
+    shopsim: str, make_order: MakeOrder, make_shipment: MakeShipment, sim_clock: SimClock
+) -> None:
+    order = make_order(OrderStatus.SHIPPED)
+    make_shipment(order, ShipmentStatus.IN_TRANSIT)  # livraison estimée le 2026-07-08
+
+    computed = data(await call("get_shipment", order_id=order.id))["computed"]
+
+    assert computed["days_past_estimated_delivery"] == 0
+
+
+async def test_customer_computed_values(
+    shopsim: str, make_payment: MakePayment, make_refund: MakeRefund, sim_clock: SimClock
+) -> None:
+    payment = make_payment()
+    for month, day in ((3, 1), (4, 10), (6, 1), (7, 1)):
+        make_refund(payment, 100, datetime(2026, month, day, 12, 0, tzinfo=UTC))
+
+    body = data(await call("get_customer", customer_id=payment.order.customer_id))
+
+    assert body["refunds_count"] == 4
+    # Fenêtre de 90 jours avant le 2026-07-06 12:00 : le 2026-03-01 en est exclu
+    assert body["computed"] == {
+        "as_of": "2026-07-06T12:00:00+00:00",
+        "refunds_in_risk_window": 3,
+        "risk_window_days": 90,
+    }
+
+
+async def test_payment_remaining_amount(
+    shopsim: str, make_payment: MakePayment, make_refund: MakeRefund
+) -> None:
+    payment = make_payment(amount_cents=10_000)
+    make_refund(payment, 2_500, datetime(2026, 7, 1, tzinfo=UTC))
+
+    body = data(await call("get_payment", order_id=payment.order_id))
+
+    assert body["computed"] == {"remaining_refundable_cents": 7_500}
+
+
+async def test_computed_values_without_clock_are_null(
+    shopsim: str,
+    make_order: MakeOrder,
+    make_shipment: MakeShipment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sans horloge, l'outil renvoie les données brutes et dit pourquoi il n'a rien calculé."""
+    order = make_order(OrderStatus.SHIPPED)
+    make_shipment(order, ShipmentStatus.DELAYED)
+    real_get_json = shopsim_client.get_json
+
+    async def clock_down(path: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if path == "/clock":
+            raise shopsim_client.ShopSimError("ShopSim a renvoyé une erreur interne (500).")
+        return await real_get_json(path, *args, **kwargs)
+
+    monkeypatch.setattr(read_tools, "get_json", clock_down)
+
+    body = data(await call("get_shipment", order_id=order.id))
+
+    assert body["status"] == "delayed"
+    assert body["computed"] is None
+    assert "Valeurs calculées indisponibles" in body["computed_error"]

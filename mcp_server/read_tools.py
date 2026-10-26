@@ -4,11 +4,14 @@ Les docstrings (en anglais) sont les descriptions lues par le modèle : à quoi 
 l'outil, ses paramètres, ce qu'il renvoie et les erreurs possibles.
 """
 
+from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Annotated, Any
 
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
+from mcp_server import computed
 from mcp_server.shopsim_client import ShopSimError, get_json
 
 Id = Annotated[int, Field(ge=1)]
@@ -20,6 +23,24 @@ async def _get(path: str, not_found: str, params: dict[str, Any] | None = None) 
         return await get_json(path, not_found, params)
     except ShopSimError as exc:
         raise ToolError(str(exc)) from exc
+
+
+async def _simulation_now() -> datetime:
+    clock = await get_json("/clock", "Horloge de ShopSim introuvable.")
+    return computed.parse_datetime(clock["now"])
+
+
+async def _with_computed(
+    data: dict[str, Any], compute: Callable[[], Awaitable[dict[str, Any]]]
+) -> dict[str, Any]:
+    """Ajoute le bloc `computed` ; si l'horloge ou un appel manque, les données brutes
+    restent renvoyées avec `computed: null` et la raison (on ne devine jamais une date)."""
+    try:
+        data["computed"] = await compute()
+    except ShopSimError as exc:
+        data["computed"] = None
+        data["computed_error"] = f"Valeurs calculées indisponibles : {exc}"
+    return data
 
 
 async def list_open_tickets(
@@ -87,14 +108,22 @@ async def get_customer(customer_id: Id) -> dict[str, Any]:
         customer_id: Customer id.
 
     Returns: {id, email, first_name, last_name, created_at, tenure_days (customer
-    seniority in days), resolved_tickets_count, refunds_count (all time)}. Use
-    list_customer_refunds for refund dates.
+    seniority in days), resolved_tickets_count, refunds_count (all time), computed:
+    {as_of (today's simulated date), refunds_in_risk_window (refunds received within the
+    last risk_window_days days), risk_window_days}}. The computed values are exact: use
+    them as they are, never recount dates yourself. Use list_customer_refunds for the
+    refund details.
 
     Errors: customer not found, ShopSim internal error (5xx), slow service (timeout).
     """
-    return await _get(
-        f"/customers/{customer_id}", f"Client {customer_id} introuvable dans ShopSim."
-    )
+    not_found = f"Client {customer_id} introuvable dans ShopSim."
+    customer = await _get(f"/customers/{customer_id}", not_found)
+
+    async def compute() -> dict[str, Any]:
+        refunds = await get_json(f"/customers/{customer_id}/refunds", not_found)
+        return computed.customer_values(refunds, await _simulation_now())
+
+    return await _with_computed(customer, compute)
 
 
 async def list_customer_orders(customer_id: Id) -> list[dict[str, Any]]:
@@ -139,14 +168,18 @@ async def get_payment(order_id: Id) -> dict[str, Any]:
         order_id: Id of the order whose payment to read.
 
     Returns: {id (payment id), order_id, status (pending, succeeded, failed, refunded),
-    amount_cents, refunded_cents (total already refunded), created_at}.
+    amount_cents, refunded_cents (total already refunded), created_at, computed:
+    {remaining_refundable_cents (amount that can still be refunded)}}. Use the computed
+    value as it is.
 
     Errors: no payment for this order, ShopSim internal error (5xx), slow service
     (the payment service is sometimes slow; timeout).
     """
-    return await _get(
+    payment = await _get(
         f"/payments/{order_id}", f"Aucun paiement pour la commande {order_id} dans ShopSim."
     )
+    payment["computed"] = computed.payment_values(payment)
+    return payment
 
 
 async def get_shipment(order_id: Id) -> dict[str, Any]:
@@ -158,15 +191,23 @@ async def get_shipment(order_id: Id) -> dict[str, Any]:
     Returns: {id, order_id, carrier, tracking_number, status (label_created, in_transit,
     out_for_delivery, delivered, delayed, lost), estimated_delivery (date),
     delivered_at (may be null), created_at, events: [{occurred_at, location,
-    description}]} in chronological order.
+    description}] in chronological order, computed: {as_of (today's simulated date),
+    days_since_delivery (days started since delivery, null if not delivered),
+    days_past_estimated_delivery (days late, 0 if not late yet)}}. The computed values
+    are exact: use them as they are, never compute dates yourself.
 
     Errors: no shipment for this order (not shipped yet), ShopSim internal error (5xx),
     slow service (timeout).
     """
-    return await _get(
+    shipment = await _get(
         f"/shipments/{order_id}",
         f"Aucune livraison pour la commande {order_id} dans ShopSim (pas encore expédiée ?).",
     )
+
+    async def compute() -> dict[str, Any]:
+        return computed.shipment_values(shipment, await _simulation_now())
+
+    return await _with_computed(shipment, compute)
 
 
 READ_TOOLS = [

@@ -162,6 +162,12 @@ class TicketPage(BaseModel):
     offset: int
 
 
+class ClockRead(BaseModel):
+    # Date simulée actuelle, et si elle est figée à SIMULATION_NOW (évaluations)
+    now: datetime
+    frozen: bool
+
+
 class ChaosFaultRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
