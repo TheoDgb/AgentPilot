@@ -1,6 +1,7 @@
 """Schémas Pydantic des requêtes et réponses de l'API."""
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -147,6 +148,8 @@ class TicketReplyCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     body: str = Field(min_length=1, max_length=5000)
+    # Réponse de l'agent (par défaut) ou d'un humain du service client ; jamais du client
+    author: Literal[MessageAuthor.AGENT, MessageAuthor.HUMAN] = MessageAuthor.AGENT
 
 
 class TicketEscalate(BaseModel):

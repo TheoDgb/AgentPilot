@@ -31,7 +31,7 @@ class ToolCallRead(BaseModel):
 
 
 class PendingActionRead(BaseModel):
-    """Action sensible arrêtée par le hook, en attente d'un humain."""
+    """Action sensible arrêtée par le hook, et la décision humaine qui a suivi."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -44,6 +44,15 @@ class PendingActionRead(BaseModel):
     idempotency_key: str
     status: PendingStatus
     created_at: datetime
+    decided_by: str | None
+    decided_at: datetime | None
+    decision_note: str | None
+    executed_at: datetime | None
+    result: dict[str, Any] | None
+    error: str | None
+    customer_message: str | None
+    message_sent_at: datetime | None
+    resolved_at: datetime | None
 
 
 class RunRead(BaseModel):

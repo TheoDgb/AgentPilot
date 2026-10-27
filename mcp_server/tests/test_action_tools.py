@@ -93,6 +93,19 @@ async def test_reply_is_sent_once(shopsim: str, session: Session, ticket: Ticket
     assert messages[0].idempotency_key == f"agentpilot:ticket-{ticket.id}:reply:after-1"
 
 
+async def test_agent_cannot_choose_the_author(
+    shopsim: str, session: Session, ticket: Ticket
+) -> None:
+    async with Client(SERVER) as client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+    assert "author" not in tools["reply_to_ticket"].input_schema["properties"]
+
+    # Même en forçant le paramètre, le message n'est jamais celui d'un humain
+    await call("reply_to_ticket", ticket_id=ticket.id, body="Bonjour Paul.", author="human")
+
+    assert count(session, TicketMessage, TicketMessage.author == MessageAuthor.HUMAN) == 0
+
+
 async def test_reworded_reply_is_not_sent_twice(
     shopsim: str, session: Session, ticket: Ticket
 ) -> None:

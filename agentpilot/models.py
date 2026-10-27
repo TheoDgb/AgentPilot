@@ -39,10 +39,12 @@ class CallOutcome(StrEnum):
 
 class PendingStatus(StrEnum):
     PENDING = "pending"
-    # Décision humaine et exécution : J3.4
+    # Approuvée : exécution en cours, ou à relancer après une panne de ShopSim
     APPROVED = "approved"
-    REJECTED = "rejected"
     EXECUTED = "executed"
+    # Approuvée mais devenue impossible (ticket ou commande changés) : rien n'a été exécuté
+    FAILED = "failed"
+    REJECTED = "rejected"
 
 
 def _enum(enum: type[StrEnum], name: str) -> Enum:
@@ -81,10 +83,10 @@ class Run(Base):
 
 
 class PendingAction(Base):
-    """Action sensible arrêtée par le hook, en attente d'un humain.
+    """Action sensible arrêtée par le hook, en attente d'un humain, puis sa décision.
 
-    De quoi l'exécuter plus tard (J3.4) à l'identique : l'outil, les paramètres exacts de
-    l'agent et la clé d'idempotence que le serveur MCP aurait envoyée à ShopSim.
+    De quoi l'exécuter plus tard à l'identique : l'outil, les paramètres exacts de l'agent
+    et la clé d'idempotence que le serveur MCP aurait envoyée à ShopSim.
     """
 
     __tablename__ = "pending_actions"
@@ -104,6 +106,22 @@ class PendingAction(Base):
         _enum(PendingStatus, "pending_status"), index=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    # Décision humaine (nom déclaratif : pas d'authentification)
+    decided_by: Mapped[str | None] = mapped_column(String(100))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Motif : obligatoire pour un refus
+    decision_note: Mapped[str | None] = mapped_column(Text)
+    # Exécution par la plateforme : réponse de ShopSim, ou motif de l'échec
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    # Suite donnée au client par l'humain
+    customer_message: Mapped[str | None] = mapped_column(Text)
+    message_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    run: Mapped[Run] = relationship(viewonly=True, lazy="joined")
 
 
 class ToolCall(Base):

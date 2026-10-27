@@ -103,6 +103,8 @@ async def reply_to_ticket(
     """
     ticket = await _ticket(ticket_id)
     customer_messages = sum(m["author"] == "customer" for m in ticket["messages"])
+    # Pas de champ `author` : ShopSim enregistre l'auteur « agent » par défaut, et l'agent ne
+    # peut pas se faire passer pour un humain du service client
     code, updated = await _post(
         f"/tickets/{ticket_id}/reply",
         f"Ticket {ticket_id} introuvable dans ShopSim.",

@@ -6,7 +6,8 @@ Lancement (local) : `.venv/bin/uvicorn agentpilot.app:app --port 8001`.
   outils d'action sous hooks : les actions sensibles sont mises en attente d'un humain ;
 - `GET /runs/{id}` et `GET /runs` renvoient les exécutions enregistrées, avec leur journal
   d'appels d'outils et leurs actions en attente ;
-- `POST /checks/support` vérifie l'isolement de l'agent (consigne, politique, outils).
+- `POST /checks/support` vérifie l'isolement de l'agent (consigne, politique, outils) ;
+- `/approvals` : pages d'approbation des actions en attente (`agentpilot/web.py`).
 """
 
 import asyncio
@@ -21,7 +22,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Req
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from agentpilot import sdk_runner
+from agentpilot import sdk_runner, web
 from agentpilot.api_schemas import RunCreated, RunRead
 from agentpilot.db import SessionLocal, engine, init_db
 from agentpilot.journal import DbJournal
@@ -53,6 +54,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="AgentPilot", lifespan=lifespan)
+app.include_router(web.router)
 # Remplaçables par les tests : sessions de base et fonction `query` du SDK
 app.state.session_factory = SessionLocal
 app.state.query = sdk_runner.sdk_query

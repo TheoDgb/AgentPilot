@@ -25,6 +25,10 @@ mcp = [
 # Claude Agent SDK (embarque le binaire Claude Code) pour le service AgentPilot
 agent = [
     "claude-agent-sdk>=0.2.174,<0.3",
+    # Page d'approbation : gabarits HTML à échappement automatique (contenu des tickets non
+    # fiable) et lecture des formulaires par FastAPI
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
 ]
 
 [tool.pytest.ini_options]
@@ -45,3 +49,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["shopsim*", "mcp_server*", "agentpilot*", "evals*"]
+
+[tool.setuptools.package-data]
+agentpilot = ["templates/*.html"]

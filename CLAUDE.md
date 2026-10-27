@@ -49,6 +49,7 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
 - Serveur MCP (stdio, lancé par Claude Code via `.mcp.json`) : `.venv/bin/python -m mcp_server.server`. Variables `SHOPSIM_URL` (`http://localhost:8000` par défaut) et `SHOPSIM_TIMEOUT_S` (10 s par défaut). Lecture seule par défaut ; `SHOPSIM_MCP_ACTIONS=1` (valeur exacte) ajoute les outils d'action (répondre, rembourser, renvoyer, escalader, résoudre), avec des clés d'idempotence calculées par le serveur. Jamais pour l'agent Ops ni dans `.mcp.json`
 - Agent Support sur un ticket (headless, lecture seule, sans hooks donc sans action) : `python -m agentpilot.run_support <ticket>` ; décision validée et enregistrée dans `runs/support/` (non versionné). `--check` vérifie que l'agent reçoit sa consigne, sa politique et seulement les outils shopsim, et qu'il ne connaît rien du CLAUDE.md développeur (questions pièges). Exige `ANTHROPIC_API_KEY` dans `.env` (mode `--bare`)
 - Service AgentPilot (local, pas encore dans Docker) : `.venv/bin/uvicorn agentpilot.app:app --port 8001`. `POST /runs/support/{ticket_id}` lance l'agent Support par le Claude Agent SDK (202), avec les 5 outils d'action sous hooks (`agentpilot/hooks.py`) : avant chaque action, le code relit ShopSim et met en attente d'un humain tout remboursement ou renvoi de plus de 50 € ou pour un client à risque (`agentpilot/approval.py`, seuils de `evals/policy.py`), après chaque appel il l'inscrit au journal. `GET /runs/{id}` et `GET /runs?ticket_id=` renvoient les exécutions, leur journal et leurs actions en attente (schéma `agentpilot` de la base, recréé à la main en cas de changement de tables : pas de migrations), `POST /checks/support` vérifie son isolement (13 outils shopsim). Même agent et même isolement que la CLI ; code commun dans `agentpilot/support_agent.py`. Exige `ANTHROPIC_API_KEY` dans `.env`
+- Page d'approbation : `http://localhost:8001/approvals` (rendue côté serveur, Jinja2, `agentpilot/web.py`). Liste des actions en attente, dossier complet (ticket, action, raisons, faits lus par le hook, décision de l'agent, avertissement si le montant de l'agent diffère de la valeur lue dans ShopSim). Approuver exécute l'action par le code de la plateforme (`agentpilot/decisions.py`) avec la clé d'idempotence enregistrée, après revérification dans ShopSim ; refuser exige un motif ; un message au client (prérempli) et la résolution du ticket peuvent suivre. Un double clic ou deux approbateurs ne donnent qu'une exécution (décision prise par `UPDATE … WHERE status = 'pending'`, puis clé d'idempotence). ShopSim en panne pendant l'exécution : l'action reste `approved`, à relancer (même clé)
 - Activer l'environnement : `source .venv/bin/activate`
 - Installer les dépendances : `uv pip install -e ".[dev,mcp,agent]"` (venv créé avec uv, pas de pip ; les extras `mcp` et `agent` ne sont pas installés dans l'image ShopSim)
 
@@ -73,6 +74,10 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
 - Ne jamais committer de secret : la clé d'API va dans `.env` (exclu de git).
 - Une fois ShopSim terminé (jalon J1), ne plus modifier ses API sans le demander : il représente un système existant.
 
+## Limites connues
+
+- Page d'approbation sans authentification : le nom de l'approbateur est déclaratif, et quiconque atteint le port 8001 peut approuver ou refuser. Pas de protection CSRF non plus. Garder le service en local tant qu'une authentification n'est pas en place.
+
 ## Avancement
 
 Jalon en cours : **J3 — Agent SDK + validation humaine**
@@ -91,7 +96,7 @@ Jalon en cours : **J3 — Agent SDK + validation humaine**
 - [x] J3.1 : outils d'action dans le serveur MCP (répondre, rembourser, renvoyer, escalader, résoudre), avec clés d'idempotence, activés par `SHOPSIM_MCP_ACTIONS=1`. Ajouts validés à ShopSim : `POST /orders/{id}/resend` (commande de remplacement, `Idempotency-Key`) et horloge de simulation unique pour toutes les écritures
 - [x] J3.2 : agent Support lancé par le Claude Agent SDK dans le service AgentPilot (FastAPI), exécutions enregistrées en base (schéma `agentpilot`). Outils de lecture enrichis de valeurs calculées (`computed` : jours depuis la livraison, retard, reste remboursable, remboursements dans la fenêtre de risque). Ajout validé à ShopSim : `GET /clock` et `SHOPSIM_FREEZE_CLOCK`
 - [x] J3.3 : outils d'action pour l'agent Support du service, sous hooks : mise en attente des remboursements et renvois sensibles (plus de 50 €, client à risque, valeur relue dans ShopSim), avec la clé d'idempotence pour l'exécution après validation ; escalades et réponses sans validation ; journal de chaque appel d'outil (schéma `agentpilot`)
-- [ ] J3.4 : interface web d'approbation (approuver ou refuser une action en attente)  ← prochaine étape
-- [ ] J3.5 : traitement continu de la file de tickets, reprise après interruption sans double action, arrêt d'urgence
+- [x] J3.4 : page web d'approbation (`/approvals`) : approuver (exécution unique par la plateforme, même clé d'idempotence, revérification avant) ou refuser (motif obligatoire), message au client et résolution du ticket, qui/quand/motif enregistrés. Ajout validé à ShopSim : `POST /tickets/{id}/reply` accepte `author` (`agent` par défaut, ou `human`) ; l'outil MCP ne l'expose pas, seule la page d'approbation envoie `human`
+- [ ] J3.5 : traitement continu de la file de tickets, reprise après interruption sans double action, arrêt d'urgence  ← prochaine étape
 
 Suite : J4 Monitoring + générateur de trafic · J5 Évaluation en CI · J6 Agent Ops + subagents · J7 Livraison et formation

@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Ticket #{{ action.ticket_id }}{% endblock %}
+{% block content %}
+<h1>{{ TOOL_LABELS.get(action.tool, action.tool) }} · ticket #{{ action.ticket_id }}
+  <span class="badge {{ action.status.value }}">{{ STATUS_LABELS[action.status] }}</span></h1>
+
+{% if mismatch %}<div class="banner error mismatch" role="alert">⚠ {{ mismatch }}</div>{% endif %}
+{% for level, text in notices %}<div class="banner {{ level }}">{{ text }}</div>{% endfor %}
+{% if detail %}<div class="banner error">{{ detail }}</div>{% endif %}
+{% if form_error %}<div class="banner error">{{ form_error }}</div>{% endif %}
+{% if shopsim_error %}<div class="banner warn">ShopSim ne répond pas, ticket non affiché : {{ shopsim_error }}</div>{% endif %}
+
+<section>
+  <h2>Action demandée par l'agent</h2>
+  <dl>
+    <dt>Outil</dt><dd>{{ action.tool }}</dd>
+    <dt>Commande</dt><dd>{{ action.params.get("order_id") }}</dd>
+    {% if action.params.get("amount_cents") is not none %}
+    <dt>Montant demandé</dt><dd>{{ action.params["amount_cents"] | eur }}</dd>
+    {% endif %}
+    <dt>Motif de l'agent</dt><dd>{{ action.params.get("reason") }}</dd>
+    <dt>Clé d'idempotence</dt><dd><code>{{ action.idempotency_key }}</code></dd>
+    <dt>Mise en attente</dt><dd>{{ action.created_at.strftime("%d/%m/%Y %H:%M") }}</dd>
+  </dl>
+</section>
+
+<section>
+  <h2>Pourquoi une validation</h2>
+  <ul>{% for r in reasons %}<li>{{ REASON_LABELS[r] }}</li>{% endfor %}</ul>
+  <h2>Faits lus dans ShopSim par le hook</h2>
+  <dl>
+    {% if action.facts.get("value_cents") is not none %}<dt>Valeur comparée au seuil</dt><dd>{{ action.facts["value_cents"] | eur }}</dd>{% endif %}
+    {% if action.facts.get("remaining_refundable_cents") is not none %}<dt>Reste remboursable</dt><dd>{{ action.facts["remaining_refundable_cents"] | eur }}</dd>{% endif %}
+    {% if action.facts.get("order_total_cents") is not none %}<dt>Valeur de la commande</dt><dd>{{ action.facts["order_total_cents"] | eur }}</dd>{% endif %}
+    <dt>Remboursements récents</dt><dd>{{ action.facts.get("refunds_in_risk_window") }} sur {{ action.facts.get("risk_window_days") }} jours</dd>
+    <dt>Date de simulation</dt><dd>{{ action.facts.get("as_of") }}</dd>
+  </dl>
+</section>
+
+<section>
+  <h2>Ticket et messages</h2>
+  {% if ticket %}
+  <p><strong>{{ ticket.subject }}</strong> <span class="badge">{{ ticket.status }}</span>
+    {% if customer %}<span class="muted">· {{ customer.first_name }} {{ customer.last_name }} (client {{ customer.id }})</span>{% endif %}</p>
+  {% for m in ticket.messages %}
+  <div><span class="muted">{{ {"customer": "Client", "agent": "Agent", "human": "Conseiller"}.get(m.author, m.author) }} · {{ m.created_at }}</span>
+    <div class="message">{{ m.body }}</div></div>
+  {% endfor %}
+  {% else %}<p class="muted">Indisponible.</p>{% endif %}
+</section>
+
+<section>
+  <h2>Décision de l'agent</h2>
+  {% if decision %}
+  <dl>
+    <dt>Action</dt><dd>{{ decision.get("action") }}</dd>
+    <dt>Catégorie</dt><dd>{{ decision.get("category") }}</dd>
+    {% if decision.get("amount_cents") is not none %}<dt>Montant</dt><dd>{{ decision["amount_cents"] | eur }}</dd>{% endif %}
+    <dt>Validation demandée</dt><dd>{{ "oui" if decision.get("requires_human_approval") else "non" }}</dd>
+  </dl>
+  {% if decision.get("facts_used") %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Outil</th><th>Champ</th><th>Valeur</th></tr></thead>
+    <tbody>{% for f in decision["facts_used"] %}<tr><td>{{ f.get("tool") }}</td><td>{{ f.get("field") }}</td><td>{{ f.get("value") }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+  {% else %}<p class="muted">Pas de décision enregistrée (exécution en cours ou en échec).</p>{% endif %}
+  <h2 style="margin-top:12px">Réponse envoyée par l'agent</h2>
+  {% if agent_reply %}<div class="message">{{ agent_reply }}</div>{% else %}<p class="muted">Aucune.</p>{% endif %}
+</section>
+
+{% if action.status.value == "pending" %}
+<div class="forms">
+  <section>
+    <h2>Approuver</h2>
+    <form method="post" action="/approvals/{{ action.id }}/approve">
+      <label for="a-name">Votre nom</label>
+      <input id="a-name" type="text" name="name" required maxlength="100" value="{{ form.get('name', '') if form.get('decision') == 'approve' }}">
+      <label for="a-note">Commentaire (facultatif)</label>
+      <input id="a-note" type="text" name="note" maxlength="500" value="{{ form.get('note', '') if form.get('decision') == 'approve' }}">
+      <label for="a-msg">Message au client</label>
+      <textarea id="a-msg" name="message" maxlength="5000">{{ form["message"] if form.get('decision') == 'approve' else approve_message }}</textarea>
+      <label class="check"><input type="checkbox" name="send_message" value="true" checked> Envoyer le message</label>
+      <label class="check"><input type="checkbox" name="resolve" value="true"> Résoudre le ticket</label>
+      <button class="approve" type="submit">Approuver et exécuter</button>
+    </form>
+  </section>
+  <section>
+    <h2>Refuser</h2>
+    <form method="post" action="/approvals/{{ action.id }}/reject">
+      <label for="r-name">Votre nom</label>
+      <input id="r-name" type="text" name="name" required maxlength="100" value="{{ form.get('name', '') if form.get('decision') == 'reject' }}">
+      <label for="r-note">Motif du refus (obligatoire)</label>
+      <input id="r-note" type="text" name="note" required maxlength="500" value="{{ form.get('note', '') if form.get('decision') == 'reject' }}">
+      <label for="r-msg">Message au client</label>
+      <textarea id="r-msg" name="message" maxlength="5000">{{ form["message"] if form.get('decision') == 'reject' else reject_message }}</textarea>
+      <label class="check"><input type="checkbox" name="send_message" value="true" checked> Envoyer le message</label>
+      <label class="check"><input type="checkbox" name="resolve" value="true"> Résoudre le ticket</label>
+      <button class="reject" type="submit">Refuser</button>
+    </form>
+  </section>
+</div>
+{% else %}
+<section>
+  <h2>Décision</h2>
+  <dl>
+    <dt>Décidée par</dt><dd>{{ action.decided_by }}</dd>
+    <dt>Le</dt><dd>{{ action.decided_at.strftime("%d/%m/%Y %H:%M:%S") if action.decided_at }}</dd>
+    <dt>Motif</dt><dd>{{ action.decision_note or "—" }}</dd>
+    {% if action.executed_at %}<dt>Exécutée le</dt><dd>{{ action.executed_at.strftime("%d/%m/%Y %H:%M:%S") }}</dd>{% endif %}
+    {% if action.result %}<dt>Résultat ShopSim</dt><dd><code>{{ action.result | tojson }}</code></dd>{% endif %}
+    {% if action.error %}<dt>Erreur</dt><dd>{{ action.error }}</dd>{% endif %}
+    {% if action.message_sent_at %}<dt>Message envoyé</dt><dd><div class="message">{{ action.customer_message }}</div></dd>{% endif %}
+    {% if action.resolved_at %}<dt>Ticket résolu le</dt><dd>{{ action.resolved_at.strftime("%d/%m/%Y %H:%M:%S") }}</dd>{% endif %}
+  </dl>
+  {% if action.status.value == "approved" %}
+  <form method="post" action="/approvals/{{ action.id }}/retry">
+    <button type="submit">Relancer l'exécution</button>
+  </form>
+  {% endif %}
+</section>
+{% if not action.message_sent_at or not action.resolved_at %}
+<section>
+  <h2>Suite pour le client</h2>
+  <form method="post" action="/approvals/{{ action.id }}/follow-up">
+    {% if not action.message_sent_at %}
+    <label for="f-msg">Message au client</label>
+    <textarea id="f-msg" name="message" maxlength="5000">{{ form["message"] if form.get('decision') == 'follow_up' else follow_up_message }}</textarea>
+    <label class="check"><input type="checkbox" name="send_message" value="true"> Envoyer le message</label>
+    {% endif %}
+    {% if not action.resolved_at %}
+    <label class="check"><input type="checkbox" name="resolve" value="true"> Résoudre le ticket</label>
+    {% endif %}
+    <button type="submit">Valider</button>
+  </form>
+</section>
+{% endif %}
+{% endif %}
+<p><a href="/approvals">← Toutes les actions</a></p>
+{% endblock %}

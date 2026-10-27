@@ -19,3 +19,9 @@ def refund_key(ticket_id: int, order_id: int) -> str:
 
 def resend_key(ticket_id: int, order_id: int) -> str:
     return f"{PREFIX}:ticket-{ticket_id}:resend:order-{order_id}"
+
+
+def decision_reply_key(ticket_id: int, action_id: str) -> str:
+    """Message envoyé par l'humain après sa décision sur une action en attente : une clé par
+    action, distincte de celle de la réponse de l'agent (déjà utilisée)."""
+    return f"{PREFIX}:ticket-{ticket_id}:reply:decision-{action_id}"

@@ -6,7 +6,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -20,19 +20,32 @@ from claude_agent_sdk import (
     ToolUseBlock,
     UserMessage,
 )
+from fastapi.testclient import TestClient
 from mcp.server.mcpserver.exceptions import ToolError
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import DropSchema
 
 from agentpilot import support_agent
+from agentpilot.app import app
 from agentpilot.db import SCHEMA, init_db
 from agentpilot.journal import CallEntry, PendingEntry
 from agentpilot.support_agent import SUPPORT_TOOL_NAMES
 from mcp_server.action_tools import ACTION_TOOLS
 from mcp_server.read_tools import READ_TOOLS
 from mcp_server.tests import conftest as mcp_fixtures
+from shopsim.app.clock import SIMULATION_NOW
+from shopsim.app.models import (
+    Customer,
+    OrderStatus,
+    Payment,
+    PaymentStatus,
+    Refund,
+    ShipmentStatus,
+    Ticket,
+)
+from shopsim.tests.conftest import MakeOrder, MakeShipment, MakeTicket
 
 # Fixtures du serveur MCP, réexportées : ShopSim servi en HTTP sur la base de test
 db_engine = mcp_fixtures.db_engine
@@ -278,3 +291,112 @@ def session_factory(agentpilot_engine: Engine) -> Iterator[sessionmaker[Session]
             bind=connection, join_transaction_mode="create_savepoint", expire_on_commit=False
         )
         transaction.rollback()
+
+
+# --- ShopSim de test et lancement de l'agent par l'API ------------------------------------
+
+DECISION = {
+    "category": "refund_request",
+    "action": "refund",
+    "requires_human_approval": False,
+    "amount_cents": 3_000,
+    "customer_reply": "Bonjour, c'est fait.\n\nLe service client Lumen",
+    "facts_used": [],
+}
+
+
+@pytest.fixture
+def client(
+    session_factory: sessionmaker[Session],
+    shopsim: str,
+    sim_clock: Any,  # noqa: ANN401
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[TestClient]:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    app.state.session_factory = session_factory
+    yield TestClient(app)
+
+
+class Shop:
+    """Données de ShopSim pour un test : client, commandes livrées et payées, ticket."""
+
+    def __init__(
+        self,
+        session: Session,
+        make_order: MakeOrder,
+        make_shipment: MakeShipment,
+        make_ticket: MakeTicket,
+    ) -> None:
+        self.session = session
+        self.make_order = make_order
+        self.make_shipment = make_shipment
+        self.make_ticket = make_ticket
+
+    def payment(self, amount_cents: int, customer: Customer | None = None) -> Payment:
+        order = self.make_order(OrderStatus.DELIVERED, amount_cents, customer=customer)
+        payment = Payment(
+            order=order,
+            status=PaymentStatus.SUCCEEDED,
+            amount_cents=amount_cents,
+            created_at=order.created_at,
+        )
+        self.session.add(payment)
+        self.make_shipment(order, ShipmentStatus.DELIVERED, datetime(2026, 7, 1, tzinfo=UTC))
+        self.session.flush()
+        return payment
+
+    def ticket(self, payment: Payment) -> Ticket:
+        return self.make_ticket(payment.order.customer, payment.order)
+
+    def past_refunds(self, customer: Customer, count: int, days_ago: int = 10) -> None:
+        """Remboursements déjà reçus par le client, `days_ago` jours avant le seed."""
+        for n in range(count):
+            refunded = self.payment(1_000, customer)
+            self.session.add(
+                Refund(
+                    payment=refunded,
+                    amount_cents=1_000,
+                    reason="Ancien remboursement",
+                    idempotency_key=f"test-hooks-past-{refunded.id}-{n}",
+                    created_at=SIMULATION_NOW - timedelta(days=days_ago),
+                )
+            )
+        self.session.flush()
+
+    def refunds(self, payment: Payment) -> int:
+        return (
+            self.session.scalar(
+                select(func.count()).select_from(Refund).where(Refund.payment_id == payment.id)
+            )
+            or 0
+        )
+
+
+@pytest.fixture
+def shop(
+    session: Session,
+    make_order: MakeOrder,
+    make_shipment: MakeShipment,
+    make_ticket: MakeTicket,
+) -> Shop:
+    return Shop(session, make_order, make_shipment, make_ticket)
+
+
+def run(client: TestClient, ticket: Ticket, *calls: Call) -> dict[str, Any]:
+    """Lance l'agent sur le ticket avec ces appels d'outils ; renvoie l'exécution."""
+    app.state.query = HookDrivingQuery(*calls, output=DECISION | {"ticket_id": ticket.id})
+    created = client.post(f"/runs/support/{ticket.id}")
+    assert created.status_code == 202
+    result = client.get(f"/runs/{created.json()['id']}").json()
+    assert result["status"] == "succeeded", result["error"]
+    return result
+
+
+def refund(ticket: Ticket, payment: Payment, amount_cents: int, reason: str = "Retour") -> Call:
+    return call(
+        "refund_order",
+        ticket_id=ticket.id,
+        order_id=payment.order_id,
+        amount_cents=amount_cents,
+        reason=reason,
+    )

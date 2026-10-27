@@ -32,6 +32,11 @@ def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(base_url=shopsim_url(), timeout=timeout_s())
 
 
+class ShopSimUnavailable(ShopSimError):
+    """ShopSim lent, injoignable ou en erreur interne (5xx) : on ne sait pas si une écriture a
+    eu lieu. Un réessai avec la même clé d'idempotence est sans danger."""
+
+
 class ShopSimConflict(ShopSimError):
     """409 de ShopSim : action incompatible avec l'état actuel ou avec une clé déjà utilisée."""
 
@@ -74,12 +79,12 @@ async def _send(
         async with _client() as client:
             response = await client.request(method, path, params=params, json=body, headers=headers)
     except httpx.TimeoutException as exc:
-        raise ShopSimError(
+        raise ShopSimUnavailable(
             f"ShopSim n'a pas répondu en {timeout_s():g} s sur {endpoint} (service lent). "
             "Réessayer plus tard ou escalader."
         ) from exc
     except httpx.TransportError as exc:
-        raise ShopSimError(f"ShopSim est injoignable à {shopsim_url()}.") from exc
+        raise ShopSimUnavailable(f"ShopSim est injoignable à {shopsim_url()}.") from exc
 
     status = response.status_code
     if status in (200, 201):
@@ -87,7 +92,7 @@ async def _send(
     if status == 404:
         raise ShopSimError(not_found)
     if status >= 500:
-        raise ShopSimError(
+        raise ShopSimUnavailable(
             f"ShopSim a renvoyé une erreur interne ({status}) sur {endpoint}. "
             "Le service est peut-être en panne : réessayer plus tard ou escalader."
         )

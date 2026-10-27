@@ -15,9 +15,11 @@ def post_reply(
     ticket_id: int,
     body: str = "Bonjour, voici la réponse.",
     key: str | None = "k",
+    author: str | None = None,
 ) -> Response:
     headers = {} if key is None else {"Idempotency-Key": key}
-    return client.post(f"/tickets/{ticket_id}/reply", json={"body": body}, headers=headers)
+    payload = {"body": body} if author is None else {"body": body, "author": author}
+    return client.post(f"/tickets/{ticket_id}/reply", json=payload, headers=headers)
 
 
 def escalate(client: TestClient, ticket_id: int, reason: str = REASON) -> Response:
@@ -41,6 +43,29 @@ def test_reply_adds_agent_message(client: TestClient, ticket: Ticket) -> None:
     assert [m["author"] for m in body["messages"]] == ["customer", "agent"]
     assert body["messages"][-1]["body"] == "Bonjour, voici la réponse."
     assert client.get(f"/tickets/{ticket.id}").json()["messages"] == body["messages"]
+
+
+def test_reply_by_a_human(client: TestClient, ticket: Ticket) -> None:
+    response = post_reply(client, ticket.id, key="reply-human", author="human")
+
+    assert response.status_code == 201
+    assert [m["author"] for m in response.json()["messages"]] == ["customer", "human"]
+
+
+def test_reply_cannot_be_authored_by_the_customer(client: TestClient, ticket: Ticket) -> None:
+    response = post_reply(client, ticket.id, key="reply-customer", author="customer")
+
+    assert response.status_code == 422
+    assert len(client.get(f"/tickets/{ticket.id}").json()["messages"]) == 1
+
+
+def test_same_key_with_another_author_is_rejected(client: TestClient, ticket: Ticket) -> None:
+    assert post_reply(client, ticket.id, key="reply-author").status_code == 201
+
+    response = post_reply(client, ticket.id, key="reply-author", author="human")
+
+    assert response.status_code == 409
+    assert len(client.get(f"/tickets/{ticket.id}").json()["messages"]) == 2
 
 
 def test_replay_same_key_creates_a_single_message(client: TestClient, ticket: Ticket) -> None:
@@ -115,7 +140,7 @@ def test_replay_after_resolution_still_succeeds(client: TestClient, ticket: Tick
     assert len(replay.json()["messages"]) == 2
 
 
-@pytest.mark.parametrize("payload", [{"body": ""}, {"body": "ok", "author": "human"}, {}])
+@pytest.mark.parametrize("payload", [{"body": ""}, {"body": "ok", "sender": "human"}, {}])
 def test_reply_with_invalid_body_is_rejected(
     client: TestClient, ticket: Ticket, payload: dict[str, str]
 ) -> None:

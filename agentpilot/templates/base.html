@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Approbations{% endblock %} · AgentPilot</title>
+  <style>
+    :root {
+      --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #deddd8;
+      --accent: #2f5d8a; --ok-bg: #e6f2e8; --ok: #1f6b34; --warn-bg: #fdf3dc; --warn: #7a5600;
+      --error-bg: #fbe5e3; --error: #9b2c22;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #171716; --panel: #22221f; --text: #ececea; --muted: #a2a29c; --line: #3a3a36;
+        --accent: #8db8e3; --ok-bg: #1d3424; --ok: #9fd8ac; --warn-bg: #3a2f14; --warn: #f0cf7a;
+        --error-bg: #3d1f1c; --error: #f2a49b;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text);
+           font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    header { padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+    header a { color: var(--text); text-decoration: none; font-weight: 600; }
+    main { max-width: 980px; margin: 0 auto; padding: 16px; }
+    h1 { font-size: 1.4rem; margin: 8px 0 16px; }
+    h2 { font-size: 1.05rem; margin: 0 0 8px; }
+    a { color: var(--accent); }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+              padding: 14px 16px; margin-bottom: 14px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line);
+             vertical-align: top; }
+    th { color: var(--muted); font-weight: 500; font-size: .9rem; }
+    .table-wrap { overflow-x: auto; }
+    .muted { color: var(--muted); }
+    .banner { border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-weight: 500; }
+    .ok { background: var(--ok-bg); color: var(--ok); }
+    .warn { background: var(--warn-bg); color: var(--warn); }
+    .error { background: var(--error-bg); color: var(--error); }
+    .mismatch { font-size: 1.1rem; border: 2px solid var(--error); }
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: .85rem;
+             background: var(--bg); border: 1px solid var(--line); }
+    .badge.pending { background: var(--warn-bg); color: var(--warn); }
+    .badge.executed { background: var(--ok-bg); color: var(--ok); }
+    .badge.failed, .badge.rejected { background: var(--error-bg); color: var(--error); }
+    .message { white-space: pre-wrap; background: var(--bg); border-radius: 6px; padding: 8px 10px;
+               margin: 6px 0; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0; }
+    dt { color: var(--muted); }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    .forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+    form label { display: block; margin: 8px 0 2px; font-size: .9rem; }
+    input[type=text], textarea { width: 100%; padding: 6px 8px; font: inherit; color: var(--text);
+               background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+    textarea { min-height: 150px; }
+    .check { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+    button { margin-top: 10px; padding: 8px 14px; font: inherit; font-weight: 600;
+             border-radius: 6px; border: 1px solid var(--line); cursor: pointer;
+             background: var(--panel); color: var(--text); }
+    button.approve { background: var(--ok-bg); color: var(--ok); }
+    button.reject { background: var(--error-bg); color: var(--error); }
+    nav.filters a { margin-right: 10px; }
+  </style>
+</head>
+<body>
+  <header><a href="/approvals">AgentPilot · Approbations</a></header>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 from shopsim.app import clock
 from shopsim.app.chaos import apply_connection_saturation
 from shopsim.app.db import get_session
-from shopsim.app.models import MessageAuthor, Ticket, TicketMessage, TicketStatus
+from shopsim.app.models import Ticket, TicketMessage, TicketStatus
 from shopsim.app.schemas import (
     TicketEscalate,
     TicketPage,
@@ -83,9 +83,15 @@ def _find_by_key(session: Session, key: str) -> TicketMessage | None:
     ).one_or_none()
 
 
-def _replay(session: Session, existing: TicketMessage, ticket_id: int, body: str) -> Ticket:
-    """Rejeu d'une clé connue : même contenu → ticket tel quel, sinon 409."""
-    if existing.ticket_id != ticket_id or existing.body != body:
+def _replay(
+    session: Session, existing: TicketMessage, ticket_id: int, reply: TicketReplyCreate
+) -> Ticket:
+    """Rejeu d'une clé connue : même contenu et même auteur → ticket tel quel, sinon 409."""
+    if (
+        existing.ticket_id != ticket_id
+        or existing.body != reply.body
+        or existing.author != reply.author
+    ):
         raise HTTPException(
             status_code=409, detail="Idempotency-Key already used with a different request"
         )
@@ -117,7 +123,7 @@ def reply_to_ticket(
     existing = _find_by_key(session, idempotency_key)
     if existing is not None:
         response.status_code = 200
-        return _replay(session, existing, ticket_id, reply.body)
+        return _replay(session, existing, ticket_id, reply)
 
     ticket = _lock_ticket(session, ticket_id)
 
@@ -125,13 +131,13 @@ def reply_to_ticket(
     existing = _find_by_key(session, idempotency_key)
     if existing is not None:
         response.status_code = 200
-        return _replay(session, existing, ticket_id, reply.body)
+        return _replay(session, existing, ticket_id, reply)
 
     _reject_if_resolved(ticket)
 
     message = TicketMessage(
         ticket_id=ticket.id,
-        author=MessageAuthor.AGENT,
+        author=reply.author,
         body=reply.body,
         idempotency_key=idempotency_key,
         created_at=clock.now(session),
@@ -145,7 +151,7 @@ def reply_to_ticket(
         if existing is None:
             raise
         response.status_code = 200
-        return _replay(session, existing, ticket_id, reply.body)
+        return _replay(session, existing, ticket_id, reply)
 
     session.commit()
     return _get_ticket(session, ticket_id)

@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Actions à valider</h1>
+<nav class="filters">
+  <a href="/approvals">Toutes</a>
+  {% for s in statuses %}<a href="/approvals?status={{ s.value }}">{{ STATUS_LABELS[s] }}</a>{% endfor %}
+</nav>
+<section>
+{% if actions %}
+<div class="table-wrap">
+<table>
+  <thead><tr>
+    <th>Ticket</th><th>Action</th><th>Valeur</th><th>Raisons</th><th>Créée</th><th>Statut</th>
+  </tr></thead>
+  <tbody>
+  {% for a in actions %}
+  <tr>
+    <td><a href="/approvals/{{ a.id }}">#{{ a.ticket_id }}</a></td>
+    <td>{{ TOOL_LABELS.get(a.tool, a.tool) }} · commande {{ a.params.get("order_id") }}</td>
+    <td>{% if a.facts.get("value_cents") is not none %}{{ a.facts["value_cents"] | eur }}{% endif %}</td>
+    <td>{% for r in a.reasons %}{{ REASON_LABELS.get(r, r) }}{% if not loop.last %} ; {% endif %}{% endfor %}</td>
+    <td class="muted">{{ a.created_at.strftime("%d/%m %H:%M") }}</td>
+    <td><span class="badge {{ a.status.value }}">{{ STATUS_LABELS[a.status] }}</span>
+      {% if a.decided_by %}<span class="muted">par {{ a.decided_by }}</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p class="muted">Aucune action{% if status %} avec ce statut{% endif %}.</p>
+{% endif %}
+</section>
+{% endblock %}
