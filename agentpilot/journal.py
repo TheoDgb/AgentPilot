@@ -1,7 +1,10 @@
 """Journal d'une exécution et file des actions en attente, écrits par les hooks.
 
 Chaque appel d'outil est écrit dès qu'il a eu lieu : le journal survit à un arrêt du service
-en cours d'exécution (reprise en J3.5).
+en cours d'exécution, et la relance du ticket sait quelles actions ont déjà été faites.
+
+Les hooks y lisent aussi l'arrêt d'urgence, sans cache : basculer l'interrupteur agit dès
+l'appel d'outil suivant.
 """
 
 import threading
@@ -10,10 +13,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from agentpilot.models import CallOutcome, PendingAction, PendingStatus, ToolCall
+from agentpilot.models import (
+    CONTROL_ID,
+    CallOutcome,
+    Control,
+    PendingAction,
+    PendingStatus,
+    Run,
+    ToolCall,
+)
 
 
 @dataclass(frozen=True)
@@ -49,6 +60,14 @@ class Journal(Protocol):
         ...
 
     def has_pending(self, ticket_id: int) -> bool: ...
+
+    def emergency_stop(self) -> bool:
+        """Arrêt d'urgence actif ? Une erreur doit remonter : le hook refuse alors l'action."""
+        ...
+
+    def mark_propose_only(self) -> None:
+        """Une action a été refusée par l'arrêt d'urgence : la décision n'est qu'une proposition."""
+        ...
 
 
 class DbJournal:
@@ -113,3 +132,15 @@ class DbJournal:
                     )
                 )
             )
+
+    def emergency_stop(self) -> bool:
+        with self._factory() as session:
+            stopped = session.scalar(select(Control.emergency_stop).where(Control.id == CONTROL_ID))
+            if stopped is None:
+                raise LookupError("interrupteurs de pilotage absents")
+            return stopped
+
+    def mark_propose_only(self) -> None:
+        with self._lock, self._factory() as session:
+            session.execute(update(Run).where(Run.id == self._run_id).values(propose_only=True))
+            session.commit()

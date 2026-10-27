@@ -22,15 +22,16 @@ from claude_agent_sdk import (
 )
 from fastapi.testclient import TestClient
 from mcp.server.mcpserver.exceptions import ToolError
-from sqlalchemy import Engine, create_engine, func, select
+from sqlalchemy import Engine, create_engine, func, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import DropSchema
 
-from agentpilot import support_agent
+from agentpilot import env_file, support_agent
 from agentpilot.app import app
-from agentpilot.db import SCHEMA, init_db
+from agentpilot.db import SCHEMA, init_db, make_session_factory
 from agentpilot.journal import CallEntry, PendingEntry
+from agentpilot.models import Control
 from agentpilot.support_agent import SUPPORT_TOOL_NAMES
 from mcp_server.action_tools import ACTION_TOOLS
 from mcp_server.read_tools import READ_TOOLS
@@ -74,6 +75,14 @@ INIT_TOOLS = ["StructuredOutput", *sorted(SUPPORT_TOOL_NAMES)]
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def no_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Le `.env` du développeur n'influence aucun test (budget, intervalle, clé)."""
+    missing = tmp_path_factory.mktemp("no-env") / ".env"
+    monkeypatch.setattr(env_file, "ENV_FILE", missing)
+    monkeypatch.setattr(support_agent, "ENV_FILE", missing)
 
 
 @pytest.fixture(autouse=True)
@@ -239,9 +248,12 @@ class HookDrivingQuery:
 class MemoryJournal:
     """Journal en mémoire, pour les tests sans base."""
 
-    def __init__(self) -> None:
+    def __init__(self, stopped: bool = False) -> None:
         self.calls: list[CallEntry] = []
         self.pending: dict[str, tuple[uuid.UUID, PendingEntry]] = {}
+        # Arrêt d'urgence, modifiable en cours d'exécution
+        self.stopped = stopped
+        self.propose_only = False
 
     def record_call(self, entry: CallEntry) -> None:
         self.calls.append(entry)
@@ -255,6 +267,12 @@ class MemoryJournal:
 
     def has_pending(self, ticket_id: int) -> bool:
         return any(entry.ticket_id == ticket_id for _, entry in self.pending.values())
+
+    def emergency_stop(self) -> bool:
+        return self.stopped
+
+    def mark_propose_only(self) -> None:
+        self.propose_only = True
 
 
 # --- Base de test ----------------------------------------------------------------------
@@ -278,19 +296,33 @@ def agentpilot_engine() -> Iterator[Engine]:
     engine.dispose()
 
 
+def reset_agentpilot(engine: Engine, loop_paused: bool = True) -> None:
+    """Vide les tables d'AgentPilot et remet les interrupteurs à leur état de départ."""
+    with engine.begin() as connection:
+        connection.execute(
+            text(f"TRUNCATE {SCHEMA}.tool_calls, {SCHEMA}.pending_actions, {SCHEMA}.runs")
+        )
+        connection.execute(
+            update(Control).values(
+                loop_paused=loop_paused,
+                pause_reason=None,
+                paused_by=None,
+                paused_at=None,
+                emergency_stop=False,
+                emergency_by=None,
+                emergency_at=None,
+            )
+        )
+
+
 @pytest.fixture
 def session_factory(agentpilot_engine: Engine) -> Iterator[sessionmaker[Session]]:
-    """Sessions liées à une transaction annulée en fin de test."""
-    with agentpilot_engine.connect() as connection:
-        transaction = connection.begin()
-        # Sans rechargement après commit : sinon la session de la requête rouvrirait un point
-        # de sauvegarde, et sa fermeture annulerait ce que la tâche de fond y a écrit
-        # (artefact de la connexion partagée des tests ; en production, une connexion par
-        # session)
-        yield sessionmaker(
-            bind=connection, join_transaction_mode="create_savepoint", expire_on_commit=False
-        )
-        transaction.rollback()
+    """Les sessions du service (`make_session_factory`) : une connexion par session, vrais
+    commits, objets expirés après un commit. Un objet relu hors de sa session échoue donc
+    comme en production. Tables vidées après chaque test."""
+    reset_agentpilot(agentpilot_engine)
+    yield make_session_factory(agentpilot_engine)
+    reset_agentpilot(agentpilot_engine)
 
 
 # --- ShopSim de test et lancement de l'agent par l'API ------------------------------------

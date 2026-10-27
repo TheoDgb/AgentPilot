@@ -2,7 +2,9 @@
 
 - `PreToolUse` : une action passe, est refusée, ou est mise en attente d'un humain selon
   `agentpilot/approval.py`. Un refus ou une mise en attente renvoie `deny` à l'agent, avec un
-  message clair ; l'appel n'atteint jamais ShopSim.
+  message clair ; l'appel n'atteint jamais ShopSim. Arrêt d'urgence actif (relu en base à
+  chaque action) : toutes les actions sont refusées, les lectures continuent, et l'exécution
+  est marquée « proposition seulement ».
 - `PostToolUse` / `PostToolUseFailure` : chaque appel exécuté est inscrit au journal.
 
 Pour laisser passer, le hook ne renvoie rien (`{}`), jamais `allow` : un `allow` de hook
@@ -11,6 +13,7 @@ seule porte d'entrée des outils.
 """
 
 import asyncio
+import contextlib
 import itertools
 import json
 from collections.abc import Mapping
@@ -30,6 +33,11 @@ from mcp_server.shopsim_client import ShopSimError
 MAX_RESPONSE_CHARS = 4_000
 # Délai des hooks : les lectures dans ShopSim peuvent subir une panne de latence
 HOOK_TIMEOUT_S = 60
+EMERGENCY_MESSAGE = (
+    "Arrêt d'urgence : aucune action n'est possible pour l'instant. N'écris pas au client et "
+    "n'annonce rien comme fait. Ne réessaie aucune action : rends ta décision comme une "
+    "proposition."
+)
 
 
 def _deny(message: str) -> HookJSONOutput:
@@ -87,9 +95,21 @@ class SupportHooks:
         )
         return _deny(message)
 
+    async def _emergency_stop(self) -> bool:
+        try:
+            return await asyncio.to_thread(self.journal.emergency_stop)
+        except Exception:  # noqa: BLE001  (base illisible : on ferme, l'action est refusée)
+            return True
+
     async def pre_tool_use(
         self, data: HookInput, tool_use_id: str | None, context: HookContext
     ) -> HookJSONOutput:
+        try:
+            return await self._decide(data, tool_use_id)
+        except Exception as exc:  # noqa: BLE001  (on ferme : une erreur du hook ne laisse rien passer)
+            return _deny(approval.unverifiable_message(exc))
+
+    async def _decide(self, data: HookInput, tool_use_id: str | None) -> HookJSONOutput:
         name: str = data["tool_name"]  # type: ignore[typeddict-item]
         tool_input: dict[str, Any] = data["tool_input"]  # type: ignore[typeddict-item]
         tool_use_id = tool_use_id or data.get("tool_use_id")  # type: ignore[assignment]
@@ -98,6 +118,10 @@ class SupportHooks:
         if name not in ACTION_TOOL_NAMES:
             # Défense en profondeur : les permissions l'empêchent déjà
             return await self._refuse(name, tool_input, tool_use_id, f"Outil {name} interdit.")
+        if await self._emergency_stop():
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(self.journal.mark_propose_only)
+            return await self._refuse(name, tool_input, tool_use_id, EMERGENCY_MESSAGE)
 
         tool = approval.short_name(name)
         facts: approval.OrderFacts | None = None

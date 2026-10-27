@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from agentpilot.env_file import ENV_FILE, read_value
 from agentpilot.schemas import ContextCheck, SupportDecision
 from evals.policy import APPROVAL_THRESHOLD_CENTS, REFUND_WINDOW, RISK_MIN_REFUNDS, RISK_WINDOW
 from mcp_server.action_tools import ACTION_TOOLS
@@ -22,7 +23,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENT_DIR = REPO_ROOT / "agents" / "support"
 SKILL_PATH = AGENT_DIR / "skills" / "refund-policy" / "SKILL.md"
 SETTINGS_PATH = AGENT_DIR / "settings.json"
-ENV_FILE = REPO_ROOT / ".env"
 DEFAULT_SHOPSIM_URL = "http://localhost:8000"
 
 SIGNATURE = "Le service client Lumen"
@@ -54,8 +54,19 @@ CHECK_PROMPT = (
 )
 
 
-def ticket_prompt(ticket_id: int) -> str:
-    return f"Traite le ticket n°{ticket_id}. Rends ta décision au format demandé."
+def ticket_prompt(ticket_id: int, done: Iterable[str] = ()) -> str:
+    """Consigne d'un ticket ; `done` : actions déjà faites par une exécution précédente de ce
+    ticket (lues dans le journal de la plateforme, jamais dans le ticket)."""
+    prompt = f"Traite le ticket n°{ticket_id}. Rends ta décision au format demandé."
+    done = list(done)
+    if done:
+        listed = "\n".join(f"- {action}" for action in done)
+        prompt += (
+            "\n\nReprise : une exécution précédente de ce ticket s'est arrêtée avant la fin. "
+            f"Ces actions ont déjà été faites :\n{listed}\n"
+            "Relis le ticket et ne refais aucune de ces actions."
+        )
+    return prompt
 
 
 class AgentRunError(Exception):
@@ -123,13 +134,9 @@ def mcp_server_config(shopsim_url: str, actions: bool = False) -> dict[str, Any]
 
 def load_api_key(environ: Mapping[str, str], env_file: Path | None = None) -> str:
     """ANTHROPIC_API_KEY de l'environnement, sinon de `.env` (seule ligne lue, jamais affichée)."""
-    env_file = env_file or ENV_FILE
     key = environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not key and env_file.is_file():
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            name, sep, value = line.partition("=")
-            if sep and name.strip() == "ANTHROPIC_API_KEY":
-                key = value.strip().strip("\"'")
+    if not key:
+        key = read_value("ANTHROPIC_API_KEY", env_file or ENV_FILE) or ""
     if not key:
         raise AgentRunError("ANTHROPIC_API_KEY absente : la renseigner dans .env")
     return key

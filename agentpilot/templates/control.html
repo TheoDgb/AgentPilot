@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Pilotage{% endblock %}
+{% block content %}
+<h1>Pilotage de l'agent Support</h1>
+{% for level, text in notices %}<div class="banner {{ level }}">{{ text }}</div>{% endfor %}
+{% if form_error %}<div class="banner error">{{ form_error }}</div>{% endif %}
+
+<div class="forms">
+<section>
+  <h2>Arrêt d'urgence</h2>
+  {% if status.emergency_stop %}
+  <p class="state" style="color: var(--error)">Actif : toutes les actions de l'agent sont refusées</p>
+  {% else %}
+  <p class="state">Inactif</p>
+  {% endif %}
+  {% if status.emergency_by %}<p class="muted">Dernier changement par {{ status.emergency_by }} le {{ status.emergency_at.strftime("%d/%m/%Y %H:%M:%S") }}</p>{% endif %}
+  <form method="post" action="/control/emergency">
+    <input type="hidden" name="on" value="{{ 'false' if status.emergency_stop else 'true' }}">
+    <label for="emergency-name">Votre nom</label>
+    <input type="text" id="emergency-name" name="name" value="{{ form.get('name', '') }}" maxlength="100" required>
+    {% if status.emergency_stop %}
+    <button type="submit" class="approve">Lever l'arrêt d'urgence</button>
+    {% else %}
+    <button type="submit" class="danger">Activer l'arrêt d'urgence</button>
+    {% endif %}
+  </form>
+</section>
+
+<section>
+  <h2>Boucle de traitement</h2>
+  {% if status.loop_paused %}
+  <p class="state">En pause{% if status.pause_reason and status.pause_reason.value == "budget" %} : budget du jour atteint{% endif %}</p>
+  {% else %}
+  <p class="state" style="color: var(--ok)">En marche</p>
+  {% endif %}
+  {% if status.paused_at %}<p class="muted">Dernier changement{% if status.paused_by %} par {{ status.paused_by }}{% endif %} le {{ status.paused_at.strftime("%d/%m/%Y %H:%M:%S") }}</p>{% endif %}
+  <form method="post" action="/control/loop/{{ 'resume' if status.loop_paused else 'pause' }}">
+    <label for="loop-name">Votre nom</label>
+    <input type="text" id="loop-name" name="name" value="{{ form.get('name', '') }}" maxlength="100" required>
+    <button type="submit">{{ "Relancer la boucle" if status.loop_paused else "Mettre en pause" }}</button>
+  </form>
+</section>
+</div>
+
+<section>
+  <h2>État</h2>
+  <dl>
+    <dt>Dépense du jour (UTC)</dt><dd>{{ "%.2f"|format(status.spent_today_usd) }} $ sur {{ "%.2f"|format(status.daily_budget_usd) }} $</dd>
+    <dt>ShopSim</dt><dd>{% if status.waiting_until %}<span style="color: var(--error)">En attente jusqu'à {{ status.waiting_until.strftime("%H:%M:%S") }} (UTC)</span> : {{ status.waiting_reason }}{% else %}Pas d'attente en cours{% endif %}</dd>
+    <dt>File de tickets</dt>
+    <dd>{% if status.open_tickets is none %}<span class="muted">pas encore relevée (boucle en pause ou places occupées)</span>{% else %}
+      {{ status.open_tickets }} ouverts dans ShopSim, <strong>{{ status.eligible_tickets }} à traiter</strong>
+      {% if status.skipped_tickets %}<br><span class="muted">Écartés :
+        {% for reason, count in status.skipped_tickets | dictsort %}{{ count }} {{ SKIP_LABELS.get(reason, reason) }}{% if not loop.last %} ; {% endif %}{% endfor %}</span>{% endif %}
+      <br><span class="muted">Relevé à {{ status.queue_checked_at.strftime("%H:%M:%S") }} (UTC)</span>
+      {% if status.eligible_tickets == 0 and not status.running_tickets %}<br>Rien à lancer pour l'instant : la boucle attend un ticket éligible.{% endif %}
+    {% endif %}</dd>
+    <dt>En cours ({{ status.running_tickets | length }}/{{ status.max_concurrent_runs }})</dt>
+    <dd>{% for t in status.running_tickets %}#{{ t }}{% if not loop.last %}, {% endif %}{% else %}<span class="muted">aucun ticket</span>{% endfor %}</dd>
+    <dt>Abandonnés</dt>
+    <dd>{% for t in status.abandoned_tickets %}#{{ t }}{% if not loop.last %}, {% endif %}{% else %}<span class="muted">aucun</span>{% endfor %}
+      {% if status.abandoned_tickets %}<span class="muted"> · échecs répétés, à traiter par un humain</span>{% endif %}</dd>
+  </dl>
+</section>
+{% endblock %}

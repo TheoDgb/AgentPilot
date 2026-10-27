@@ -114,6 +114,7 @@
     {% if action.resolved_at %}<dt>Ticket résolu le</dt><dd>{{ action.resolved_at.strftime("%d/%m/%Y %H:%M:%S") }}</dd>{% endif %}
   </dl>
   {% if action.status.value == "approved" %}
+  <p class="muted">{% if emergency_stop %}Réessai automatique suspendu pendant l'arrêt d'urgence : vous pouvez relancer à la main.{% else %}La boucle de traitement réessaie automatiquement avec la même clé.{% endif %}</p>
   <form method="post" action="/approvals/{{ action.id }}/retry">
     <button type="submit">Relancer l'exécution</button>
   </form>

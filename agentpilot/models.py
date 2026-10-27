@@ -1,5 +1,6 @@
 """Exécutions d'agents enregistrées par AgentPilot (schéma `agentpilot`) : exécutions,
-journal des appels d'outils et actions en attente de validation humaine."""
+journal des appels d'outils, actions en attente de validation humaine et interrupteurs de
+pilotage (boucle de traitement, arrêt d'urgence)."""
 
 import uuid
 from datetime import date, datetime
@@ -7,7 +8,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import Date, DateTime, Enum, ForeignKey, Numeric, String, Text
+from sqlalchemy import Date, DateTime, Enum, ForeignKey, Index, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,8 +19,21 @@ class RunStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
-    # Service arrêté pendant l'exécution (reprise en J3.5)
+    # Service arrêté pendant l'exécution : le ticket est relancé par la boucle
     INTERRUPTED = "interrupted"
+
+
+class RunTrigger(StrEnum):
+    # `POST /runs/...` ou vérification
+    MANUAL = "manual"
+    # Boucle de traitement de la file (`agentpilot/worker.py`)
+    LOOP = "loop"
+
+
+class PauseReason(StrEnum):
+    MANUAL = "manual"
+    # Plafond de dépense du jour atteint : pause automatique
+    BUDGET = "budget"
 
 
 class AgentKind(StrEnum):
@@ -53,11 +67,25 @@ def _enum(enum: type[StrEnum], name: str) -> Enum:
 
 class Run(Base):
     __tablename__ = "runs"
+    __table_args__ = (
+        # Jamais deux exécutions en cours sur un même ticket, quel que soit le déclencheur
+        Index(
+            "one_running_run_per_ticket",
+            "ticket_id",
+            unique=True,
+            postgresql_where=text("status = 'running' AND agent = 'support'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     agent: Mapped[AgentKind] = mapped_column(_enum(AgentKind, "agent_kind"))
     ticket_id: Mapped[int | None] = mapped_column(index=True)
     status: Mapped[RunStatus] = mapped_column(_enum(RunStatus, "run_status"), index=True)
+    trigger: Mapped[RunTrigger] = mapped_column(
+        _enum(RunTrigger, "run_trigger"), default=RunTrigger.MANUAL
+    )
+    # Arrêt d'urgence : au moins une action refusée, la décision n'est qu'une proposition
+    propose_only: Mapped[bool] = mapped_column(default=False)
     # Date de l'horloge de ShopSim au lancement (celle donnée à l'agent)
     simulation_date: Mapped[date | None] = mapped_column(Date)
     model: Mapped[str | None] = mapped_column(String(100))
@@ -145,3 +173,27 @@ class ToolCall(Base):
         ForeignKey(f"{SCHEMA}.pending_actions.id")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+CONTROL_ID = 1
+
+
+class Control(Base):
+    """Interrupteurs de pilotage, sur une seule ligne (`id = 1`), créée par `init_db`.
+
+    Les noms sont déclaratifs (pas d'authentification). Au premier démarrage, la boucle est en
+    pause : rien n'est dépensé tant qu'un humain ne l'a pas lancée.
+    """
+
+    __tablename__ = "control"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    loop_paused: Mapped[bool] = mapped_column(default=True)
+    pause_reason: Mapped[PauseReason | None] = mapped_column(_enum(PauseReason, "pause_reason"))
+    paused_by: Mapped[str | None] = mapped_column(String(100))
+    # Dernier changement de la boucle (pause ou relance)
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Les hooks refusent toute action : l'agent ne fait que proposer
+    emergency_stop: Mapped[bool] = mapped_column(default=False)
+    emergency_by: Mapped[str | None] = mapped_column(String(100))
+    emergency_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

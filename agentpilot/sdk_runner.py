@@ -8,7 +8,12 @@ Même isolement que `run_support.py` (CLI) :
   MCP shopsim ;
 - dossier de travail et configuration de Claude Code vides et temporaires ;
 - la liste des outils réellement disponibles est vérifiée à l'initialisation, avant toute
-  décision.
+  décision ;
+- la CLI est lancée par `agentpilot/claude_guard.py` : elle meurt avec le service, même tué
+  brutalement, et le serveur MCP avec elle. Fin, délai dépassé ou annulation : le flux du SDK
+  est fermé tout de suite (`aclosing`), ce qui arrête la CLI (stdin fermé, puis SIGTERM, puis
+  SIGKILL). Délai anyio par précaution : le SDK prévient qu'une annulation asyncio brute peut
+  sauter cette escalade (non observé avec la version 0.2.174, mais rien ne le garantit).
 
 Contrairement à la CLI, l'agent a les outils d'action (8 de lecture + 5 d'action), toujours
 sous les hooks de `agentpilot/hooks.py` : validation humaine des actions sensibles et
@@ -21,12 +26,14 @@ avec ce qui a été mesuré jusque-là (coût, outils appelés), pour être enre
 import asyncio
 import os
 import tempfile
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
 
+import anyio
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -37,7 +44,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk import query as sdk_query
 from pydantic import BaseModel
 
-from agentpilot import support_agent
+from agentpilot import claude_guard, support_agent
 from agentpilot.hooks import SupportHooks
 from agentpilot.journal import Journal
 from agentpilot.schemas import ContextCheck, SupportDecision
@@ -102,12 +109,15 @@ def build_options(
     workdir: Path,
     model: str,
     hooks: SupportHooks,
+    cli: str,
 ) -> ClaudeAgentOptions:
     cwd = workdir / "cwd"
     config_dir = workdir / "claude-config"
     cwd.mkdir()
     config_dir.mkdir()
     return ClaudeAgentOptions(
+        # Lanceur qui lie la vie de la CLI à celle du service, puis exécute `cli`
+        cli_path=claude_guard.write_launcher(workdir),
         # Remplace la consigne de Claude Code : seule la consigne de l'agent est envoyée
         system_prompt=support_agent.build_system_prompt(today),
         setting_sources=[],
@@ -132,6 +142,8 @@ def build_options(
             # Ni ~/.claude.json ni la mémoire automatique de l'utilisateur
             "CLAUDE_CONFIG_DIR": str(config_dir),
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+            claude_guard.CLI_ENV: cli,
+            claude_guard.SERVICE_PID_ENV: str(os.getpid()),
         },
     )
 
@@ -191,6 +203,9 @@ async def run_agent(
         return result
     try:
         api_key = support_agent.load_api_key(environ)
+        cli = claude_guard.real_cli(environ)
+        if cli is None:
+            raise AgentRunError("CLI Claude Code introuvable (ni celle du SDK, ni dans le PATH)")
         shopsim_url = environ.get("SHOPSIM_URL", DEFAULT_SHOPSIM_URL)
         with tempfile.TemporaryDirectory(prefix="agentpilot-") as workdir:
             options = build_options(
@@ -201,9 +216,11 @@ async def run_agent(
                 workdir=Path(workdir),
                 model=model,
                 hooks=hooks,
+                cli=cli,
             )
-            async with asyncio.timeout(timeout_s):
-                await _collect(query(prompt=prompt, options=options), result)
+            with anyio.fail_after(timeout_s):
+                async with aclosing(query(prompt=prompt, options=options)) as messages:
+                    await _collect(messages, result)
     except AgentRunError as exc:
         result.error = str(exc)
     except TimeoutError:
@@ -228,14 +245,16 @@ async def decide_ticket(
     environ: Mapping[str, str] = os.environ,
     query: QueryFn = sdk_query,
     model: str = DEFAULT_MODEL,
+    done: Sequence[str] = (),
 ) -> AgentResult:
-    """Décision de l'agent Support sur un ticket ; `output` est une SupportDecision validée."""
+    """Décision de l'agent Support sur un ticket ; `output` est une SupportDecision validée.
+    `done` : actions déjà faites par une exécution précédente (reprise)."""
     try:
         today = await _today(environ)
     except AgentRunError as exc:
         return AgentResult(error=str(exc))
     result = await run_agent(
-        support_agent.ticket_prompt(ticket_id),
+        support_agent.ticket_prompt(ticket_id, done),
         SupportDecision,
         today,
         hooks=SupportHooks(ticket_id, journal),

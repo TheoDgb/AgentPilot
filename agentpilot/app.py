@@ -7,57 +7,56 @@ Lancement (local) : `.venv/bin/uvicorn agentpilot.app:app --port 8001`.
 - `GET /runs/{id}` et `GET /runs` renvoient les exécutions enregistrées, avec leur journal
   d'appels d'outils et leurs actions en attente ;
 - `POST /checks/support` vérifie l'isolement de l'agent (consigne, politique, outils) ;
-- `/approvals` : pages d'approbation des actions en attente (`agentpilot/web.py`).
+- `/approvals` : pages d'approbation des actions en attente (`agentpilot/web.py`) ;
+- `/control` : page de pilotage (pause de la boucle, arrêt d'urgence, budget) ;
+  `GET /control/status` en JSON.
+
+Au démarrage, une boucle de fond (`agentpilot/worker.py`) traite les tickets ouverts et
+reprend ce qui a été interrompu ; elle démarre en pause au premier lancement.
 """
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Annotated
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from agentpilot import sdk_runner, web
-from agentpilot.api_schemas import RunCreated, RunRead
+from agentpilot.api_schemas import ControlStatus, RunCreated, RunRead
 from agentpilot.db import SessionLocal, engine, init_db
 from agentpilot.journal import DbJournal
-from agentpilot.models import AgentKind, Run, RunStatus
-from agentpilot.sdk_runner import AgentResult
+from agentpilot.models import AgentKind, Run, RunTrigger
+from agentpilot.worker import AlreadyRunning, OverBudget, Worker, mark_interrupted, new_run
 
-# Au plus 2 agents en même temps : coût et charge de ShopSim bornés
-MAX_CONCURRENT_RUNS = 2
-_slots = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
-
-
-def mark_interrupted(session: Session) -> int:
-    """Exécutions restées `running` (service arrêté pendant leur exécution)."""
-    count = session.execute(
-        update(Run)
-        .where(Run.status == RunStatus.RUNNING)
-        .values(status=RunStatus.INTERRUPTED, finished_at=datetime.now(UTC))
-    ).rowcount
-    session.commit()
-    return count
+__all__ = ["app", "mark_interrupted"]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_db(engine)
     with app.state.session_factory() as session:
+        # Reprise : le premier tour de la boucle relance ces tickets
         mark_interrupted(session)
+    worker: Worker = app.state.worker
+    serving = asyncio.create_task(worker.serve())
     yield
+    # Ctrl+C ou arrêt du service : exécutions annulées (CLI arrêtée), marquées interrupted
+    await worker.shutdown()
+    await serving
 
 
 app = FastAPI(title="AgentPilot", lifespan=lifespan)
 app.include_router(web.router)
+app.include_router(web.control_router)
 # Remplaçables par les tests : sessions de base et fonction `query` du SDK
 app.state.session_factory = SessionLocal
 app.state.query = sdk_runner.sdk_query
+# Boucle de traitement et exécutions en cours (au plus 2, endpoint manuel compris)
+app.state.worker = Worker(app.state)
 
 
 def get_session(request: Request) -> Iterator[Session]:
@@ -69,74 +68,39 @@ def get_session(request: Request) -> Iterator[Session]:
 SessionDep = Annotated[Session, Depends(get_session)]
 
 
-def _new_run(session: Session, agent: AgentKind, ticket_id: int | None) -> Run:
-    run = Run(
-        agent=agent,
-        ticket_id=ticket_id,
-        status=RunStatus.RUNNING,
-        created_at=datetime.now(UTC),
-    )
-    session.add(run)
-    session.commit()
-    return run
-
-
-def _finish(session: Session, run: Run, result: AgentResult) -> None:
-    run.status = RunStatus.FAILED if result.error else RunStatus.SUCCEEDED
-    run.simulation_date = result.simulation_date
-    run.model = result.model
-    run.output = result.output
-    run.error = result.error
-    run.total_cost_usd = (
-        Decimal(str(result.total_cost_usd)) if result.total_cost_usd is not None else None
-    )
-    run.duration_ms = result.duration_ms
-    run.num_turns = result.num_turns
-    run.session_id = result.session_id
-    run.available_tools = result.available_tools
-    run.finished_at = datetime.now(UTC)
-    session.commit()
-
-
-async def _execute(
-    factory: sessionmaker[Session], run_id: uuid.UUID, launch: Callable[[], Awaitable[AgentResult]]
-) -> None:
-    async with _slots:
-        try:
-            result = await launch()
-        except Exception as exc:  # toute panne inattendue est enregistrée
-            result = AgentResult(error=f"Erreur interne d'AgentPilot : {exc!r}")
-    with factory() as session:
-        run = session.get(Run, run_id)
-        if run is not None:
-            _finish(session, run, result)
-
-
 @app.post("/runs/support/{ticket_id}", status_code=202, response_model=RunCreated)
-def start_support_run(
-    ticket_id: int, request: Request, session: SessionDep, background: BackgroundTasks
+async def start_support_run(
+    ticket_id: int, request: Request, background: BackgroundTasks
 ) -> RunCreated:
-    run = _new_run(session, AgentKind.SUPPORT, ticket_id)
-    query = request.app.state.query
-    factory = request.app.state.session_factory
-    journal = DbJournal(factory, run.id)
-    background.add_task(
-        _execute,
-        factory,
-        run.id,
-        lambda: sdk_runner.decide_ticket(ticket_id, journal=journal, query=query),
-    )
+    """Lance l'agent sur un ticket : 409 s'il est déjà en cours, 429 si le budget du jour est
+    atteint."""
+    worker: Worker = request.app.state.worker
+    try:
+        run, launch = await worker.start_ticket(ticket_id, RunTrigger.MANUAL)
+    except AlreadyRunning:
+        raise HTTPException(status_code=409, detail="Ticket already being processed") from None
+    except OverBudget:
+        raise HTTPException(status_code=429, detail="Daily budget reached") from None
+    background.add_task(worker.execute, run.id, ticket_id, RunTrigger.MANUAL, launch)
     return RunCreated(id=run.id, status=run.status)
 
 
 @app.post("/checks/support", response_model=RunRead)
 async def check_support(request: Request, session: SessionDep) -> Run:
     """Vérification d'isolement, exécutée tout de suite (courte) et enregistrée."""
-    run = _new_run(session, AgentKind.SUPPORT_CHECK, None)
-    query = request.app.state.query
+    worker: Worker = request.app.state.worker
     factory = request.app.state.session_factory
+    run = await asyncio.to_thread(
+        new_run, factory, AgentKind.SUPPORT_CHECK, None, RunTrigger.MANUAL, check_budget=False
+    )
+    query = request.app.state.query
     journal = DbJournal(factory, run.id)
-    await _execute(factory, run.id, lambda: sdk_runner.check_context(journal=journal, query=query))
+    await worker.execute(
+        run.id,
+        None,
+        RunTrigger.MANUAL,
+        lambda: sdk_runner.check_context(journal=journal, query=query),
+    )
     session.expire_all()
     return session.get_one(Run, run.id)
 
@@ -159,3 +123,9 @@ def list_runs(
     if ticket_id is not None:
         query = query.where(Run.ticket_id == ticket_id)
     return list(session.scalars(query))
+
+
+@app.get("/control/status", response_model=ControlStatus)
+def control_status(request: Request) -> ControlStatus:
+    """État de la boucle, des interrupteurs, du budget du jour et de ShopSim."""
+    return web.control_status(request.app.state.worker, request.app.state.session_factory)

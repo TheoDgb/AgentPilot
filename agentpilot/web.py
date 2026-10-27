@@ -3,7 +3,12 @@
 - `GET /approvals` : actions en attente d'abord, puis les dernières décisions ;
 - `GET /approvals/{id}` : dossier complet et formulaires ;
 - `POST /approvals/{id}/approve | reject | retry | follow-up` : décision, puis redirection
-  303 vers le dossier (un rechargement ne renvoie pas le formulaire).
+  303 vers le dossier (un rechargement ne renvoie pas le formulaire) ;
+- `GET /control` : pilotage de la boucle et de l'arrêt d'urgence ;
+  `POST /control/loop/pause | resume` et `POST /control/emergency` (champ `name` obligatoire,
+  utilisables aussi par curl : `curl -d name=… localhost:8001/control/loop/pause`).
+
+Toutes les pages affichent un bandeau quand l'arrêt d'urgence est actif.
 
 Pas d'authentification : le nom saisi est déclaratif (limite signalée dans CLAUDE.md).
 Le contenu des tickets n'est pas fiable : il n'est jamais marqué sûr (`|safe`) dans les
@@ -21,14 +26,29 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import case, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from agentpilot import decisions
+from agentpilot import control, decisions, worker
+from agentpilot.api_schemas import ControlStatus
 from agentpilot.approval import REASON_LABELS, REPLY, Reason
 from agentpilot.decisions import InvalidInput, Notice
-from agentpilot.models import CallOutcome, PendingAction, PendingStatus
+from agentpilot.models import CallOutcome, PauseReason, PendingAction, PendingStatus
 from mcp_server.shopsim_client import ShopSimError, get_json
 
 router = APIRouter(prefix="/approvals", tags=["approbations"])
-templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+control_router = APIRouter(prefix="/control", tags=["pilotage"])
+
+
+def _emergency_banner(request: Request) -> dict[str, Any]:
+    """Bandeau de toutes les pages ; base illisible : on l'affiche, par prudence."""
+    try:
+        stopped = control.emergency_stop(request.app.state.session_factory)
+    except Exception:  # noqa: BLE001
+        stopped = True
+    return {"emergency_stop": stopped}
+
+
+templates = Jinja2Templates(
+    directory=Path(__file__).parent / "templates", context_processors=[_emergency_banner]
+)
 templates.env.filters["eur"] = decisions.eur
 
 LIST_LIMIT = 100
@@ -47,6 +67,7 @@ NOTICES = {
         "Cette action avait déjà été décidée : votre demande n'a rien changé.",
     ),
     Notice.NOT_RETRYABLE: ("warn", "Rien à relancer pour cette action."),
+    Notice.IN_PROGRESS: ("warn", "L'exécution de cette action est déjà en cours."),
     Notice.MESSAGE_SENT: ("ok", "Message envoyé au client."),
     Notice.MESSAGE_SKIPPED: (
         "warn",
@@ -274,3 +295,109 @@ async def follow_up_action(
         form = {"decision": "follow_up", "message": message}
         return await _detail(request, action_id, form_error=str(exc), form=form, status_code=422)
     return _redirect(action_id, notices, detail)
+
+
+# --- Pilotage ------------------------------------------------------------------------------
+
+SKIP_LABELS = {
+    worker.Skip.HANDLED: "déjà traités",
+    worker.Skip.HELD: "avec une action confiée à un humain",
+    worker.Skip.RUNNING: "en cours",
+    worker.Skip.PROPOSAL: "propositions, relancées à la levée de l'arrêt d'urgence",
+    worker.Skip.COOLDOWN: f"échec récent, réessai après {worker.RETRY_DELAY.seconds // 60} min",
+    worker.Skip.ABANDONED: "abandonnés après échecs répétés",
+}
+templates.env.globals["SKIP_LABELS"] = {str(k): v for k, v in SKIP_LABELS.items()}
+
+CONTROL_NOTICES = {
+    "paused": ("ok", "Boucle mise en pause : les exécutions en cours vont jusqu'au bout."),
+    "resumed": ("ok", "Boucle relancée."),
+    "budget": ("error", "Budget du jour atteint : la boucle reste en pause jusqu'à demain."),
+    "emergency_on": ("error", "Arrêt d'urgence activé : toute action de l'agent est refusée."),
+    "emergency_off": ("ok", "Arrêt d'urgence levé."),
+}
+
+
+def control_status(work: worker.Worker, factory: sessionmaker[Session]) -> ControlStatus:
+    settings = control.load(factory)
+    queue = work.queue
+    with factory() as session:
+        spent = control.spent_today(session)
+    return ControlStatus(
+        loop_paused=settings.loop_paused,
+        pause_reason=settings.pause_reason,
+        paused_by=settings.paused_by,
+        paused_at=settings.paused_at,
+        emergency_stop=settings.emergency_stop,
+        emergency_by=settings.emergency_by,
+        emergency_at=settings.emergency_at,
+        spent_today_usd=spent,
+        daily_budget_usd=control.daily_budget(),
+        running_tickets=work.running_tickets(),
+        max_concurrent_runs=worker.MAX_CONCURRENT_RUNS,
+        waiting_until=work.waiting_until,
+        waiting_reason=work.waiting_reason,
+        abandoned_tickets=worker.abandoned(factory),
+        queue_checked_at=queue.at if queue else None,
+        open_tickets=queue.open if queue else None,
+        eligible_tickets=queue.eligible if queue else None,
+        skipped_tickets={str(k): v for k, v in queue.skipped.items()} if queue else {},
+    )
+
+
+def _control_page(
+    request: Request,
+    notice: str | None = None,
+    form_error: str | None = None,
+    form: dict[str, Any] | None = None,
+    status_code: int = 200,
+) -> Response:
+    return templates.TemplateResponse(
+        request,
+        "control.html",
+        {
+            "status": control_status(request.app.state.worker, _factory(request)),
+            "notices": [CONTROL_NOTICES[notice]] if notice in CONTROL_NOTICES else [],
+            "form_error": form_error,
+            "form": form or {},
+        },
+        status_code=status_code,
+    )
+
+
+def _control_done(request: Request, notice: str) -> Response:
+    # Tour anticipé de la boucle : la relance ou la levée de l'arrêt agit tout de suite
+    request.app.state.worker.wake()
+    return RedirectResponse(f"/control?notice={notice}", status_code=303)
+
+
+@control_router.get("", response_class=HTMLResponse)
+def show_control(request: Request, notice: str | None = None) -> Response:
+    return _control_page(request, notice)
+
+
+@control_router.post("/loop/pause")
+def pause_loop(request: Request, name: Text = "") -> Response:
+    try:
+        control.pause(_factory(request), name, PauseReason.MANUAL)
+    except InvalidInput as exc:
+        return _control_page(request, form_error=str(exc), form={"name": name}, status_code=422)
+    return _control_done(request, "paused")
+
+
+@control_router.post("/loop/resume")
+def resume_loop(request: Request, name: Text = "") -> Response:
+    try:
+        resumed = control.resume(_factory(request), name)
+    except InvalidInput as exc:
+        return _control_page(request, form_error=str(exc), form={"name": name}, status_code=422)
+    return _control_done(request, "resumed" if resumed else "budget")
+
+
+@control_router.post("/emergency")
+def switch_emergency(request: Request, on: Flag, name: Text = "") -> Response:
+    try:
+        control.set_emergency(_factory(request), on, name)
+    except InvalidInput as exc:
+        return _control_page(request, form_error=str(exc), form={"name": name}, status_code=422)
+    return _control_done(request, "emergency_on" if on else "emergency_off")

@@ -7,7 +7,14 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from agentpilot.models import AgentKind, CallOutcome, PendingStatus, RunStatus
+from agentpilot.models import (
+    AgentKind,
+    CallOutcome,
+    PauseReason,
+    PendingStatus,
+    RunStatus,
+    RunTrigger,
+)
 
 
 class RunCreated(BaseModel):
@@ -62,6 +69,9 @@ class RunRead(BaseModel):
     agent: AgentKind
     ticket_id: int | None
     status: RunStatus
+    trigger: RunTrigger
+    # Arrêt d'urgence pendant l'exécution : actions refusées, décision = proposition
+    propose_only: bool
     simulation_date: date | None
     model: str | None
     # SupportDecision validée (agent Support) ou réponse de vérification (check)
@@ -76,3 +86,29 @@ class RunRead(BaseModel):
     pending_actions: list[PendingActionRead]
     created_at: datetime
     finished_at: datetime | None
+
+
+class ControlStatus(BaseModel):
+    """Pilotage : boucle, arrêt d'urgence, budget du jour (UTC) et santé de ShopSim."""
+
+    loop_paused: bool
+    pause_reason: PauseReason | None
+    paused_by: str | None
+    paused_at: datetime | None
+    emergency_stop: bool
+    emergency_by: str | None
+    emergency_at: datetime | None
+    spent_today_usd: Decimal
+    daily_budget_usd: Decimal
+    running_tickets: list[int]
+    max_concurrent_runs: int
+    # Attente en cours : ShopSim en panne ou exécutions en échec d'affilée
+    waiting_until: datetime | None
+    waiting_reason: str | None
+    abandoned_tickets: list[int]
+    # Dernier relevé de la file (absent tant que la boucle n'a pas relevé la file)
+    queue_checked_at: datetime | None
+    open_tickets: int | None
+    eligible_tickets: int | None
+    # Tickets ouverts écartés, par motif : running, held, abandoned, handled, proposal, cooldown
+    skipped_tickets: dict[str, int]

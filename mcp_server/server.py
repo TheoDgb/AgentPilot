@@ -5,16 +5,23 @@ Stdout est réservé au protocole MCP : rien d'autre ne doit y être écrit.
 
 Par défaut, le serveur est en lecture seule. Les outils d'action ne sont chargés que si
 `SHOPSIM_MCP_ACTIONS=1` (valeur exacte) : l'agent Ops et `.mcp.json` ne les voient jamais.
+
+Le serveur s'arrête avec le processus qui l'a lancé (la CLI Claude Code), même tué brutalement :
+pas de serveur orphelin (`mcp_server/parent_watch.py`).
 """
 
 import os
 import sys
 
-from mcp.server.mcpserver import MCPServer
-from mcp_types import ToolAnnotations
+# Parent lu avant les imports lents : s'il meurt pendant ceux-ci, le serveur le voit quand même
+PARENT_PID = os.getppid()
 
-from mcp_server.action_tools import ACTION_TOOLS
-from mcp_server.read_tools import READ_TOOLS
+from mcp.server.mcpserver import MCPServer  # noqa: E402
+from mcp_types import ToolAnnotations  # noqa: E402
+
+from mcp_server.action_tools import ACTION_TOOLS  # noqa: E402
+from mcp_server.parent_watch import exit_with_parent  # noqa: E402
+from mcp_server.read_tools import READ_TOOLS  # noqa: E402
 
 ACTIONS_ENV = "SHOPSIM_MCP_ACTIONS"
 
@@ -55,6 +62,7 @@ mcp = build_server(enable_actions=False)
 
 
 def main() -> None:
+    exit_with_parent(PARENT_PID)
     enabled = actions_enabled()
     mode = "lecture et actions" if enabled else "lecture seule"
     print(f"Serveur MCP shopsim : {mode}", file=sys.stderr)

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from agentpilot import decisions
 from agentpilot.approval import REFUND, RESEND
+from agentpilot.db import make_session_factory
 from agentpilot.decisions import Notice
 from agentpilot.models import AgentKind, PendingAction, PendingStatus, Run, RunStatus
 from agentpilot.tests.conftest import DECISION, Shop, call, refund, run
@@ -170,7 +171,7 @@ class Committed:
     ce qui est créé est supprimé en fin de test."""
 
     def __init__(self, engine: Engine) -> None:
-        self.factory = sessionmaker(bind=engine, expire_on_commit=False)
+        self.factory = make_session_factory(engine)
         self.runs: list[uuid.UUID] = []
 
     def refund(self, ticket: Ticket, payment: Payment) -> uuid.UUID:

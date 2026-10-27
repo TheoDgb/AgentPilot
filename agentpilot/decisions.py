@@ -8,6 +8,11 @@ contre une double exécution :
   second approbateur ne trouve plus l'action en attente et n'exécute rien ;
 - ShopSim reconnaît la clé d'idempotence : un rejeu ne rembourse ni ne renvoie deux fois.
 
+Une action approuvée restée sans résultat (ShopSim en panne, service arrêté pendant
+l'exécution) est relancée avec la même clé, à la main ou par la boucle de fond
+(`agentpilot/worker.py`). Une exécution en cours dans ce processus n'est jamais relancée en
+parallèle (`IN_FLIGHT`).
+
 Comme les hooks, ce code lit et écrit ShopSim par le client HTTP du serveur MCP : c'est la
 plateforme qui agit, sur décision d'un humain, pas un agent.
 """
@@ -33,6 +38,8 @@ MESSAGE_MAX = 5_000
 SIGNATURE = "Le service client Lumen"
 # Une action approuvée mais pas encore exécutée n'est pas terminée : le ticket reste ouvert
 UNFINISHED = (PendingStatus.PENDING, PendingStatus.APPROVED)
+# Actions en cours d'exécution dans ce processus (approbation ou relance)
+IN_FLIGHT: set[uuid.UUID] = set()
 
 
 class Notice(StrEnum):
@@ -44,6 +51,7 @@ class Notice(StrEnum):
     REJECTED = "rejected"
     ALREADY_DECIDED = "already_decided"
     NOT_RETRYABLE = "not_retryable"
+    IN_PROGRESS = "in_progress"
     MESSAGE_SENT = "message_sent"
     MESSAGE_SKIPPED = "message_skipped"
     MESSAGE_ALREADY_SENT = "message_already_sent"
@@ -128,7 +136,7 @@ def failure_message(first_name: str | None) -> str:
     )
 
 
-def _text(value: str, field: str, maximum: int, *, required: bool) -> str | None:
+def clean_text(value: str, field: str, maximum: int, *, required: bool) -> str | None:
     # Les navigateurs envoient les retours à la ligne d'un formulaire en \r\n
     text = value.replace("\r\n", "\n").strip()
     if not text:
@@ -171,6 +179,18 @@ def _set(factory: sessionmaker[Session], action_id: uuid.UUID, **values: Any) ->
     with factory() as session:
         session.execute(update(PendingAction).where(PendingAction.id == action_id).values(**values))
         session.commit()
+
+
+def to_retry(factory: sessionmaker[Session]) -> list[uuid.UUID]:
+    """Actions approuvées sans résultat, les plus anciennes décisions d'abord."""
+    with factory() as session:
+        return list(
+            session.scalars(
+                select(PendingAction.id)
+                .where(PendingAction.status == PendingStatus.APPROVED)
+                .order_by(PendingAction.decided_at)
+            )
+        )
 
 
 def _others_unfinished(factory: sessionmaker[Session], action: PendingAction) -> bool:
@@ -264,6 +284,18 @@ async def _execute(action: PendingAction) -> dict[str, Any]:
 
 async def _run(factory: sessionmaker[Session], action: PendingAction, *, amounts: bool) -> Notice:
     """Revérifie puis exécute une action approuvée ; enregistre le résultat."""
+    if action.id in IN_FLIGHT:
+        return Notice.IN_PROGRESS
+    IN_FLIGHT.add(action.id)
+    try:
+        return await _execute_and_record(factory, action, amounts=amounts)
+    finally:
+        IN_FLIGHT.discard(action.id)
+
+
+async def _execute_and_record(
+    factory: sessionmaker[Session], action: PendingAction, *, amounts: bool
+) -> Notice:
     try:
         impossible = await recheck(action, amounts=amounts)
         if impossible is not None:
@@ -301,8 +333,8 @@ async def approve(
     factory: sessionmaker[Session], action_id: uuid.UUID, name: str, note: str = ""
 ) -> Notice:
     """Approuve et exécute l'action, une seule fois. Lève `InvalidInput`."""
-    decided_by = _text(name, "nom", NAME_MAX, required=True)
-    decision_note = _text(note, "motif", NOTE_MAX, required=False)
+    decided_by = clean_text(name, "nom", NAME_MAX, required=True)
+    decision_note = clean_text(note, "motif", NOTE_MAX, required=False)
     assert decided_by is not None
     if not await _db(_claim, factory, action_id, PendingStatus.APPROVED, decided_by, decision_note):
         return Notice.ALREADY_DECIDED
@@ -323,8 +355,8 @@ async def reject(
     factory: sessionmaker[Session], action_id: uuid.UUID, name: str, note: str
 ) -> Notice:
     """Refuse l'action : motif obligatoire, rien n'est envoyé à ShopSim. Lève `InvalidInput`."""
-    decided_by = _text(name, "nom", NAME_MAX, required=True)
-    decision_note = _text(note, "motif", NOTE_MAX, required=True)
+    decided_by = clean_text(name, "nom", NAME_MAX, required=True)
+    decision_note = clean_text(note, "motif", NOTE_MAX, required=True)
     assert decided_by is not None
     if not await _db(_claim, factory, action_id, PendingStatus.REJECTED, decided_by, decision_note):
         return Notice.ALREADY_DECIDED
@@ -341,7 +373,7 @@ async def follow_up(
 
     Renvoie les notices et, en cas d'échec, le message de ShopSim. Lève `InvalidInput`.
     """
-    text = _text(message, "message", MESSAGE_MAX, required=False) if message else None
+    text = clean_text(message, "message", MESSAGE_MAX, required=False) if message else None
     action = await _db(load, factory, action_id)
     if action is None or action.status is PendingStatus.PENDING:
         raise InvalidInput("Décidez d'abord de l'action.")

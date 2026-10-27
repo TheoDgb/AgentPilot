@@ -61,10 +61,17 @@
     button.approve { background: var(--ok-bg); color: var(--ok); }
     button.reject { background: var(--error-bg); color: var(--error); }
     nav.filters a { margin-right: 10px; }
+    header nav a { margin-right: 16px; }
+    .emergency { font-size: 1.05rem; border: 2px solid var(--error); }
+    .state { font-size: 1.1rem; font-weight: 600; }
+    button.danger { background: var(--error); color: var(--panel); border-color: var(--error); }
   </style>
 </head>
 <body>
-  <header><a href="/approvals">AgentPilot · Approbations</a></header>
-  <main>{% block content %}{% endblock %}</main>
+  <header><nav><a href="/approvals">AgentPilot · Approbations</a><a href="/control">Pilotage</a></nav></header>
+  <main>
+    {% if emergency_stop %}<div class="banner error emergency">Arrêt d'urgence actif : l'agent ne fait que proposer, toutes ses actions sont refusées. Les approbations humaines restent possibles.</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
 </body>
 </html>
