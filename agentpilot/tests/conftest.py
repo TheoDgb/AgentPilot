@@ -22,16 +22,15 @@ from claude_agent_sdk import (
 )
 from fastapi.testclient import TestClient
 from mcp.server.mcpserver.exceptions import ToolError
-from sqlalchemy import Engine, create_engine, func, select, text, update
+from sqlalchemy import Engine, create_engine, func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import DropSchema
 
 from agentpilot import env_file, support_agent
 from agentpilot.app import app
-from agentpilot.db import SCHEMA, init_db, make_session_factory
+from agentpilot.db import SCHEMA, clear, init_db, make_session_factory
 from agentpilot.journal import CallEntry, PendingEntry
-from agentpilot.models import Control
 from agentpilot.support_agent import SUPPORT_TOOL_NAMES
 from mcp_server.action_tools import ACTION_TOOLS
 from mcp_server.read_tools import READ_TOOLS
@@ -305,21 +304,7 @@ def agentpilot_engine() -> Iterator[Engine]:
 
 def reset_agentpilot(engine: Engine, loop_paused: bool = True) -> None:
     """Vide les tables d'AgentPilot et remet les interrupteurs à leur état de départ."""
-    with engine.begin() as connection:
-        connection.execute(
-            text(f"TRUNCATE {SCHEMA}.tool_calls, {SCHEMA}.pending_actions, {SCHEMA}.runs")
-        )
-        connection.execute(
-            update(Control).values(
-                loop_paused=loop_paused,
-                pause_reason=None,
-                paused_by=None,
-                paused_at=None,
-                emergency_stop=False,
-                emergency_by=None,
-                emergency_at=None,
-            )
-        )
+    clear(engine, loop_paused)
 
 
 @pytest.fixture

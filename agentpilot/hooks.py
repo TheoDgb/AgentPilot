@@ -12,7 +12,8 @@ court-circuiterait les règles de permission (`dontAsk`, `allowed_tools`), qui r
 seule porte d'entrée des outils.
 
 Chaque inscription au journal écrit aussi une ligne `tool.called` dans les logs (outil,
-issue, commande et montant), jamais les paramètres texte (message au client, motif).
+issue, commande et montant), jamais les paramètres texte (message au client, motif), et
+compte l'appel dans `agentpilot_tool_calls_total` (outil et issue seulement).
 """
 
 import asyncio
@@ -26,7 +27,7 @@ from typing import Any
 from claude_agent_sdk import HookContext, HookMatcher
 from claude_agent_sdk.types import HookEvent, HookInput, HookJSONOutput
 
-from agentpilot import approval
+from agentpilot import approval, metrics
 from agentpilot.approval import Kind
 from agentpilot.journal import CallEntry, Journal, PendingEntry
 from agentpilot.models import CallOutcome
@@ -87,6 +88,7 @@ class SupportHooks:
         # Numéro attribué dans la boucle : l'ordre des appels est gardé
         entry = CallEntry(seq=next(self._seq), **entry_fields)
         await asyncio.to_thread(self.journal.record_call, entry)
+        metrics.tool_called(entry.tool, entry.outcome)
         numbers = {
             key: entry.input[key]
             for key in ("order_id", "amount_cents")

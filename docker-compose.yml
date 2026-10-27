@@ -5,8 +5,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-shopsim}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shopsim}
       POSTGRES_DB: ${POSTGRES_DB:-shopsim}
+    # Publié sur l'hôte seulement, pas sur le réseau local
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
@@ -34,8 +35,9 @@ services:
     user: "${UID:-1000}:${GID:-1000}"
     volumes:
       - ./logs:/srv/logs
+    # Publié sur l'hôte seulement, pas sur le réseau local
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -46,5 +48,45 @@ services:
       timeout: 3s
       retries: 10
 
+  # Supervision (J4.2). Réseau hôte (Linux seulement) : Prometheus joint ShopSim par son port
+  # publié et AgentPilot, lancé en local hors Docker sur 127.0.0.1:8001, sans que celui-ci
+  # écoute ailleurs. Les deux n'écoutent eux-mêmes que sur 127.0.0.1. À revoir quand AgentPilot
+  # passera dans Docker (J7).
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.listen-address=127.0.0.1:9090
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:13.2.5
+    network_mode: host
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "3000"
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      # Lecture du tableau de bord sans compte ; l'administration reste derrière le mot de passe
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/agentpilot.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    # Tout vient des fichiers du dépôt : source de données et tableau de bord provisionnés,
+    # pas de volume de données
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
 volumes:
   pgdata:
+  prometheus-data:

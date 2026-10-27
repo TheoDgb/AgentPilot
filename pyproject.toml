@@ -8,6 +8,8 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "sqlalchemy>=2.0",
     "psycopg[binary]>=3.2",
+    # Métriques Prometheus (ShopSim et AgentPilot) : compteurs, histogrammes, format d'exposition
+    "prometheus-client>=0.21,<1",
 ]
 
 [project.optional-dependencies]

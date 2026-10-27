@@ -1,0 +1,17 @@
+# Collecte des métriques de ShopSim et d'AgentPilot (J4.2).
+#
+# Prometheus tourne en réseau hôte (docker-compose.yml) : il joint ShopSim par son port publié
+# sur l'hôte et AgentPilot, lancé en local hors Docker sur 127.0.0.1:8001. AgentPilot arrêté :
+# up{job="agentpilot"} = 0, rien d'anormal.
+global:
+  scrape_interval: 10s
+  scrape_timeout: 5s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: shopsim
+    static_configs:
+      - targets: ["localhost:8000"]
+  - job_name: agentpilot
+    static_configs:
+      - targets: ["localhost:8001"]

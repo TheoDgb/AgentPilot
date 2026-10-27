@@ -15,9 +15,10 @@ Jamais deux exécutions d'un même ticket en parallèle : index unique partiel e
 (`one_running_run_per_ticket`), quel que soit le déclencheur ou le processus.
 
 Reprise : au démarrage, les exécutions restées `running` passent `interrupted` et leur ticket
-est relancé ; la consigne de la relance liste les actions déjà faites (journal). Les clés
-d'idempotence, qui ne dépendent que du ticket et de l'action, garantissent qu'aucune action
-n'est faite deux fois : ShopSim reconnaît un rejeu.
+est relancé ; la consigne de la relance liste les actions déjà faites par les exécutions
+inachevées depuis la dernière réussie (journal). Les clés d'idempotence, qui ne dépendent
+que du ticket et de l'action, garantissent qu'aucune action n'est faite deux fois : ShopSim
+reconnaît un rejeu.
 
 Arrêt du service : chaque exécution est annulée par une portée anyio, qui laisse le SDK arrêter
 la CLI (voir `sdk_runner`), puis est marquée `interrupted`.
@@ -43,7 +44,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from agentpilot import control, decisions, sdk_runner
+from agentpilot import control, decisions, metrics, sdk_runner
 from agentpilot.approval import ESCALATE, REFUND, REPLY, RESEND, RESOLVE, short_name
 from agentpilot.decisions import Notice
 from agentpilot.env_file import setting
@@ -295,20 +296,30 @@ def _describe(tool: str, params: dict[str, Any]) -> str:
 
 
 def done_actions(factory: sessionmaker[Session], ticket_id: int) -> list[str]:
-    """Actions réussies des exécutions précédentes du ticket, d'après le journal."""
+    """Actions réussies des exécutions inachevées du ticket (interrompues ou en échec) depuis
+    sa dernière exécution réussie, d'après le journal.
+
+    Une exécution réussie a rendu sa décision : ce qui la précède est clos. Relancer ensuite le
+    ticket (à la main, ou après une remise à zéro de ShopSim) repart de zéro, sans liste de
+    reprise ; les clés d'idempotence empêchent toujours une action en double."""
+    ticket_runs = (Run.ticket_id == ticket_id, Run.agent == AgentKind.SUPPORT)
     with factory() as session:
-        calls = session.execute(
+        last_success = session.scalar(
+            select(func.max(Run.created_at)).where(*ticket_runs, Run.status == RunStatus.SUCCEEDED)
+        )
+        query = (
             select(ToolCall.tool, ToolCall.input)
             .join(Run, Run.id == ToolCall.run_id)
             .where(
-                Run.ticket_id == ticket_id,
-                Run.agent == AgentKind.SUPPORT,
+                *ticket_runs,
                 ToolCall.outcome == CallOutcome.SUCCEEDED,
                 ToolCall.tool.in_(ACTION_TOOL_NAMES),
             )
             .order_by(Run.created_at, ToolCall.seq)
         )
-        return [_describe(short_name(tool), params) for tool, params in calls]
+        if last_success is not None:
+            query = query.where(Run.created_at > last_success)
+        return [_describe(short_name(tool), params) for tool, params in session.execute(query)]
 
 
 # --- Boucle --------------------------------------------------------------------------------
@@ -399,12 +410,16 @@ class Worker:
                 self._count(result)
         finally:
             del self.active[run_id]
-            self._log_finished(result, start)
+            self._log_finished(agent, trigger, result, start)
             self.wake()
 
     @staticmethod
-    def _log_finished(result: AgentResult | None, start: float) -> None:
-        duration_ms = round((time.perf_counter() - start) * 1000)
+    def _log_finished(
+        agent: AgentKind, trigger: RunTrigger, result: AgentResult | None, start: float
+    ) -> None:
+        duration_s = time.perf_counter() - start
+        metrics.run_finished(agent, trigger, result, duration_s)
+        duration_ms = round(duration_s * 1000)
         if result is None:
             log_event(
                 logger,

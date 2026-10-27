@@ -2,9 +2,17 @@
 
 La métadonnée est propre à AgentPilot : le seed de ShopSim (`drop_all` de ses propres
 tables) n'y touche jamais.
+
+Verrou du service (`service_lock`) : un verrou consultatif PostgreSQL, tenu par le service tout
+au long de sa vie sur une connexion dédiée. Un second service, ou une remise à zéro
+(`python -m agentpilot.reset`), ne l'obtient pas et refuse de tourner. PostgreSQL le libère dès
+que la connexion se ferme, même après un `kill -9` du service.
 """
 
-from sqlalchemy import Engine, MetaData, create_engine
+import contextlib
+from collections.abc import Iterator
+
+from sqlalchemy import Engine, MetaData, create_engine, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.schema import CreateSchema
@@ -30,6 +38,8 @@ def make_session_factory(bind: Engine) -> sessionmaker[Session]:
     return sessionmaker(bind=bind)
 
 
+# Identifiant du verrou consultatif (« AGENTPIL » en ASCII), propre à chaque base
+SERVICE_LOCK_ID = 0x4147454E5450494C
 # Connexion paresseuse : rien n'est ouvert à l'import
 # Une erreur SQL ne recopie pas les valeurs (texte des messages clients) dans son message
 engine = create_engine(DATABASE_URL, hide_parameters=True)
@@ -48,4 +58,43 @@ def init_db(bind: Engine) -> None:
             insert(models.Control)
             .values(id=models.CONTROL_ID, loop_paused=True, emergency_stop=False)
             .on_conflict_do_nothing(index_elements=["id"])
+        )
+
+
+@contextlib.contextmanager
+def service_lock(bind: Engine) -> Iterator[bool]:
+    """Prend le verrou du service pour la durée du bloc ; False s'il est déjà tenu ailleurs."""
+    with bind.connect() as connection:
+        locked = bool(connection.scalar(select(func.pg_try_advisory_lock(SERVICE_LOCK_ID))))
+        # Verrou de session : il survit à la transaction, qu'on ne laisse pas ouverte
+        connection.commit()
+        try:
+            yield locked
+        finally:
+            if locked:
+                # Connexion perdue entre-temps : PostgreSQL a déjà libéré le verrou
+                with contextlib.suppress(Exception):
+                    connection.scalar(select(func.pg_advisory_unlock(SERVICE_LOCK_ID)))
+                    connection.commit()
+
+
+def clear(bind: Engine, loop_paused: bool = True) -> None:
+    """Vide les exécutions, le journal et les actions en attente, et remet les interrupteurs à
+    leur état de départ (boucle en pause, pas d'arrêt d'urgence)."""
+    from agentpilot import models
+
+    with bind.begin() as connection:
+        connection.execute(
+            text(f"TRUNCATE {SCHEMA}.tool_calls, {SCHEMA}.pending_actions, {SCHEMA}.runs")
+        )
+        connection.execute(
+            update(models.Control).values(
+                loop_paused=loop_paused,
+                pause_reason=None,
+                paused_by=None,
+                paused_at=None,
+                emergency_stop=False,
+                emergency_by=None,
+                emergency_at=None,
+            )
         )

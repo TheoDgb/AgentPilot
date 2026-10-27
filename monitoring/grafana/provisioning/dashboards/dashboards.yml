@@ -1,0 +1,12 @@
+# Tableaux de bord lus dans monitoring/grafana/dashboards (monté en lecture seule) : les
+# modifier dans le dépôt, pas dans l'interface.
+apiVersion: 1
+
+providers:
+  - name: agentpilot
+    folder: AgentPilot
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

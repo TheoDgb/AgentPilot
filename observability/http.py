@@ -8,6 +8,8 @@
   réponse 500 `{"detail": "Internal Server Error"}`, sans relancer l'exception (uvicorn
   l'écrirait une seconde fois, hors format).
 - Jamais d'en-têtes, de corps ni de chaîne de requête : ni jeton, ni texte de client.
+- Métriques (paramètre `metered`) : chaque requête mesurée alimente `observability.metrics`,
+  avec le même code et la même durée que sa ligne de log (y compris le 500 d'une exception).
 """
 
 import json
@@ -17,7 +19,7 @@ import traceback
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
 
-from observability import trace
+from observability import metrics, trace
 from observability.logs import error_type, log_event
 
 Scope = MutableMapping[str, Any]
@@ -59,12 +61,15 @@ class RequestLogMiddleware:
         logger: logging.Logger | None = None,
         logger_for: LoggerFor | None = None,
         quiet_paths: frozenset[str] = frozenset(),
+        metered: metrics.Metered | None = None,
     ) -> None:
         self.app = app
         default = logger or logging.getLogger("http")
         self.logger_for: LoggerFor = logger_for or (lambda route, path: default)
         # Chemins journalisés seulement en cas d'échec (>= 400), ex. un healthcheck fréquent
         self.quiet_paths = quiet_paths
+        # Requêtes comptées dans les métriques HTTP (None : aucune)
+        self.metered = metered
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -83,9 +88,12 @@ class RequestLogMiddleware:
                 return
             state["logged"] = True
             status = state["status"] or 500
+            duration_s = time.perf_counter() - start
+            route = route_template(scope)
+            if self.metered is not None and self.metered(route, scope["path"]):
+                metrics.observe(scope["method"], route, status, duration_s)
             if status < 400 and scope["path"] in self.quiet_paths:
                 return
-            route = route_template(scope)
             log_event(
                 self.logger_for(route, scope["path"]),
                 "http.request",
@@ -94,7 +102,7 @@ class RequestLogMiddleware:
                 route=route,
                 path=scope["path"],
                 status=status,
-                duration_ms=round((time.perf_counter() - start) * 1000),
+                duration_ms=round(duration_s * 1000),
             )
 
         async def send_logged(message: Message) -> None:

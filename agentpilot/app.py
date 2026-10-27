@@ -9,7 +9,12 @@ Lancement (local) : `.venv/bin/uvicorn agentpilot.app:app --port 8001`.
 - `POST /checks/support` vérifie l'isolement de l'agent (consigne, politique, outils) ;
 - `/approvals` : pages d'approbation des actions en attente (`agentpilot/web.py`) ;
 - `/control` : page de pilotage (pause de la boucle, arrêt d'urgence, budget) ;
-  `GET /control/status` en JSON.
+  `GET /control/status` en JSON ;
+- `GET /metrics` : métriques Prometheus (`agentpilot/metrics.py`), collectées toutes les 10 s,
+  non journalisées.
+
+Au démarrage, le service prend le verrou de la base (`agentpilot.db.service_lock`) et refuse
+de démarrer s'il est déjà tenu : un seul service par base, et jamais pendant une remise à zéro.
 
 Au démarrage, une boucle de fond (`agentpilot/worker.py`) traite les tickets ouverts et
 reprend ce qui a été interrompu ; elle démarre en pause au premier lancement.
@@ -27,24 +32,28 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from agentpilot import sdk_runner, web
+from agentpilot import metrics, sdk_runner, web
 from agentpilot.api_schemas import ControlStatus, RunCreated, RunRead
-from agentpilot.db import SessionLocal, engine, init_db
+from agentpilot.db import SessionLocal, engine, init_db, service_lock
 from agentpilot.env_file import setting
 from agentpilot.journal import DbJournal
 from agentpilot.models import AgentKind, Run, RunTrigger
 from agentpilot.support_agent import REPO_ROOT
 from agentpilot.worker import AlreadyRunning, OverBudget, Worker, mark_interrupted, new_run
 from observability.http import RequestLogMiddleware
-from observability.logs import configure
+from observability.logs import configure, error_type, log_event
+from observability.metrics import CONTENT_TYPE_LATEST, exposition
 
 __all__ = ["app", "mark_interrupted"]
 
 LOG_DIR_ENV = "AGENTPILOT_LOG_DIR"
+METRICS_PATH = "/metrics"
+logger = logging.getLogger(__name__)
 
 
 def log_dir() -> Path:
@@ -55,23 +64,39 @@ def log_dir() -> Path:
     return REPO_ROOT / (setting(LOG_DIR_ENV) or "logs")
 
 
+class ServiceAlreadyRunning(RuntimeError):
+    """Le verrou du service est tenu : autre service AgentPilot, ou remise à zéro en cours."""
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure("agentpilot", log_dir())
     init_db(engine)
-    with app.state.session_factory() as session:
-        # Reprise : le premier tour de la boucle relance ces tickets
-        mark_interrupted(session)
-    worker: Worker = app.state.worker
-    serving = asyncio.create_task(worker.serve())
-    yield
-    # Ctrl+C ou arrêt du service : exécutions annulées (CLI arrêtée), marquées interrupted
-    await worker.shutdown()
-    await serving
+    # Un seul service par base, et jamais pendant une remise à zéro (`agentpilot.reset`)
+    with service_lock(engine) as locked:
+        if not locked:
+            raise ServiceAlreadyRunning(
+                "Un autre service AgentPilot, ou une remise à zéro (python -m agentpilot.reset), "
+                "utilise déjà cette base."
+            )
+        with app.state.session_factory() as session:
+            # Reprise : le premier tour de la boucle relance ces tickets
+            mark_interrupted(session)
+        worker: Worker = app.state.worker
+        serving = asyncio.create_task(worker.serve())
+        yield
+        # Ctrl+C ou arrêt du service : exécutions annulées (CLI arrêtée), marquées interrupted
+        await worker.shutdown()
+        await serving
 
 
 app = FastAPI(title="AgentPilot", lifespan=lifespan)
-app.add_middleware(RequestLogMiddleware, logger=logging.getLogger("agentpilot.http"))
+# Collecte de Prometheus toutes les 10 s : journalisée seulement en cas d'échec
+app.add_middleware(
+    RequestLogMiddleware,
+    logger=logging.getLogger("agentpilot.http"),
+    quiet_paths=frozenset({METRICS_PATH}),
+)
 app.include_router(web.router)
 app.include_router(web.control_router)
 # Remplaçables par les tests : sessions de base et fonction `query` du SDK
@@ -146,3 +171,20 @@ def list_runs(
 def control_status(request: Request) -> ControlStatus:
     """État de la boucle, des interrupteurs, du budget du jour et de ShopSim."""
     return web.control_status(request.app.state.worker, request.app.state.session_factory)
+
+
+@app.get(METRICS_PATH, response_class=Response)
+def get_metrics(request: Request) -> Response:
+    """Métriques Prometheus : événements du processus et état relu en base. Base injoignable :
+    `agentpilot_state_up 0`, les compteurs restent collectés."""
+    work: Worker = request.app.state.worker
+    factory: sessionmaker[Session] = request.app.state.session_factory
+    try:
+        status = web.control_status(work, factory)
+        with factory() as session:
+            pending = metrics.pending_counts(session)
+    except SQLAlchemyError as exc:
+        log_event(logger, "metrics.state_unavailable", logging.WARNING, error_type=error_type(exc))
+        status, pending = None, None
+    state = metrics.state_registry(status, pending, work.clock())
+    return Response(exposition(metrics.EVENTS, state), media_type=CONTENT_TYPE_LATEST)

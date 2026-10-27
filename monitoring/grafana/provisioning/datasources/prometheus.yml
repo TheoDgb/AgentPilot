@@ -1,0 +1,15 @@
+# Source de données provisionnée au démarrage de Grafana : rien à configurer dans l'interface.
+# uid fixe : le tableau de bord (dashboards/agentpilot.json) y fait référence.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    # Grafana et Prometheus sont tous deux en réseau hôte
+    url: http://localhost:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 10s

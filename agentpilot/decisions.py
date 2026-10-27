@@ -34,6 +34,7 @@ from typing import Any
 from sqlalchemy import exists, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
+from agentpilot import metrics
 from agentpilot.approval import REFUND, RESEND
 from agentpilot.models import PendingAction, PendingStatus
 from mcp_server import idempotency
@@ -317,6 +318,7 @@ async def _run(factory: sessionmaker[Session], action: PendingAction, *, amounts
     try:
         with _action_context(action, await _traced(factory, action)):
             notice = await _execute_and_record(factory, action, amounts=amounts)
+            metrics.action_executed(action.tool, notice)
             log_event(
                 logger,
                 "action.executed" if notice is Notice.EXECUTED else "action.not_executed",
@@ -378,6 +380,7 @@ async def approve(
         return Notice.ALREADY_DECIDED
     action = await _db(load, factory, action_id)
     assert action is not None
+    metrics.action_decided(action.tool, PendingStatus.APPROVED)
     with _action_context(action):
         log_event(logger, "action.approved", tool=action.tool)
     return await _run(factory, action, amounts=True)
@@ -402,6 +405,7 @@ async def reject(
         return Notice.ALREADY_DECIDED
     action = await _db(load, factory, action_id)
     if action is not None:
+        metrics.action_decided(action.tool, PendingStatus.REJECTED)
         with _action_context(action):
             log_event(logger, "action.rejected", tool=action.tool)
     return Notice.REJECTED

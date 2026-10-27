@@ -56,6 +56,7 @@ from agentpilot.worker import (
     QueueSnapshot,
     Skip,
     Worker,
+    done_actions,
     mark_interrupted,
     new_run,
 )
@@ -388,6 +389,67 @@ async def test_interrupted_run_is_relaunched_once_with_what_was_done(
     assert "réponse envoyée au client" in prompt
     assert "remboursement de 30,00 € sur la commande n°7" in prompt
     assert [r.status for r in runs(live, ticket)] == [RunStatus.INTERRUPTED, RunStatus.SUCCEEDED]
+
+
+def add_calls(
+    factory: sessionmaker[Session], run_id: uuid.UUID, *calls: tuple[str, dict[str, Any]]
+) -> None:
+    """Actions réussies au journal d'une exécution."""
+    with factory() as session:
+        for seq, (name, arguments) in enumerate(calls, start=1):
+            session.add(
+                ToolCall(
+                    run_id=run_id,
+                    seq=seq,
+                    tool=f"mcp__shopsim__{name}",
+                    input=arguments,
+                    outcome=CallOutcome.SUCCEEDED,
+                    created_at=datetime.now(UTC),
+                )
+            )
+        session.commit()
+
+
+@pytest.mark.anyio
+async def test_manual_relaunch_after_a_finished_run_starts_fresh(
+    worker: Worker, query: TicketQuery, shop: Shop, live: sessionmaker[Session]
+) -> None:
+    """Exécution terminée (ticket escaladé), puis relance à la main, par exemple après un seed
+    de ShopSim : la consigne ne parle pas de reprise, l'agent repart de zéro."""
+    [ticket] = tickets(shop, 1)
+    finished = add_run(live, ticket.id, RunStatus.SUCCEEDED)
+    add_calls(live, finished, ("escalate_ticket", {"ticket_id": ticket.id, "reason": "Montant"}))
+
+    run, launch = await worker.start_ticket(ticket.id, RunTrigger.MANUAL)
+    await worker.execute(run, launch)
+
+    [prompt] = query.prompts
+    assert "Reprise" not in prompt
+    assert "escaladé" not in prompt
+
+
+def test_resume_lists_only_unfinished_runs_since_the_last_success(
+    shop: Shop, live: sessionmaker[Session]
+) -> None:
+    [ticket] = tickets(shop, 1)
+    start = datetime.now(UTC) - timedelta(hours=1)
+    old = add_run(live, ticket.id, RunStatus.SUCCEEDED, created_at=start)
+    add_calls(live, old, ("escalate_ticket", {"ticket_id": ticket.id}))
+    failed = add_run(live, ticket.id, RunStatus.FAILED, created_at=start + timedelta(minutes=10))
+    add_calls(live, failed, ("reply_to_ticket", {"ticket_id": ticket.id, "body": "Bonjour"}))
+    stopped = add_run(
+        live, ticket.id, RunStatus.INTERRUPTED, created_at=start + timedelta(minutes=20)
+    )
+    add_calls(
+        live,
+        stopped,
+        ("refund_order", {"ticket_id": ticket.id, "order_id": 7, "amount_cents": 3_000}),
+    )
+
+    assert done_actions(live, ticket.id) == [
+        "réponse envoyée au client",
+        "remboursement de 30,00 € sur la commande n°7",
+    ]
 
 
 @pytest.mark.anyio
