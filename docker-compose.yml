@@ -27,6 +27,13 @@ services:
       CHAOS_TOKEN: ${CHAOS_TOKEN:-}
       # 1 = horloge figée au 2026-07-06 12:00 (évaluations) ; sinon elle avance depuis le seed
       SHOPSIM_FREEZE_CLOCK: ${SHOPSIM_FREEZE_CLOCK:-0}
+      # Logs JSON : shopsim.jsonl (et chaos.jsonl pour les requêtes /chaos), à côté de ceux
+      # d'AgentPilot et du serveur MCP
+      LOG_DIR: /srv/logs
+    # Fichiers de logs à l'utilisateur de l'hôte, pas à root
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./logs:/srv/logs
     ports:
       - "8000:8000"
     depends_on:

@@ -1,9 +1,14 @@
 """Fixtures : base PostgreSQL de test (`shopsim_test` du compose), une transaction par test."""
 
+import io
 import itertools
+import json
 import os
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,9 +16,10 @@ from sqlalchemy import Engine, create_engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from observability.logs import configure, configure_isolated
 from shopsim.app import clock
 from shopsim.app.db import Base, get_session
-from shopsim.app.main import app
+from shopsim.app.main import CHAOS_LOGGER, app
 from shopsim.app.models import (
     Customer,
     MessageAuthor,
@@ -40,6 +46,40 @@ _ORDER_STATUS_BY_PAYMENT_STATUS = {
     PaymentStatus.REFUNDED: OrderStatus.REFUNDED,
 }
 _unique = itertools.count(1)
+
+
+@dataclass
+class JsonLogs:
+    """Logs JSON écrits pendant un test : fichiers de `dir` et sortie d'erreur (`stderr`)."""
+
+    dir: Path
+    stderr: io.StringIO
+
+    def read(self, name: str) -> list[dict[str, Any]]:
+        """Lignes de `<dir>/<name>.jsonl` ; chacune doit être un objet JSON complet."""
+        path = self.dir / f"{name}.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def stderr_lines(self) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in self.stderr.getvalue().splitlines()]
+
+    def everything(self) -> str:
+        """Tout ce qui a été écrit, fichiers et sortie d'erreur."""
+        files = "".join(p.read_text(encoding="utf-8") for p in sorted(self.dir.glob("*")))
+        return files + self.stderr.getvalue()
+
+
+@pytest.fixture
+def json_logs(tmp_path: Path) -> Iterator[JsonLogs]:
+    """Logs de ShopSim comme en production (`shopsim.jsonl`, `chaos.jsonl`, stderr), dans un
+    dossier temporaire. Les autres services du test se configurent sur le même dossier."""
+    logs = JsonLogs(tmp_path / "logs", io.StringIO())
+    configure("shopsim", logs.dir, logger_name="shopsim", stream=logs.stderr)
+    configure_isolated(CHAOS_LOGGER, "shopsim", logs.dir, "chaos.jsonl")
+    yield logs
+    configure_isolated(CHAOS_LOGGER, "shopsim", None, "chaos.jsonl")
 
 
 @pytest.fixture(autouse=True)

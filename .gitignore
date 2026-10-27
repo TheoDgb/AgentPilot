@@ -5,6 +5,8 @@
 /agentpilot.egg-info/
 # Sorties des lancements d'agents
 /runs/
+# Logs JSON des trois services (J4.1)
+/logs/
 __pycache__/
 *.py[cod]
 .claude/settings.local.json

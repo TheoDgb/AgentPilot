@@ -10,8 +10,10 @@ le démarrage de l'agent. Une exécution n'est lancée que si la dépense du jou
 reste sous le budget : le budget n'est jamais dépassé.
 
 Fonctions synchrones : à appeler hors de la boucle d'événements (`asyncio.to_thread`).
+Chaque changement d'interrupteur écrit une ligne de log (sans le nom, qui reste en base).
 """
 
+import logging
 from datetime import UTC, datetime, time
 from decimal import Decimal
 
@@ -22,6 +24,9 @@ from agentpilot.decisions import NAME_MAX, clean_text
 from agentpilot.env_file import setting
 from agentpilot.models import CONTROL_ID, Control, PauseReason, Run, RunStatus
 from agentpilot.sdk_runner import MAX_BUDGET_USD
+from observability.logs import log_event
+
+logger = logging.getLogger(__name__)
 
 BUDGET_ENV = "AGENTPILOT_DAILY_BUDGET_USD"
 DEFAULT_DAILY_BUDGET_USD = Decimal("5")
@@ -88,6 +93,12 @@ def pause(factory: sessionmaker[Session], name: str | None, reason: PauseReason)
     Lève `InvalidInput`."""
     by = _name(name) if reason is PauseReason.MANUAL else None
     _update(factory, loop_paused=True, pause_reason=reason, paused_by=by, paused_at=_now())
+    log_event(
+        logger,
+        "loop.paused",
+        logging.WARNING if reason is PauseReason.BUDGET else logging.INFO,
+        pause_reason=reason,
+    )
 
 
 def resume(factory: sessionmaker[Session], name: str) -> bool:
@@ -98,6 +109,7 @@ def resume(factory: sessionmaker[Session], name: str) -> bool:
         if not budget_allows(session):
             return False
     _update(factory, loop_paused=False, pause_reason=None, paused_by=by, paused_at=_now())
+    log_event(logger, "loop.resumed")
     return True
 
 
@@ -105,3 +117,4 @@ def set_emergency(factory: sessionmaker[Session], on: bool, name: str) -> None:
     """Active ou lève l'arrêt d'urgence. Lève `InvalidInput`."""
     by = _name(name)
     _update(factory, emergency_stop=on, emergency_by=by, emergency_at=_now())
+    log_event(logger, "emergency.changed", logging.WARNING, emergency=on)

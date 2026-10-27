@@ -3,12 +3,22 @@
 Toute erreur (404, 409, 422, 5xx, délai dépassé, service injoignable) devient une
 `ShopSimError` dont le message, lisible, est renvoyé tel quel à l'agent.
 Aucun accès au Chaos : ce client n'envoie jamais `X-Chaos-Token`.
+
+Chaque requête porte la trace courante (en-tête `traceparent`) et écrit une ligne
+`shopsim.call` (méthode, chemin, code, durée), sans corps ni paramètres de requête.
 """
 
+import logging
 import os
+import time
 from typing import Any
 
 import httpx
+
+from observability import trace
+from observability.logs import log_event
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SHOPSIM_URL = "http://localhost:8000"
 # Plus que les 4 s de la panne payment_latency : la lenteur reste visible sans échec
@@ -45,6 +55,16 @@ class ShopSimConflict(ShopSimError):
         self.detail = detail
 
 
+def _outcome(status: int) -> str:
+    if status in (200, 201):
+        return "ok"
+    if status == 404:
+        return "not_found"
+    if status == 409:
+        return "conflict"
+    return "unavailable" if status >= 500 else "refused"
+
+
 def _detail(response: httpx.Response) -> str:
     """Motif lisible d'un refus de ShopSim (champ `detail` de FastAPI)."""
     try:
@@ -74,19 +94,38 @@ async def _send(
 ) -> httpx.Response:
     """Appel à ShopSim ; toute réponse autre que 200 ou 201 devient une `ShopSimError`."""
     endpoint = f"{method} {path}"
-    headers = {"Idempotency-Key": idempotency_key} if idempotency_key is not None else None
+    headers = trace.headers()
+    if idempotency_key is not None:
+        headers["Idempotency-Key"] = idempotency_key
+    start = time.perf_counter()
+
+    def log_call(outcome: str, status: int | None = None) -> None:
+        log_event(
+            logger,
+            "shopsim.call",
+            logging.INFO if outcome in ("ok", "not_found", "conflict") else logging.WARNING,
+            method=method,
+            path=path,
+            status=status,
+            outcome=outcome,
+            duration_ms=round((time.perf_counter() - start) * 1000),
+        )
+
     try:
         async with _client() as client:
             response = await client.request(method, path, params=params, json=body, headers=headers)
     except httpx.TimeoutException as exc:
+        log_call("timeout")
         raise ShopSimUnavailable(
             f"ShopSim n'a pas répondu en {timeout_s():g} s sur {endpoint} (service lent). "
             "Réessayer plus tard ou escalader."
         ) from exc
     except httpx.TransportError as exc:
+        log_call("unreachable")
         raise ShopSimUnavailable(f"ShopSim est injoignable à {shopsim_url()}.") from exc
 
     status = response.status_code
+    log_call(_outcome(status), status)
     if status in (200, 201):
         return response
     if status == 404:

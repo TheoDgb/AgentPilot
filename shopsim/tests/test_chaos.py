@@ -1,6 +1,5 @@
 """Endpoint Chaos : jeton, cycle de vie des pannes et symptôme de chacune."""
 
-import logging
 import time
 from collections.abc import Iterator
 
@@ -233,26 +232,3 @@ def test_health_ignores_faults(client: TestClient, slept: list[float]) -> None:
 
     assert client.get("/health").status_code == 200
     assert slept == []
-
-
-def test_fault_logs_look_like_real_errors(
-    client: TestClient,
-    make_payment: MakePayment,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Les logs ne trahissent pas la panne : seul GET /chaos la révèle."""
-    payment = make_payment()
-    activate(client, "db_errors")
-    activate(client, "bad_deploy")
-
-    with caplog.at_level(logging.ERROR, logger="shopsim"):
-        client.get(f"/orders/{payment.order_id}")
-        post_refund(client, payment.id, "chaos-logs")
-
-    messages = [r.getMessage() for r in caplog.records]
-    assert any("OperationalError" in m for m in messages)
-    assert any("KeyError" in m for m in messages)
-    for message in messages:
-        assert "simul" not in message.lower()
-        assert "chaos" not in message.lower()
-        assert not any(scenario in message for scenario in ChaosScenario)

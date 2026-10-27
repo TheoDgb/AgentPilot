@@ -157,9 +157,7 @@ async def test_service_shutdown_stops_running_agents(
     """Comme un Ctrl+C : le lifespan appelle `Worker.shutdown`."""
     worker = Worker(SimpleNamespace(session_factory=session_factory))
     run = new_run(session_factory, AgentKind.SUPPORT, 1, RunTrigger.LOOP, check_budget=False)
-    task = asyncio.create_task(
-        worker.execute(run.id, 1, RunTrigger.LOOP, lambda: launch(fake_cli, timeout_s=120))
-    )
+    task = asyncio.create_task(worker.execute(run, lambda: launch(fake_cli, timeout_s=120)))
     cli, server = await read_pids_async(tmp_path / "pids")
 
     await worker.shutdown(timeout_s=20)

@@ -10,7 +10,8 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql+psycopg://shopsim:shopsim@localhost:5433/shopsim"
 )
 
-engine = create_engine(DATABASE_URL)
+# Une erreur SQL ne recopie pas les valeurs (texte des messages clients) dans son message
+engine = create_engine(DATABASE_URL, hide_parameters=True)
 SessionLocal = sessionmaker(bind=engine)
 
 

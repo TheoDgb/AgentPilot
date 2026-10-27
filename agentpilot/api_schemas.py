@@ -20,6 +20,8 @@ from agentpilot.models import (
 class RunCreated(BaseModel):
     id: uuid.UUID
     status: RunStatus
+    # Pour retrouver l'exécution dans les logs : `python -m observability.query --trace <id>`
+    trace_id: str
 
 
 class ToolCallRead(BaseModel):
@@ -60,6 +62,7 @@ class PendingActionRead(BaseModel):
     customer_message: str | None
     message_sent_at: datetime | None
     resolved_at: datetime | None
+    trace_id: str | None
 
 
 class RunRead(BaseModel):
@@ -70,6 +73,7 @@ class RunRead(BaseModel):
     ticket_id: int | None
     status: RunStatus
     trigger: RunTrigger
+    trace_id: str
     # Arrêt d'urgence pendant l'exécution : actions refusées, décision = proposition
     propose_only: bool
     simulation_date: date | None

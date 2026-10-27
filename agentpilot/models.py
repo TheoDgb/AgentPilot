@@ -13,6 +13,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from agentpilot.db import SCHEMA, Base
+from observability.trace import new_trace_id
 
 
 class RunStatus(StrEnum):
@@ -86,6 +87,8 @@ class Run(Base):
     )
     # Arrêt d'urgence : au moins une action refusée, la décision n'est qu'une proposition
     propose_only: Mapped[bool] = mapped_column(default=False)
+    # Trace de l'exécution dans les logs des trois services (`observability.trace`)
+    trace_id: Mapped[str] = mapped_column(String(32), default=new_trace_id, index=True)
     # Date de l'horloge de ShopSim au lancement (celle donnée à l'agent)
     simulation_date: Mapped[date | None] = mapped_column(Date)
     model: Mapped[str | None] = mapped_column(String(100))
@@ -148,6 +151,9 @@ class PendingAction(Base):
     customer_message: Mapped[str | None] = mapped_column(Text)
     message_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Trace de la dernière opération de la plateforme sur ShopSim pour cette action
+    # (exécution, relance, message au client) ; celle de l'agent est sur son exécution
+    trace_id: Mapped[str | None] = mapped_column(String(32))
 
     run: Mapped[Run] = relationship(viewonly=True, lazy="joined")
 

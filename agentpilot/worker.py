@@ -21,10 +21,15 @@ n'est faite deux fois : ShopSim reconnaît un rejeu.
 
 Arrêt du service : chaque exécution est annulée par une portée anyio, qui laisse le SDK arrêter
 la CLI (voir `sdk_runner`), puis est marquée `interrupted`.
+
+Logs : chaque exécution lie sa trace (`runs.trace_id`), son id et son ticket à tout ce qu'elle
+écrit, jusqu'au serveur MCP et à ShopSim (`run.started`, `run.finished`) ; chaque tour de
+boucle a sa propre trace (`loop.backoff`, `loop.paused`).
 """
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
@@ -56,6 +61,8 @@ from agentpilot.models import (
 from agentpilot.sdk_runner import AgentResult
 from agentpilot.support_agent import ACTION_TOOL_NAMES
 from mcp_server.shopsim_client import ShopSimUnavailable, get_json
+from observability import trace
+from observability.logs import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -356,26 +363,68 @@ class Worker:
 
     # --- Exécutions ---
 
-    async def execute(
-        self, run_id: uuid.UUID, ticket_id: int | None, trigger: RunTrigger, launch: Launch
+    async def execute(self, run: Run, launch: Launch) -> None:
+        """Exécute une exécution déjà créée, dans une place libre, et enregistre le résultat.
+        Tout ce qu'elle écrit dans les logs porte sa trace."""
+        context = {"run_id": run.id} | ({"ticket_id": run.ticket_id} if run.ticket_id else {})
+        with trace.bind(trace_id=run.trace_id, **context):
+            await self._execute(run.id, run.ticket_id, run.trigger, run.agent, launch)
+
+    async def _execute(
+        self,
+        run_id: uuid.UUID,
+        ticket_id: int | None,
+        trigger: RunTrigger,
+        agent: AgentKind,
+        launch: Launch,
     ) -> None:
-        """Exécute une exécution déjà créée, dans une place libre, et enregistre le résultat."""
         active = Active(ticket_id, trigger)
         self.active[run_id] = active
         result: AgentResult | None = None
+        start = time.perf_counter()
+        log_event(logger, "run.started", agent=agent, trigger=trigger)
         try:
             with active.scope:
                 async with self.slots:
                     try:
                         result = await launch()
                     except Exception as exc:  # toute panne inattendue est enregistrée
-                        result = AgentResult(error=f"Erreur interne d'AgentPilot : {exc!r}")
+                        log_event(logger, "run.crashed", logging.ERROR, exc_info=True)
+                        result = AgentResult(
+                            error=f"Erreur interne d'AgentPilot : {exc!r}",
+                            error_type=sdk_runner.ErrorType.INTERNAL,
+                        )
             await self._db(finish, run_id, result)
             if trigger is RunTrigger.LOOP and result is not None:
                 self._count(result)
         finally:
             del self.active[run_id]
+            self._log_finished(result, start)
             self.wake()
+
+    @staticmethod
+    def _log_finished(result: AgentResult | None, start: float) -> None:
+        duration_ms = round((time.perf_counter() - start) * 1000)
+        if result is None:
+            log_event(
+                logger,
+                "run.finished",
+                logging.WARNING,
+                status=RunStatus.INTERRUPTED,
+                duration_ms=duration_ms,
+            )
+            return
+        log_event(
+            logger,
+            "run.finished",
+            logging.WARNING if result.error else logging.INFO,
+            status=RunStatus.FAILED if result.error else RunStatus.SUCCEEDED,
+            duration_ms=duration_ms,
+            cost_usd=None if result.total_cost_usd is None else round(result.total_cost_usd, 6),
+            num_turns=result.num_turns,
+            # Jamais `result.error` : il peut citer la sortie de l'agent (texte du client)
+            error_type=result.error_type,
+        )
 
     def ticket_launch(self, run_id: uuid.UUID, ticket_id: int, done: list[str]) -> Launch:
         journal = DbJournal(self.factory, run_id)
@@ -404,7 +453,7 @@ class Worker:
         delay = min(BACKOFF_BASE_S * 2 ** (self.backoff_level - 1), BACKOFF_MAX_S)
         self.waiting_until = self.clock() + timedelta(seconds=delay)
         self.waiting_reason = reason
-        logger.warning("Boucle en attente %.0f s : %s", delay, reason)
+        log_event(logger, "loop.backoff", logging.WARNING, delay_s=delay, reason=reason)
         return delay
 
     def _shopsim_ok(self) -> None:
@@ -432,7 +481,9 @@ class Worker:
     async def tick(self) -> float:
         """Un tour de boucle ; renvoie le délai avant le suivant, en secondes."""
         async with self._tick_lock:
-            return await self._tick()
+            # Requêtes du tour (santé de ShopSim, file, réessais) : une trace par tour
+            with trace.bind(trace_id=trace.new_trace_id()):
+                return await self._tick()
 
     async def _tick(self) -> float:
         if self.waiting_until is not None and self.clock() < self.waiting_until:
@@ -484,9 +535,8 @@ class Worker:
                 continue
             except OverBudget:
                 await self._db(control.pause, None, PauseReason.BUDGET)
-                logger.warning("Budget du jour atteint : boucle en pause")
                 return
-            task = asyncio.create_task(self.execute(run.id, ticket_id, RunTrigger.LOOP, launch))
+            task = asyncio.create_task(self.execute(run, launch))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
             free -= 1
@@ -502,7 +552,7 @@ class Worker:
                 try:
                     delay = await self.tick()
                 except Exception:  # la boucle ne s'arrête jamais sur une erreur
-                    logger.exception("Erreur dans la boucle de traitement")
+                    log_event(logger, "loop.error", logging.ERROR, exc_info=True)
                     delay = interval_s()
                 with anyio.move_on_after(delay):
                     await self._wake.wait()

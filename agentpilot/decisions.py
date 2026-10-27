@@ -15,11 +15,18 @@ parallèle (`IN_FLIGHT`).
 
 Comme les hooks, ce code lit et écrit ShopSim par le client HTTP du serveur MCP : c'est la
 plateforme qui agit, sur décision d'un humain, pas un agent.
+
+Chaque opération sur ShopSim (exécution, relance, message au client, résolution) a sa propre
+trace, enregistrée dans `pending_actions.trace_id` et liée dans les logs à l'action, à
+l'exécution de l'agent et au ticket. Ni le nom de l'approbateur ni le texte du message ne sont
+écrits dans les logs.
 """
 
 import asyncio
+import logging
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -31,6 +38,10 @@ from agentpilot.approval import REFUND, RESEND
 from agentpilot.models import PendingAction, PendingStatus
 from mcp_server import idempotency
 from mcp_server.shopsim_client import ShopSimError, ShopSimUnavailable, get_json, post_json
+from observability import trace
+from observability.logs import log_event
+
+logger = logging.getLogger(__name__)
 
 NAME_MAX = 100
 NOTE_MAX = 500
@@ -213,6 +224,22 @@ async def _db[T](function: Callable[..., T], *args: Any, **kwargs: Any) -> T:  #
     return await asyncio.to_thread(function, *args, **kwargs)
 
 
+@contextmanager
+def _action_context(action: PendingAction, trace_id: str | None = None) -> Iterator[None]:
+    """Contexte des logs d'une action : son id, l'exécution de l'agent et le ticket."""
+    with trace.bind(
+        trace_id=trace_id, action_id=action.id, run_id=action.run_id, ticket_id=action.ticket_id
+    ):
+        yield
+
+
+async def _traced(factory: sessionmaker[Session], action: PendingAction) -> str:
+    """Nouvelle trace pour une opération de la plateforme sur ShopSim, enregistrée sur l'action."""
+    trace_id = trace.new_trace_id()
+    await _db(_set, factory, action.id, trace_id=trace_id)
+    return trace_id
+
+
 # --- ShopSim ---------------------------------------------------------------------------
 
 
@@ -288,7 +315,18 @@ async def _run(factory: sessionmaker[Session], action: PendingAction, *, amounts
         return Notice.IN_PROGRESS
     IN_FLIGHT.add(action.id)
     try:
-        return await _execute_and_record(factory, action, amounts=amounts)
+        with _action_context(action, await _traced(factory, action)):
+            notice = await _execute_and_record(factory, action, amounts=amounts)
+            log_event(
+                logger,
+                "action.executed" if notice is Notice.EXECUTED else "action.not_executed",
+                logging.INFO if notice is Notice.EXECUTED else logging.WARNING,
+                tool=action.tool,
+                order_id=action.params.get("order_id"),
+                amount_cents=action.params.get("amount_cents"),
+                notice=notice,
+            )
+            return notice
     finally:
         IN_FLIGHT.discard(action.id)
 
@@ -340,6 +378,8 @@ async def approve(
         return Notice.ALREADY_DECIDED
     action = await _db(load, factory, action_id)
     assert action is not None
+    with _action_context(action):
+        log_event(logger, "action.approved", tool=action.tool)
     return await _run(factory, action, amounts=True)
 
 
@@ -360,6 +400,10 @@ async def reject(
     assert decided_by is not None
     if not await _db(_claim, factory, action_id, PendingStatus.REJECTED, decided_by, decision_note):
         return Notice.ALREADY_DECIDED
+    action = await _db(load, factory, action_id)
+    if action is not None:
+        with _action_context(action):
+            log_event(logger, "action.rejected", tool=action.tool)
     return Notice.REJECTED
 
 
@@ -377,6 +421,17 @@ async def follow_up(
     action = await _db(load, factory, action_id)
     if action is None or action.status is PendingStatus.PENDING:
         raise InvalidInput("Décidez d'abord de l'action.")
+    if text is None and not resolve:
+        return [], None
+    with _action_context(action, await _traced(factory, action)):
+        notices, error = await _follow_up(factory, action, text, resolve)
+        log_event(logger, "action.follow_up", notice=",".join(notices))
+        return notices, error
+
+
+async def _follow_up(
+    factory: sessionmaker[Session], action: PendingAction, text: str | None, resolve: bool
+) -> tuple[list[Notice], str | None]:
     notices: list[Notice] = []
     try:
         if text is not None:

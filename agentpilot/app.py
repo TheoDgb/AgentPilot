@@ -13,12 +13,18 @@ Lancement (local) : `.venv/bin/uvicorn agentpilot.app:app --port 8001`.
 
 Au démarrage, une boucle de fond (`agentpilot/worker.py`) traite les tickets ouverts et
 reprend ce qui a été interrompu ; elle démarre en pause au premier lancement.
+
+Logs JSON (`observability`) sur stderr et dans `<AGENTPILOT_LOG_DIR>/agentpilot.jsonl`
+(`logs/` à la racine du dépôt par défaut), configurés au démarrage : les tests n'écrivent
+aucun fichier sans le demander.
 """
 
 import asyncio
+import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
@@ -28,15 +34,30 @@ from sqlalchemy.orm import Session, sessionmaker
 from agentpilot import sdk_runner, web
 from agentpilot.api_schemas import ControlStatus, RunCreated, RunRead
 from agentpilot.db import SessionLocal, engine, init_db
+from agentpilot.env_file import setting
 from agentpilot.journal import DbJournal
 from agentpilot.models import AgentKind, Run, RunTrigger
+from agentpilot.support_agent import REPO_ROOT
 from agentpilot.worker import AlreadyRunning, OverBudget, Worker, mark_interrupted, new_run
+from observability.http import RequestLogMiddleware
+from observability.logs import configure
 
 __all__ = ["app", "mark_interrupted"]
+
+LOG_DIR_ENV = "AGENTPILOT_LOG_DIR"
+
+
+def log_dir() -> Path:
+    """Dossier des logs JSON des trois services en local (aussi donné au serveur MCP).
+
+    Un chemin relatif part de la racine du dépôt, pas du dossier courant : le serveur MCP
+    tourne dans le dossier de travail temporaire de l'exécution."""
+    return REPO_ROOT / (setting(LOG_DIR_ENV) or "logs")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    configure("agentpilot", log_dir())
     init_db(engine)
     with app.state.session_factory() as session:
         # Reprise : le premier tour de la boucle relance ces tickets
@@ -50,6 +71,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="AgentPilot", lifespan=lifespan)
+app.add_middleware(RequestLogMiddleware, logger=logging.getLogger("agentpilot.http"))
 app.include_router(web.router)
 app.include_router(web.control_router)
 # Remplaçables par les tests : sessions de base et fonction `query` du SDK
@@ -81,8 +103,8 @@ async def start_support_run(
         raise HTTPException(status_code=409, detail="Ticket already being processed") from None
     except OverBudget:
         raise HTTPException(status_code=429, detail="Daily budget reached") from None
-    background.add_task(worker.execute, run.id, ticket_id, RunTrigger.MANUAL, launch)
-    return RunCreated(id=run.id, status=run.status)
+    background.add_task(worker.execute, run, launch)
+    return RunCreated(id=run.id, status=run.status, trace_id=run.trace_id)
 
 
 @app.post("/checks/support", response_model=RunRead)
@@ -95,12 +117,7 @@ async def check_support(request: Request, session: SessionDep) -> Run:
     )
     query = request.app.state.query
     journal = DbJournal(factory, run.id)
-    await worker.execute(
-        run.id,
-        None,
-        RunTrigger.MANUAL,
-        lambda: sdk_runner.check_context(journal=journal, query=query),
-    )
+    await worker.execute(run, lambda: sdk_runner.check_context(journal=journal, query=query))
     session.expire_all()
     return session.get_one(Run, run.id)
 

@@ -61,6 +61,7 @@ make_refund = mcp_fixtures.make_refund
 sim_clock = mcp_fixtures.sim_clock
 shopsim_server = mcp_fixtures.shopsim_server
 shopsim = mcp_fixtures.shopsim
+json_logs = mcp_fixtures.json_logs
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql+psycopg://shopsim:shopsim@localhost:5433/shopsim_test"
@@ -83,6 +84,12 @@ def no_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPa
     missing = tmp_path_factory.mktemp("no-env") / ".env"
     monkeypatch.setattr(env_file, "ENV_FILE", missing)
     monkeypatch.setattr(support_agent, "ENV_FILE", missing)
+
+
+@pytest.fixture(autouse=True)
+def tmp_log_dir(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Un service démarré par un test écrit ses logs ailleurs que dans `logs/` du dépôt."""
+    monkeypatch.setenv("AGENTPILOT_LOG_DIR", str(tmp_path_factory.mktemp("logs")))
 
 
 @pytest.fixture(autouse=True)

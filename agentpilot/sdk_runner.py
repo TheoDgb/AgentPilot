@@ -30,6 +30,7 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import date
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,7 @@ from agentpilot.support_agent import (
     SUPPORT_TOOL_NAMES,
     AgentRunError,
 )
+from observability import logs, trace
 
 QueryFn = Callable[..., AsyncIterator[Any]]
 
@@ -85,6 +87,19 @@ BUILTIN_TOOLS = [
 ]
 
 
+class ErrorType(StrEnum):
+    """Catégorie d'un échec, seule écrite dans les logs : le message (`error`), qui peut citer la
+    sortie de l'agent, reste en base."""
+
+    CONFIG = "config"
+    SHOPSIM_UNAVAILABLE = "shopsim_unavailable"
+    AGENT_ERROR = "agent_error"
+    INVALID_OUTPUT = "invalid_output"
+    TIMEOUT = "timeout"
+    SDK_ERROR = "sdk_error"
+    INTERNAL = "internal"
+
+
 @dataclass
 class AgentResult:
     """Ce qu'une exécution a produit et mesuré ; `error` est rempli en cas d'échec."""
@@ -92,6 +107,7 @@ class AgentResult:
     simulation_date: date | None = None
     output: dict[str, Any] | None = None
     error: str | None = None
+    error_type: ErrorType | None = None
     model: str | None = None
     session_id: str | None = None
     total_cost_usd: float | None = None
@@ -124,7 +140,15 @@ def build_options(
         skills=[],
         plugins=[],
         strict_mcp_config=True,
-        mcp_servers={MCP_SERVER: support_agent.mcp_server_config(shopsim_url, actions=True)},
+        # Le serveur MCP reprend la trace de l'exécution et écrit ses logs à côté des nôtres
+        mcp_servers={
+            MCP_SERVER: support_agent.mcp_server_config(
+                shopsim_url,
+                actions=True,
+                trace_id=trace.current_trace_id(),
+                log_dir=logs.log_dir(),
+            )
+        },
         tools=[],
         allowed_tools=sorted(SUPPORT_TOOL_NAMES),
         disallowed_tools=BUILTIN_TOOLS,
@@ -155,8 +179,10 @@ def _record_final(result: AgentResult, final: ResultMessage) -> None:
     result.num_turns = final.num_turns
     if final.is_error or final.subtype != "success":
         result.error = f"L'agent a échoué : {final.result or final.subtype}"
+        result.error_type = ErrorType.AGENT_ERROR
     elif final.structured_output is None:
         result.error = "L'agent n'a pas rendu de sortie structurée"
+        result.error_type = ErrorType.INVALID_OUTPUT
     else:
         result.output = final.structured_output
 
@@ -200,6 +226,7 @@ async def run_agent(
     result = AgentResult(simulation_date=today)
     if hooks is None:
         result.error = "Outils d'action sans hooks de validation : lancement refusé"
+        result.error_type = ErrorType.CONFIG
         return result
     try:
         api_key = support_agent.load_api_key(environ)
@@ -223,11 +250,14 @@ async def run_agent(
                     await _collect(messages, result)
     except AgentRunError as exc:
         result.error = str(exc)
+        result.error_type = ErrorType.AGENT_ERROR
     except TimeoutError:
         result.error = f"L'agent n'a pas répondu en {timeout_s:g} s"
+        result.error_type = ErrorType.TIMEOUT
     except ClaudeSDKError as exc:
         # Le SDK lève aussi après un résultat en erreur : garder le motif déjà lu
         result.error = result.error or f"Erreur du Claude Agent SDK : {exc}"
+        result.error_type = result.error_type or ErrorType.SDK_ERROR
     if result.error is not None:
         result.output = None
     return result
@@ -252,7 +282,7 @@ async def decide_ticket(
     try:
         today = await _today(environ)
     except AgentRunError as exc:
-        return AgentResult(error=str(exc))
+        return AgentResult(error=str(exc), error_type=ErrorType.SHOPSIM_UNAVAILABLE)
     result = await run_agent(
         support_agent.ticket_prompt(ticket_id, done),
         SupportDecision,
@@ -268,6 +298,7 @@ async def decide_ticket(
             result.output = decision.model_dump(mode="json")
         except AgentRunError as exc:
             result.error = str(exc)
+            result.error_type = ErrorType.INVALID_OUTPUT
             # Une exécution en échec n'expose jamais de décision
             result.output = None
     return result
@@ -285,7 +316,7 @@ async def check_context(
     try:
         today = await _today(environ)
     except AgentRunError as exc:
-        return AgentResult(error=str(exc))
+        return AgentResult(error=str(exc), error_type=ErrorType.SHOPSIM_UNAVAILABLE)
     result = await run_agent(
         CHECK_PROMPT,
         ContextCheck,
@@ -301,6 +332,7 @@ async def check_context(
             result.output = answer.model_dump(mode="json")
         except AgentRunError as exc:
             result.error = str(exc)
+            result.error_type = ErrorType.INVALID_OUTPUT
             # Une exécution en échec n'expose jamais de décision
             result.output = None
     return result

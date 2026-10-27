@@ -5,7 +5,8 @@ processus est vue par tous les autres. Les endpoints Chaos exigent le jeton
 `CHAOS_TOKEN`, que les agents n'ont jamais.
 
 Les erreurs écrites dans les logs imitent exactement de vraies erreurs, sans
-mention de la panne : seul `GET /chaos` dit quelle panne est active.
+mention de la panne : seul `GET /chaos` dit quelle panne est active. Même événement
+(`http.exception`), même logger et même format JSON qu'une erreur réelle.
 """
 
 import logging
@@ -18,6 +19,7 @@ from fastapi import Depends, Header, HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from observability.logs import log_event
 from shopsim.app.db import get_session
 from shopsim.app.models import ChaosFault, ChaosScenario
 
@@ -48,6 +50,10 @@ def require_chaos_token(
         raise HTTPException(status_code=403, detail="Invalid chaos token")
 
 
+def _log_error(error_type: str, error: str) -> None:
+    log_event(logger, "http.exception", logging.ERROR, error_type=error_type, error=error)
+
+
 def _internal_error() -> HTTPException:
     return HTTPException(status_code=500, detail="Internal Server Error")
 
@@ -55,10 +61,11 @@ def _internal_error() -> HTTPException:
 def raise_if_db_errors(session: Session) -> None:
     """db_errors : les lectures des commandes échouent comme sur une base indisponible."""
     if is_active(session, ChaosScenario.DB_ERRORS):
-        logger.error(
-            "psycopg.OperationalError: server closed the connection unexpectedly\n"
+        _log_error(
+            "psycopg.OperationalError",
+            "server closed the connection unexpectedly\n"
             "\tThis probably means the server terminated abnormally\n"
-            "\tbefore or while processing the request."
+            "\tbefore or while processing the request.",
         )
         raise _internal_error()
 
@@ -66,7 +73,7 @@ def raise_if_db_errors(session: Session) -> None:
 def raise_if_bad_deploy(session: Session) -> None:
     """bad_deploy : seuls les remboursements échouent, comme après une mauvaise configuration."""
     if is_active(session, ChaosScenario.BAD_DEPLOY):
-        logger.error("KeyError: 'REFUND_PROVIDER_URL'")
+        _log_error("KeyError", "'REFUND_PROVIDER_URL'")
         raise _internal_error()
 
 

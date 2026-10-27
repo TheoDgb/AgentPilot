@@ -18,6 +18,8 @@ from agentpilot.schemas import ContextCheck, SupportDecision
 from evals.policy import APPROVAL_THRESHOLD_CENTS, REFUND_WINDOW, RISK_MIN_REFUNDS, RISK_WINDOW
 from mcp_server.action_tools import ACTION_TOOLS
 from mcp_server.read_tools import READ_TOOLS
+from observability import trace
+from observability.logs import register_secret
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENT_DIR = REPO_ROOT / "agents" / "support"
@@ -106,7 +108,9 @@ def build_system_prompt(today: date) -> str:
 def simulation_today(shopsim_url: str) -> date:
     """Date du jour de la simulation, lue sur l'horloge de ShopSim (`GET /clock`)."""
     try:
-        response = httpx.get(f"{shopsim_url.rstrip('/')}/clock", timeout=10)
+        response = httpx.get(
+            f"{shopsim_url.rstrip('/')}/clock", headers=trace.headers(), timeout=10
+        )
         response.raise_for_status()
         return date.fromisoformat(response.json()["now"][:10])
     except (httpx.HTTPError, ValueError, KeyError) as exc:
@@ -116,19 +120,30 @@ def simulation_today(shopsim_url: str) -> date:
 # --- Configuration -----------------------------------------------------------------------
 
 
-def mcp_server_config(shopsim_url: str, actions: bool = False) -> dict[str, Any]:
+def mcp_server_config(
+    shopsim_url: str,
+    actions: bool = False,
+    trace_id: str | None = None,
+    log_dir: Path | None = None,
+) -> dict[str, Any]:
     """Serveur MCP shopsim en chemins absolus ; lecture seule sauf `actions` (service
-    AgentPilot, avec hooks)."""
+    AgentPilot, avec hooks). `trace_id` : trace de l'exécution, que le serveur transmet à
+    ShopSim ; `log_dir` : dossier de ses logs JSON (`mcp.jsonl`)."""
+    env = {
+        "PYTHONPATH": str(REPO_ROOT),
+        "SHOPSIM_URL": shopsim_url,
+        # Valeur exacte : « 1 » seulement si demandé, sinon lecture seule forcée
+        "SHOPSIM_MCP_ACTIONS": "1" if actions else "0",
+    }
+    if trace_id is not None:
+        env[trace.TRACEPARENT_ENV] = trace.traceparent(trace_id)
+    if log_dir is not None:
+        env["LOG_DIR"] = str(log_dir)
     return {
         "type": "stdio",
         "command": str(REPO_ROOT / ".venv" / "bin" / "python"),
         "args": ["-m", "mcp_server.server"],
-        "env": {
-            "PYTHONPATH": str(REPO_ROOT),
-            "SHOPSIM_URL": shopsim_url,
-            # Valeur exacte : « 1 » seulement si demandé, sinon lecture seule forcée
-            "SHOPSIM_MCP_ACTIONS": "1" if actions else "0",
-        },
+        "env": env,
     }
 
 
@@ -139,6 +154,8 @@ def load_api_key(environ: Mapping[str, str], env_file: Path | None = None) -> st
         key = read_value("ANTHROPIC_API_KEY", env_file or ENV_FILE) or ""
     if not key:
         raise AgentRunError("ANTHROPIC_API_KEY absente : la renseigner dans .env")
+    # Jamais dans les logs, même lue dans `.env` (hors de l'environnement)
+    register_secret(key)
     return key
 
 

@@ -10,12 +10,16 @@
 Pour laisser passer, le hook ne renvoie rien (`{}`), jamais `allow` : un `allow` de hook
 court-circuiterait les règles de permission (`dontAsk`, `allowed_tools`), qui restent la
 seule porte d'entrée des outils.
+
+Chaque inscription au journal écrit aussi une ligne `tool.called` dans les logs (outil,
+issue, commande et montant), jamais les paramètres texte (message au client, motif).
 """
 
 import asyncio
 import contextlib
 import itertools
 import json
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -28,6 +32,9 @@ from agentpilot.journal import CallEntry, Journal, PendingEntry
 from agentpilot.models import CallOutcome
 from agentpilot.support_agent import ACTION_TOOL_NAMES, READ_TOOL_NAMES, STRUCTURED_OUTPUT_TOOL
 from mcp_server.shopsim_client import ShopSimError
+from observability.logs import log_event
+
+logger = logging.getLogger(__name__)
 
 # Réponse d'outil gardée au journal (au-delà : texte tronqué)
 MAX_RESPONSE_CHARS = 4_000
@@ -80,6 +87,21 @@ class SupportHooks:
         # Numéro attribué dans la boucle : l'ordre des appels est gardé
         entry = CallEntry(seq=next(self._seq), **entry_fields)
         await asyncio.to_thread(self.journal.record_call, entry)
+        numbers = {
+            key: entry.input[key]
+            for key in ("order_id", "amount_cents")
+            if isinstance(entry.input.get(key), int)
+        }
+        log_event(
+            logger,
+            "tool.called",
+            logging.INFO if entry.outcome is CallOutcome.SUCCEEDED else logging.WARNING,
+            tool=approval.short_name(entry.tool),
+            outcome=entry.outcome,
+            action_id=entry.pending_action_id,
+            duration_ms=entry.duration_ms,
+            **numbers,
+        )
 
     async def _refuse(
         self, name: str, tool_input: dict[str, Any], tool_use_id: str | None, message: str

@@ -31,7 +31,8 @@ def make_session_factory(bind: Engine) -> sessionmaker[Session]:
 
 
 # Connexion paresseuse : rien n'est ouvert à l'import
-engine = create_engine(DATABASE_URL)
+# Une erreur SQL ne recopie pas les valeurs (texte des messages clients) dans son message
+engine = create_engine(DATABASE_URL, hide_parameters=True)
 SessionLocal = make_session_factory(engine)
 
 

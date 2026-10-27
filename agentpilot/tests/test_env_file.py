@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
 from agentpilot import claude_guard, control, env_file, worker
+from agentpilot.app import LOG_DIR_ENV, log_dir
 from agentpilot.env_file import read_value, setting
 from agentpilot.sdk_runner import decide_ticket
 from agentpilot.support_agent import REPO_ROOT
@@ -136,7 +137,12 @@ def test_service_never_loads_the_chaos_token(
     """Le vrai service démarre avec un `.env` qui contient CHAOS_TOKEN : il en lit ses
     réglages, mais ni lui ni un processus qu'il lance (comme la CLI) n'a le jeton."""
     dotenv = tmp_path / ".env"
-    dotenv.write_text(ENV + f"AGENTPILOT_DATABASE_URL={TEST_DATABASE_URL}\n", encoding="utf-8")
+    dotenv.write_text(
+        ENV
+        + f"AGENTPILOT_DATABASE_URL={TEST_DATABASE_URL}\n"
+        + f"AGENTPILOT_LOG_DIR={tmp_path / 'logs'}\n",
+        encoding="utf-8",
+    )
     environ = {
         key: value
         for key, value in os.environ.items()
@@ -157,3 +163,16 @@ def test_service_never_loads_the_chaos_token(
     assert done.returncode == 0, done.stderr
     result = json.loads(done.stdout.strip().splitlines()[-1])
     assert result == {"budget": "12.5", "in_service": False, "in_child": False}
+
+
+@pytest.mark.parametrize("value", ["logs", "./var/logs", "/srv/abs-logs"])
+def test_log_dir_is_absolute_for_the_mcp_server(
+    dotenv: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """Le serveur MCP tourne ailleurs que le service : un chemin relatif part du dépôt."""
+    monkeypatch.setenv(LOG_DIR_ENV, value)
+
+    found = log_dir()
+
+    assert found.is_absolute()
+    assert found == (REPO_ROOT / value if not value.startswith("/") else Path(value))
