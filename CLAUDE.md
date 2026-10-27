@@ -90,21 +90,12 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
 Jalon en cours : **J4 — Monitoring + générateur de trafic**
 
 - [x] J0 : dépôt, Python 3.12 (uv), pyproject, commande /test
-- [x] J1.1 : Docker Compose (PostgreSQL + FastAPI), Customer/Order, `GET /orders/{id}`, seed, premier test
-- [x] J1.2 : service Paiements
-- [x] J1.3 : service Livraisons
-- [x] J1.4a : Clients et Tickets en lecture, ~60 tickets dans le seed, vérité terrain dans `evals/tickets.jsonl` (règles dans `evals/policy.py`)
-- [x] J1.4b : actions sur les tickets (répondre avec `Idempotency-Key`, escalader, résoudre ; rejouer une action déjà faite renvoie 200, répondre ou escalader un ticket résolu renvoie 409)
-- [x] J1.5 : endpoint Chaos (4 pannes, état en base, jeton `X-Chaos-Token`)
-- [x] J1 global : ShopSim terminé (commandes, paiements, livraisons, clients, tickets, 4 pannes Chaos, vérité terrain dans `evals/`). Ses API ne changent plus sans accord.
-- [x] J2.1 : serveur MCP en lecture seule (appelle l'API HTTP de ShopSim, `.mcp.json` à la racine, 8 outils, erreurs lisibles). Ajout validé à ShopSim après J1 : `GET /customers/{id}/refunds` (dates des remboursements, pour la règle « client à risque »)
-- [x] J2.2 : agent Support en headless sur un ticket, sortie JSON validée, sans action (`agents/support/`, schéma `agentpilot/schemas.py`, script `agentpilot/run_support.py`)
-- [x] J2 global : serveur MCP en lecture seule (8 outils, `.mcp.json`) et agent Support en headless (`agents/support/`, `agentpilot/run_support.py`, isolement prouvé par `--check`)
-- [x] J3.1 : outils d'action dans le serveur MCP (répondre, rembourser, renvoyer, escalader, résoudre), avec clés d'idempotence, activés par `SHOPSIM_MCP_ACTIONS=1`. Ajouts validés à ShopSim : `POST /orders/{id}/resend` (commande de remplacement, `Idempotency-Key`) et horloge de simulation unique pour toutes les écritures
-- [x] J3.2 : agent Support lancé par le Claude Agent SDK dans le service AgentPilot (FastAPI), exécutions enregistrées en base (schéma `agentpilot`). Outils de lecture enrichis de valeurs calculées (`computed` : jours depuis la livraison, retard, reste remboursable, remboursements dans la fenêtre de risque). Ajout validé à ShopSim : `GET /clock` et `SHOPSIM_FREEZE_CLOCK`
-- [x] J3.3 : outils d'action pour l'agent Support du service, sous hooks : mise en attente des remboursements et renvois sensibles (plus de 50 €, client à risque, valeur relue dans ShopSim), avec la clé d'idempotence pour l'exécution après validation ; escalades et réponses sans validation ; journal de chaque appel d'outil (schéma `agentpilot`)
-- [x] J3.4 : page web d'approbation (`/approvals`) : approuver (exécution unique par la plateforme, même clé d'idempotence, revérification avant) ou refuser (motif obligatoire), message au client et résolution du ticket, qui/quand/motif enregistrés. Ajout validé à ShopSim : `POST /tickets/{id}/reply` accepte `author` (`agent` par défaut, ou `human`) ; l'outil MCP ne l'expose pas, seule la page d'approbation envoie `human`
-- [x] J3.5 : boucle de traitement continu (2 exécutions au plus, jamais deux fois le même ticket en parallèle), reprise au démarrage sans double action (exécutions interrompues relancées, actions approuvées réessayées avec leur clé), arrêt d'urgence en base (actions refusées par les hooks, propositions seulement), budget journalier (pause automatique), attente croissante si ShopSim est en panne, page `/control`. Pas d'agent orphelin (CLI et serveur MCP arrêtés avec le service)
-- [x] J3 global : agent Support lancé par le Claude Agent SDK dans le service AgentPilot, actions sous hooks avec validation humaine des actions sensibles (page `/approvals`), traitement continu de la file avec reprise sans double action, arrêt d'urgence et budget (page `/control`). Vérifié en conditions réelles : approbation et refus, Ctrl+C et `kill -9` pendant des exécutions (relance unique, aucune double réponse ni double remboursement, aucun processus orphelin), arrêt d'urgence, panne de ShopSim
+- [x] J1 : ShopSim terminé (commandes, paiements, livraisons, clients, tickets, 4 pannes Chaos, vérité terrain dans `evals/`). Ses API ne changent plus sans accord. Ajouts validés depuis : `GET /customers/{id}/refunds`, `POST /orders/{id}/resend`, `GET /clock` et `SHOPSIM_FREEZE_CLOCK`, `author` sur `POST /tickets/{id}/reply`.
+- [x] J2 : serveur MCP (8 outils de lecture, `.mcp.json`) et agent Support en headless (`agentpilot/run_support.py`, isolement prouvé par `--check`)
+- [x] J3 : agent Support dans le service AgentPilot (Claude Agent SDK), actions sous hooks avec validation humaine (`/approvals`), traitement continu avec reprise sans double action, arrêt d'urgence et budget (`/control`). Vérifié en conditions réelles (Ctrl+C, kill -9, arrêt d'urgence, panne de ShopSim).
+- [ ] J4.1 : logs JSON structurés avec un `trace_id` propagé de bout en bout (ShopSim, serveur MCP, AgentPilot)  ← prochaine étape
+- [ ] J4.2 : métriques Prometheus (ShopSim : requêtes, latence, erreurs par route ; AgentPilot : exécutions, coût, durée, actions exécutées, en attente ou refusées) et tableau de bord Grafana, dans Docker Compose
+- [ ] J4.3 : générateur de trafic (clients simulés qui consultent leurs commandes, et nouveaux tickets au fil du temps)
+- [ ] J4.4 : alertes simples (taux d'erreur, latence) visibles dans Grafana, préparant le déclenchement de l'agent Ops en J6
 
-Suite : J4 Monitoring + générateur de trafic · J5 Évaluation en CI · J6 Agent Ops + subagents · J7 Livraison et formation
+Suite : J5 Évaluation en CI · J6 Agent Ops + subagents · J7 Livraison et formation
