@@ -1,11 +1,24 @@
 """Modèles de textes des tickets du seed : (sujet, corps), remplis avec `str.format`.
 
-Champs disponibles : first_name, order_id, total, carrier, tracking_number,
+Partagés par le seed et le générateur de trafic (`traffic/`), avec les formats `euros` et
+`fr_date`. Champs disponibles : first_name, order_id, total, carrier, tracking_number,
 estimated, delivered, days_since_order, claimed. Un modèle n'utilise que les
 champs pertinents pour sa famille.
 """
 
+from datetime import date
+
 Template = tuple[str, str]
+
+
+def euros(cents: int) -> str:
+    """Montant tel qu'un client l'écrit : `385,09 €`."""
+    return f"{cents // 100},{cents % 100:02d} €"
+
+
+def fr_date(day: date) -> str:
+    return day.strftime("%d/%m/%Y")
+
 
 DELAY: list[Template] = [
     (

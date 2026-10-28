@@ -1,4 +1,5 @@
-"""Endpoints du service Tickets : lecture, réponse idempotente, escalade et résolution."""
+"""Endpoints du service Tickets : lecture, création par un client (idempotente), réponse
+idempotente, escalade et résolution."""
 
 from typing import Annotated
 
@@ -10,8 +11,9 @@ from sqlalchemy.orm import Session, selectinload
 from shopsim.app import clock
 from shopsim.app.chaos import apply_connection_saturation
 from shopsim.app.db import get_session
-from shopsim.app.models import Ticket, TicketMessage, TicketStatus
+from shopsim.app.models import Customer, MessageAuthor, Order, Ticket, TicketMessage, TicketStatus
 from shopsim.app.schemas import (
+    TicketCreate,
     TicketEscalate,
     TicketPage,
     TicketRead,
@@ -70,6 +72,87 @@ def _lock_ticket(session: Session, ticket_id: int) -> Ticket:
 def _reject_if_resolved(ticket: Ticket) -> None:
     if ticket.status == TicketStatus.RESOLVED:
         raise HTTPException(status_code=409, detail="Ticket is resolved")
+
+
+def _replay_creation(session: Session, existing: TicketMessage, created: TicketCreate) -> Ticket:
+    """Rejeu d'une création : même client, commande, sujet et texte → ticket tel quel, sinon
+    409."""
+    ticket = _get_ticket(session, existing.ticket_id)
+    if (
+        existing.author != MessageAuthor.CUSTOMER
+        or ticket.messages[0].id != existing.id
+        or ticket.customer_id != created.customer_id
+        or ticket.order_id != created.order_id
+        or ticket.subject != created.subject
+        or existing.body != created.body
+    ):
+        raise HTTPException(
+            status_code=409, detail="Idempotency-Key already used with a different request"
+        )
+    return ticket
+
+
+@router.post(
+    "",
+    response_model=TicketRead,
+    status_code=201,
+    responses={
+        200: {"description": "Rejeu : ticket déjà créé pour cette clé"},
+        400: {"description": "En-tête Idempotency-Key manquant"},
+        404: {"description": "Client ou commande inexistants"},
+        409: {"description": "Clé réutilisée avec un autre contenu"},
+    },
+)
+def create_ticket(
+    created: TicketCreate,
+    response: Response,
+    session: Annotated[Session, Depends(get_session)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=255)] = None,
+) -> Ticket:
+    """Un client ouvre un ticket : ticket `open` et son premier message, datés par l'horloge de
+    la simulation. Jamais exposé aux agents (aucun outil MCP)."""
+    if idempotency_key is None or not idempotency_key.strip():
+        raise HTTPException(status_code=400, detail="Idempotency-Key header is required")
+
+    existing = _find_by_key(session, idempotency_key)
+    if existing is not None:
+        response.status_code = 200
+        return _replay_creation(session, existing, created)
+
+    if session.get(Customer, created.customer_id) is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    if created.order_id is not None and session.get(Order, created.order_id) is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    now = clock.now(session)
+    ticket = Ticket(
+        customer_id=created.customer_id,
+        order_id=created.order_id,
+        subject=created.subject,
+        status=TicketStatus.OPEN,
+        created_at=now,
+        messages=[
+            TicketMessage(
+                author=MessageAuthor.CUSTOMER,
+                body=created.body,
+                idempotency_key=idempotency_key,
+                created_at=now,
+            )
+        ],
+    )
+    try:
+        with session.begin_nested():
+            session.add(ticket)
+    except IntegrityError:
+        # Même clé insérée entre-temps par une requête concurrente
+        existing = _find_by_key(session, idempotency_key)
+        if existing is None:
+            raise
+        response.status_code = 200
+        return _replay_creation(session, existing, created)
+
+    session.commit()
+    return _get_ticket(session, ticket.id)
 
 
 @router.get("/{ticket_id}", response_model=TicketRead)

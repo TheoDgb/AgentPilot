@@ -2,9 +2,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import Response
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from shopsim.app.models import MessageAuthor, OrderStatus, Ticket, TicketStatus
+from shopsim.app.models import MessageAuthor, Order, OrderStatus, Ticket, TicketStatus
 from shopsim.tests.conftest import MakeCustomer, MakeOrder, MakeTicket
 
 T0 = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
@@ -127,3 +129,125 @@ def test_list_tickets_rejects_invalid_parameters(
     client: TestClient, params: dict[str, str | int]
 ) -> None:
     assert client.get("/tickets", params=params).status_code == 422
+
+
+# --- Création par un client (POST /tickets, J4.3) ---------------------------------------
+
+
+def create(
+    client: TestClient, payload: dict[str, object], key: str | None = "create-1"
+) -> Response:
+    headers = {} if key is None else {"Idempotency-Key": key}
+    return client.post("/tickets", json=payload, headers=headers)
+
+
+def payload_for(order: Order, **changes: object) -> dict[str, object]:
+    return {
+        "customer_id": order.customer_id,
+        "order_id": order.id,
+        "subject": f"Question sur ma commande {order.id}",
+        "body": "Bonjour, où en est ma commande ?",
+    } | changes
+
+
+def test_create_ticket_opens_it_with_the_customer_message(
+    client: TestClient, make_order: MakeOrder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SHOPSIM_FREEZE_CLOCK", "1")
+    order = make_order(OrderStatus.SHIPPED)
+
+    response = create(client, payload_for(order))
+
+    assert response.status_code == 201
+    ticket = response.json()
+    assert ticket["status"] == "open"
+    assert (ticket["customer_id"], ticket["order_id"]) == (order.customer_id, order.id)
+    assert ticket["subject"] == f"Question sur ma commande {order.id}"
+    assert ticket["created_at"] == "2026-07-06T12:00:00Z"
+    assert ticket["messages"] == [
+        {
+            "author": "customer",
+            "body": "Bonjour, où en est ma commande ?",
+            "created_at": "2026-07-06T12:00:00Z",
+        }
+    ]
+    page = client.get("/tickets", params={"status": "open", "limit": 100}).json()
+    assert ticket["id"] in [t["id"] for t in page["items"]]
+
+
+def test_create_ticket_without_order(client: TestClient, make_customer: MakeCustomer) -> None:
+    customer = make_customer()
+
+    response = create(
+        client, {"customer_id": customer.id, "subject": "Transporteurs", "body": "Lesquels ?"}
+    )
+
+    assert response.status_code == 201
+    assert response.json()["order_id"] is None
+
+
+def test_create_ticket_replay_returns_the_same_ticket(
+    client: TestClient, make_order: MakeOrder, session: Session
+) -> None:
+    order = make_order()
+
+    first = create(client, payload_for(order), key="create-replay")
+    again = create(client, payload_for(order), key="create-replay")
+
+    assert (first.status_code, again.status_code) == (201, 200)
+    assert again.json()["id"] == first.json()["id"]
+    count = session.scalar(
+        select(func.count()).select_from(Ticket).where(Ticket.customer_id == order.customer_id)
+    )
+    assert count == 1
+
+
+def test_create_ticket_key_reused_with_other_content_is_409(
+    client: TestClient, make_order: MakeOrder
+) -> None:
+    order = make_order()
+    create(client, payload_for(order), key="create-conflict")
+
+    response = create(client, payload_for(order, body="Autre texte"), key="create-conflict")
+
+    assert response.status_code == 409
+
+
+def test_create_ticket_key_of_a_reply_is_409(
+    client: TestClient, make_order: MakeOrder, make_ticket: MakeTicket
+) -> None:
+    order = make_order()
+    ticket = make_ticket(order.customer, order)
+    client.post(
+        f"/tickets/{ticket.id}/reply", json={"body": "Réponse"}, headers={"Idempotency-Key": "k-r"}
+    )
+
+    assert create(client, payload_for(order, body="Réponse"), key="k-r").status_code == 409
+
+
+def test_create_ticket_requires_a_key(client: TestClient, make_order: MakeOrder) -> None:
+    assert create(client, payload_for(make_order()), key=None).status_code == 400
+
+
+def test_create_ticket_unknown_customer_or_order_is_404(
+    client: TestClient, make_order: MakeOrder
+) -> None:
+    order = make_order()
+
+    unknown_customer = create(client, payload_for(order, customer_id=999_999), key="c-404")
+    unknown_order = create(client, payload_for(order, order_id=999_999), key="o-404")
+
+    assert unknown_customer.status_code == 404
+    assert unknown_customer.json()["detail"] == "Customer not found"
+    assert unknown_order.status_code == 404
+    assert unknown_order.json()["detail"] == "Order not found"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"subject": ""}, {"body": ""}, {"subject": "x" * 201}, {"status": "resolved"}],
+)
+def test_create_ticket_validation(
+    client: TestClient, make_order: MakeOrder, changes: dict[str, object]
+) -> None:
+    assert create(client, payload_for(make_order(), **changes)).status_code == 422

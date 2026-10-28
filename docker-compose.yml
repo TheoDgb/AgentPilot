@@ -48,6 +48,28 @@ services:
       timeout: 3s
       retries: 10
 
+  # Générateur de trafic (J4.3) : profil séparé, ne démarre pas avec le reste.
+  #   docker compose --profile traffic up -d traffic     (arrêt : docker compose stop traffic)
+  # Création de tickets désactivée par défaut : chaque ticket est traité par l'agent et coûte.
+  traffic:
+    profiles: ["traffic"]
+    build:
+      context: .
+      dockerfile: shopsim/Dockerfile
+    command: ["python", "-m", "traffic"]
+    environment:
+      SHOPSIM_URL: http://app:8000
+      TRAFFIC_RPS: ${TRAFFIC_RPS:-5}
+      TRAFFIC_TICKETS_PER_HOUR: ${TRAFFIC_TICKETS_PER_HOUR:-0}
+      TRAFFIC_MAX_TICKETS: ${TRAFFIC_MAX_TICKETS:-}
+      LOG_DIR: /srv/logs
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./logs:/srv/logs
+    depends_on:
+      app:
+        condition: service_healthy
+
   # Supervision (J4.2). Réseau hôte (Linux seulement) : Prometheus joint ShopSim par son port
   # publié et AgentPilot, lancé en local hors Docker sur 127.0.0.1:8001, sans que celui-ci
   # écoute ailleurs. Les deux n'écoutent eux-mêmes que sur 127.0.0.1. À revoir quand AgentPilot

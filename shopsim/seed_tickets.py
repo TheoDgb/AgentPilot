@@ -119,14 +119,6 @@ def _random_between(rng: random.Random, start: datetime, end: datetime) -> datet
     return start + timedelta(minutes=rng.randint(0, _minutes(end - start)))
 
 
-def _euros(cents: int) -> str:
-    return f"{cents // 100},{cents % 100:02d} €"
-
-
-def _fr_date(day: date) -> str:
-    return day.strftime("%d/%m/%Y")
-
-
 def _remaining_cents(order: Order) -> int:
     assert order.payment is not None
     return order.payment.amount_cents - order.payment.refunded_cents
@@ -567,17 +559,17 @@ def _context(customer: Customer, order: Order | None, at: datetime) -> dict[str,
     if order is not None:
         ctx |= {
             "order_id": order.id,
-            "total": _euros(order.total_cents),
+            "total": tpl.euros(order.total_cents),
             "days_since_order": (at - order.created_at).days,
         }
         if order.shipment is not None:
             ctx |= {
                 "carrier": order.shipment.carrier,
                 "tracking_number": order.shipment.tracking_number,
-                "estimated": _fr_date(order.shipment.estimated_delivery),
+                "estimated": tpl.fr_date(order.shipment.estimated_delivery),
             }
             if order.shipment.delivered_at is not None:
-                ctx["delivered"] = _fr_date(order.shipment.delivered_at)
+                ctx["delivered"] = tpl.fr_date(order.shipment.delivered_at)
     return ctx
 
 
@@ -586,7 +578,7 @@ def _open_ticket(rng: random.Random, draft: _Draft) -> Ticket:
     created_at = _random_between(rng, start, SIMULATION_NOW - 10 * MINUTE)
     ctx = _context(draft.customer, draft.order, created_at)
     if draft.claimed_cents is not None:
-        ctx["claimed"] = _euros(draft.claimed_cents)
+        ctx["claimed"] = tpl.euros(draft.claimed_cents)
     subject, body = (part.format(**ctx) for part in draft.template)
     if draft.payload is not None:
         body = f"{body}\n\n{draft.payload}"
@@ -657,7 +649,9 @@ def _resolved_refund_ticket(rng: random.Random, order: Order, refund: Refund) ->
         rng, max(claim_start, refund.created_at - 3 * DAY), refund.created_at - 5 * MINUTE
     )
     first_name = order.customer.first_name
-    done = tpl.AGENT_REFUND_DONE.format(first_name=first_name, amount=_euros(refund.amount_cents))
+    done = tpl.AGENT_REFUND_DONE.format(
+        first_name=first_name, amount=tpl.euros(refund.amount_cents)
+    )
     thanks_at = min(refund.created_at + rng.randint(1, 48) * HOUR, SIMULATION_NOW - MINUTE)
     return _thread(
         order,

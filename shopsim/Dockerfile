@@ -7,6 +7,8 @@ COPY pyproject.toml ./
 COPY shopsim ./shopsim
 # Logs JSON et trace, communs aux trois services
 COPY observability ./observability
+# Générateur de trafic (service `traffic` du profil du même nom) : bibliothèque standard
+COPY traffic ./traffic
 RUN uv pip install --system --no-cache .
 
 EXPOSE 8000

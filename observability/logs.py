@@ -64,6 +64,11 @@ FIELDS = frozenset(
         "pause_reason",
         "emergency",
         "count",
+        # Générateur de trafic (compte rendu périodique) : requêtes par « méthode gabarit code »
+        "requests",
+        "dropped",
+        "tickets_created",
+        "rps",
     }
 )
 SECRET_ENV = ("ANTHROPIC_API_KEY", "CHAOS_TOKEN")

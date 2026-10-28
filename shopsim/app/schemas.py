@@ -144,6 +144,18 @@ class TicketRead(TicketSummary):
     messages: list[TicketMessageRead]
 
 
+class TicketCreate(BaseModel):
+    """Ticket ouvert par un client (ajout validé en J4.3, pour le générateur de trafic)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    customer_id: int
+    # Commande citée, facultative ; pas forcément celle du client, comme sur un vrai formulaire
+    order_id: int | None = None
+    subject: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=5000)
+
+
 class TicketReplyCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
