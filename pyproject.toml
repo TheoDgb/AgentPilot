@@ -18,6 +18,8 @@ dev = [
     "ruff>=0.6",
     # TestClient de FastAPI
     "httpx>=0.27",
+    # Lecture des règles d'alerte et de leurs tests (déjà installé par uvicorn[standard])
+    "pyyaml>=6.0",
 ]
 # Serveur MCP (SDK officiel) et son client HTTP vers ShopSim ; absent de l'image ShopSim
 mcp = [

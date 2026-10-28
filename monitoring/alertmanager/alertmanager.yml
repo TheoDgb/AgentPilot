@@ -1,0 +1,16 @@
+# Alertmanager (J4.4) : reçoit les alertes de Prometheus et les envoie à AgentPilot, qui les
+# enregistre (POST /alerts/webhook). Réseau hôte, sur 127.0.0.1 seulement (docker-compose.yml).
+# AgentPilot injoignable : Alertmanager réessaie, puis renvoie au prochain intervalle.
+route:
+  receiver: agentpilot
+  group_by: [alertname, route]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 4h
+
+receivers:
+  - name: agentpilot
+    webhook_configs:
+      - url: http://localhost:8001/alerts/webhook
+        # La résolution est envoyée aussi : AgentPilot enregistre la fin de l'alerte
+        send_resolved: true

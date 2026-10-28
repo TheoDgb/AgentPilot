@@ -10,6 +10,8 @@ Lancement (local) : `.venv/bin/uvicorn agentpilot.app:app --port 8001`.
 - `/approvals` : pages d'approbation des actions en attente (`agentpilot/web.py`) ;
 - `/control` : page de pilotage (pause de la boucle, arrêt d'urgence, budget) ;
   `GET /control/status` en JSON ;
+- `POST /alerts/webhook` : alertes d'Alertmanager, enregistrées sans action automatique ;
+  `GET /alerts` pour les relire (`agentpilot/alerts.py`) ;
 - `GET /metrics` : métriques Prometheus (`agentpilot/metrics.py`), collectées toutes les 10 s,
   non journalisées.
 
@@ -37,7 +39,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from agentpilot import metrics, sdk_runner, web
+from agentpilot import alerts, metrics, sdk_runner, web
 from agentpilot.api_schemas import ControlStatus, RunCreated, RunRead
 from agentpilot.db import SessionLocal, engine, init_db, service_lock
 from agentpilot.env_file import setting
@@ -99,6 +101,7 @@ app.add_middleware(
 )
 app.include_router(web.router)
 app.include_router(web.control_router)
+app.include_router(alerts.router)
 # Remplaçables par les tests : sessions de base et fonction `query` du SDK
 app.state.session_factory = SessionLocal
 app.state.query = sdk_runner.sdk_query
@@ -183,8 +186,9 @@ def get_metrics(request: Request) -> Response:
         status = web.control_status(work, factory)
         with factory() as session:
             pending = metrics.pending_counts(session)
+            oldest = metrics.oldest_pending(session)
     except SQLAlchemyError as exc:
         log_event(logger, "metrics.state_unavailable", logging.WARNING, error_type=error_type(exc))
-        status, pending = None, None
-    state = metrics.state_registry(status, pending, work.clock())
+        status, pending, oldest = None, None, None
+    state = metrics.state_registry(status, pending, work.clock(), oldest)
     return Response(exposition(metrics.EVENTS, state), media_type=CONTENT_TYPE_LATEST)

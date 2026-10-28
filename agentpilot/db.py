@@ -79,13 +79,16 @@ def service_lock(bind: Engine) -> Iterator[bool]:
 
 
 def clear(bind: Engine, loop_paused: bool = True) -> None:
-    """Vide les exécutions, le journal et les actions en attente, et remet les interrupteurs à
-    leur état de départ (boucle en pause, pas d'arrêt d'urgence)."""
+    """Vide les exécutions, le journal, les actions en attente et les alertes reçues, et remet
+    les interrupteurs à leur état de départ (boucle en pause, pas d'arrêt d'urgence)."""
     from agentpilot import models
 
     with bind.begin() as connection:
         connection.execute(
-            text(f"TRUNCATE {SCHEMA}.tool_calls, {SCHEMA}.pending_actions, {SCHEMA}.runs")
+            text(
+                f"TRUNCATE {SCHEMA}.tool_calls, {SCHEMA}.pending_actions, {SCHEMA}.runs, "
+                f"{SCHEMA}.alerts"
+            )
         )
         connection.execute(
             update(models.Control).values(

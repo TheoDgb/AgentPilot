@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+import yaml
 from prometheus_client import CollectorRegistry
 
 from agentpilot import metrics
@@ -27,14 +28,16 @@ MONITORING = REPO_ROOT / "monitoring"
 DASHBOARD = MONITORING / "grafana" / "dashboards" / "agentpilot.json"
 DATASOURCE = MONITORING / "grafana" / "provisioning" / "datasources" / "prometheus.yml"
 PROMETHEUS = MONITORING / "prometheus" / "prometheus.yml"
+RULES = MONITORING / "prometheus" / "rules" / "alerts.yml"
 
 # Sélecteur PromQL : nom de métrique, puis éventuellement `{étiquette="valeur", …}`
-SELECTOR = re.compile(r"\b((?:http|agentpilot)_[a-z_]+)\b(?:\{([^}]*)\})?")
+SELECTOR = re.compile(r"\b((?:http|agentpilot)_[a-z_]+|ALERTS)\b(?:\{([^}]*)\})?")
 MATCHER = re.compile(r'(\w+)\s*(=~|!~|!=|=)\s*"([^"]*)"')
 GROUPING = re.compile(r"\b(?:by|without)\s*\(([^)]*)\)")
 # Étiquettes ajoutées par Prometheus à chaque série de la cible
 TARGET_LABELS = {"job", "instance"}
 JOBS = {"http_": "shopsim", "agentpilot_": "agentpilot"}
+SEVERITIES = frozenset({"warning", "critical"})
 
 
 @dataclass(frozen=True)
@@ -79,7 +82,10 @@ def exposed() -> dict[str, Metric]:
     found: dict[str, Metric] = {}
     for registry in registries():
         samples: dict[str, dict[str, set[str]]] = {}
-        for family in registry.collect():
+        # Métriques HTTP : valeurs ouvertes (codes, routes), et leurs séries dépendent des
+        # requêtes déjà faites dans le processus. Seules leurs étiquettes sont vérifiées.
+        open_values = registry is HTTP_REGISTRY
+        for family in [] if open_values else registry.collect():
             for sample in family.samples:
                 for label, value in sample.labels.items():
                     samples.setdefault(sample.name, {}).setdefault(label, set()).add(value)
@@ -94,7 +100,21 @@ def exposed() -> dict[str, Metric]:
         values = dict(found[name].values)
         values["tool"] = frozenset(metrics.TOOLS | {metrics.OTHER_TOOL})
         found[name] = Metric(found[name].labels, values)
+    # Série des alertes, créée par Prometheus d'après les règles du dépôt
+    found["ALERTS"] = Metric(
+        frozenset({"alertname", "alertstate", "severity", "route"}),
+        {
+            "alertname": frozenset(rule["alert"] for rule in alert_rules()),
+            "alertstate": frozenset({"pending", "firing"}),
+            "severity": SEVERITIES,
+        },
+    )
     return found
+
+
+def alert_rules() -> list[dict[str, Any]]:
+    groups = yaml.safe_load(RULES.read_text(encoding="utf-8"))["groups"]
+    return [rule for group in groups for rule in group["rules"]]
 
 
 def dashboard() -> dict[str, Any]:
@@ -121,7 +141,7 @@ def problems(expr: str, known: dict[str, Metric]) -> list[str]:
             found.append(f"métrique inconnue : {name}")
             continue
         for label, operator, value in MATCHER.findall(matchers):
-            if label == "job":
+            if label == "job" and name != "ALERTS":
                 expected = next(job for prefix, job in JOBS.items() if name.startswith(prefix))
                 if operator != "=" or value != expected:
                     found.append(f'{name} : job="{value}" au lieu de job="{expected}"')
@@ -157,9 +177,11 @@ def test_dashboard_queries_match_the_exposed_series() -> None:
     assert found == set()
 
 
-def test_every_metric_family_has_a_panel() -> None:
+def test_every_metric_family_is_used() -> None:
+    """Chaque métrique sert à un panneau ou à une règle d'alerte."""
     known = exposed()
-    used = {name for _, expr in queries(dashboard()) for name, _ in SELECTOR.findall(expr)}
+    exprs = [expr for _, expr in queries(dashboard())] + [r["expr"] for r in alert_rules()]
+    used = {name for expr in exprs for name, _ in SELECTOR.findall(expr)}
 
     families = {re.sub(r"_(total|bucket|count|sum)$", "", name) for name in known}
     families = {f for f in families if not f.endswith("_created")} - {"agentpilot_state_up"}
@@ -178,6 +200,8 @@ def test_every_metric_family_has_a_panel() -> None:
         ('rate(http_requests_total{job="agentpilot"}[1m])', 'au lieu de job="shopsim"'),
         ("sum by (ticket_id) (agentpilot_pending_actions)", "regroupement par ticket_id"),
         ('sum(agentpilot_pending_action{status="pending"})', "métrique inconnue"),
+        ('ALERTS{alertname="ShopSimErrors"}', 'alertname="ShopSimErrors" ne vaut jamais'),
+        ('ALERTS{alertstate="active"}', 'alertstate="active" ne vaut jamais'),
     ],
 )
 def test_wrong_filters_are_caught(expr: str, problem: str) -> None:

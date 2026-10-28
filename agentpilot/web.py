@@ -26,8 +26,8 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import case, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from agentpilot import control, decisions, worker
-from agentpilot.api_schemas import ControlStatus
+from agentpilot import alerts, control, decisions, worker
+from agentpilot.api_schemas import AlertRead, ControlStatus
 from agentpilot.approval import REASON_LABELS, REPLY, Reason
 from agentpilot.decisions import InvalidInput, Notice
 from agentpilot.models import CallOutcome, PauseReason, PendingAction, PendingStatus
@@ -323,6 +323,7 @@ def control_status(work: worker.Worker, factory: sessionmaker[Session]) -> Contr
     queue = work.queue
     with factory() as session:
         spent = control.spent_today(session)
+        firing = [AlertRead.model_validate(a) for a in alerts.active(session)]
     return ControlStatus(
         loop_paused=settings.loop_paused,
         pause_reason=settings.pause_reason,
@@ -342,6 +343,7 @@ def control_status(work: worker.Worker, factory: sessionmaker[Session]) -> Contr
         open_tickets=queue.open if queue else None,
         eligible_tickets=queue.eligible if queue else None,
         skipped_tickets={str(k): v for k, v in queue.skipped.items()} if queue else {},
+        active_alerts=firing,
     )
 
 

@@ -1,6 +1,6 @@
 """Exécutions d'agents enregistrées par AgentPilot (schéma `agentpilot`) : exécutions,
-journal des appels d'outils, actions en attente de validation humaine et interrupteurs de
-pilotage (boucle de traitement, arrêt d'urgence)."""
+journal des appels d'outils, actions en attente de validation humaine, interrupteurs de
+pilotage (boucle de traitement, arrêt d'urgence) et alertes reçues d'Alertmanager."""
 
 import uuid
 from datetime import date, datetime
@@ -8,7 +8,18 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import Date, DateTime, Enum, ForeignKey, Index, Numeric, String, Text, text
+from sqlalchemy import (
+    Date,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -60,6 +71,11 @@ class PendingStatus(StrEnum):
     # Approuvée mais devenue impossible (ticket ou commande changés) : rien n'a été exécuté
     FAILED = "failed"
     REJECTED = "rejected"
+
+
+class AlertStatus(StrEnum):
+    FIRING = "firing"
+    RESOLVED = "resolved"
 
 
 def _enum(enum: type[StrEnum], name: str) -> Enum:
@@ -203,3 +219,33 @@ class Control(Base):
     emergency_stop: Mapped[bool] = mapped_column(default=False)
     emergency_by: Mapped[str | None] = mapped_column(String(100))
     emergency_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Alert(Base):
+    """Une occurrence d'alerte Prometheus, reçue d'Alertmanager (J4.4).
+
+    Une ligne par occurrence : même empreinte (`fingerprint`, mêmes étiquettes) et même début.
+    Une alerte qui revient après sa résolution est une nouvelle ligne : l'historique dont
+    l'agent Ops partira en J6. Aucune action automatique pour l'instant.
+    """
+
+    __tablename__ = "alerts"
+    __table_args__ = (UniqueConstraint("fingerprint", "starts_at", name="one_row_per_occurrence"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # Empreinte des étiquettes, calculée par Alertmanager
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    alertname: Mapped[str] = mapped_column(String(200), index=True)
+    severity: Mapped[str | None] = mapped_column(String(20))
+    # Gabarit de route de ShopSim, pour les alertes par route
+    route: Mapped[str | None] = mapped_column(String(200))
+    status: Mapped[AlertStatus] = mapped_column(_enum(AlertStatus, "alert_status"), index=True)
+    # Annotation `summary` de la règle (texte du dépôt, pas d'un client)
+    summary: Mapped[str | None] = mapped_column(Text)
+    # Début et fin selon Prometheus (heure réelle)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    first_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Trace de la dernière réception (logs d'AgentPilot)
+    trace_id: Mapped[str | None] = mapped_column(String(32))

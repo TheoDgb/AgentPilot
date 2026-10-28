@@ -5,6 +5,31 @@
 {% for level, text in notices %}<div class="banner {{ level }}">{{ text }}</div>{% endfor %}
 {% if form_error %}<div class="banner error">{{ form_error }}</div>{% endif %}
 
+<section>
+  <h2>Alertes actives</h2>
+  {% if status.active_alerts %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Alerte</th><th>Gravité</th><th>Route</th><th>Depuis (UTC)</th><th>Résumé</th></tr></thead>
+    <tbody>
+    {% for a in status.active_alerts %}
+    <tr>
+      <td>{{ a.alertname }}</td>
+      <td><span class="badge {{ 'failed' if a.severity == 'critical' else 'pending' }}">{{ a.severity or "?" }}</span></td>
+      <td>{% if a.route %}<code>{{ a.route }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td class="muted">{{ a.starts_at.strftime("%d/%m %H:%M") }}</td>
+      <td>{{ a.summary or "" }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="muted">Enregistrées par AgentPilot depuis Alertmanager ; aucune action automatique. Historique : <code>GET /alerts</code>.</p>
+  {% else %}
+  <p class="muted">Aucune alerte active.</p>
+  {% endif %}
+</section>
+
 <div class="forms">
 <section>
   <h2>Arrêt d'urgence</h2>

@@ -83,8 +83,23 @@ services:
       - --storage.tsdb.retention.time=15d
       - --web.listen-address=127.0.0.1:9090
     volumes:
-      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Configuration, règles d'alerte et leurs tests
+      - ./monitoring/prometheus:/etc/prometheus:ro
       - prometheus-data:/prometheus
+
+  # Alertes (J4.4) : reçues de Prometheus, envoyées à AgentPilot (POST /alerts/webhook)
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    network_mode: host
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.listen-address=127.0.0.1:9093
+      # Pas de mode haute disponibilité : il ouvrirait le port 9094 sur toutes les interfaces
+      - --cluster.listen-address=
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
 
   grafana:
     image: grafana/grafana:13.2.5
@@ -112,3 +127,4 @@ services:
 volumes:
   pgdata:
   prometheus-data:
+  alertmanager-data:

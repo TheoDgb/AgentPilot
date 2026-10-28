@@ -24,7 +24,7 @@
   "panels": [
     {
       "type": "row",
-      "title": "ShopSim",
+      "title": "Alertes",
       "id": 1,
       "collapsed": false,
       "gridPos": {
@@ -36,10 +36,157 @@
       "panels": []
     },
     {
+      "type": "table",
+      "title": "Alertes actives",
+      "description": "Alertes Prometheus déclenchées (règles de monitoring/prometheus/rules/alerts.yml), envoyées à AgentPilot par Alertmanager. Vide : tout va bien.",
+      "id": 2,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 18,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "severity",
+            "desc": false
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "ALERTS{alertstate=\"firing\"}",
+          "legendFormat": "",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "alertstate": true,
+              "job": true,
+              "instance": true
+            },
+            "indexByName": {
+              "alertname": 0,
+              "severity": 1,
+              "route": 2
+            },
+            "renameByName": {
+              "alertname": "Alerte",
+              "severity": "Gravité",
+              "route": "Route"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Alertes en attente de leur durée",
+      "description": "Condition vraie, mais pas encore depuis la durée de la règle : se déclencheront si elle dure.",
+      "id": 3,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "count(ALERTS{alertstate=\"pending\"}) or vector(0)",
+          "legendFormat": "",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "ShopSim",
+      "id": 4,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
+      "panels": []
+    },
+    {
       "type": "timeseries",
       "title": "Requêtes par seconde, par route",
       "description": "Toutes les requêtes reçues par ShopSim (hors /metrics), par gabarit de route.",
-      "id": 2,
+      "id": 5,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -48,7 +195,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 1
+        "y": 8
       },
       "fieldConfig": {
         "defaults": {
@@ -95,7 +242,7 @@
       "type": "timeseries",
       "title": "Taux d'erreurs 5xx, par route",
       "description": "Part des réponses 5xx parmi les requêtes de chaque route, sur 1 min.",
-      "id": 3,
+      "id": 6,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -104,7 +251,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 1
+        "y": 8
       },
       "fieldConfig": {
         "defaults": {
@@ -151,7 +298,7 @@
       "type": "timeseries",
       "title": "Latence p95, par route",
       "description": "95 % des requêtes de la route ont répondu en moins de ce temps (sur 1 min).",
-      "id": 4,
+      "id": 7,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -160,7 +307,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 9
+        "y": 16
       },
       "fieldConfig": {
         "defaults": {
@@ -207,7 +354,7 @@
       "type": "timeseries",
       "title": "Latence p50, par route",
       "description": "Latence médiane de chaque route (sur 1 min).",
-      "id": 5,
+      "id": 8,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -216,7 +363,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 9
+        "y": 16
       },
       "fieldConfig": {
         "defaults": {
@@ -263,7 +410,7 @@
       "type": "timeseries",
       "title": "Réponses par code HTTP",
       "description": "Requêtes par seconde, par code de réponse.",
-      "id": 6,
+      "id": 9,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -272,7 +419,7 @@
         "h": 8,
         "w": 18,
         "x": 0,
-        "y": 17
+        "y": 24
       },
       "fieldConfig": {
         "defaults": {
@@ -319,7 +466,7 @@
       "type": "stat",
       "title": "Services collectés",
       "description": "1 : Prometheus joint le service. AgentPilot arrêté : 0, rien d'anormal.",
-      "id": 7,
+      "id": 10,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -328,7 +475,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 17
+        "y": 24
       },
       "fieldConfig": {
         "defaults": {
@@ -391,13 +538,13 @@
     {
       "type": "row",
       "title": "AgentPilot",
-      "id": 8,
+      "id": 11,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 25
+        "y": 32
       },
       "panels": []
     },
@@ -405,7 +552,7 @@
       "type": "stat",
       "title": "Boucle de traitement",
       "description": "État courant de la boucle : en marche, en pause (manuelle ou budget), en attente (ShopSim en panne ou échecs en chaîne).",
-      "id": 9,
+      "id": 12,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -414,7 +561,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 26
+        "y": 33
       },
       "fieldConfig": {
         "defaults": {
@@ -464,7 +611,7 @@
       "type": "stat",
       "title": "Arrêt d'urgence",
       "description": "Actif : toutes les actions sont refusées, l'agent ne fait que proposer.",
-      "id": 10,
+      "id": 13,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -473,7 +620,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 26
+        "y": 33
       },
       "fieldConfig": {
         "defaults": {
@@ -537,7 +684,7 @@
       "type": "stat",
       "title": "Actions en attente d'un humain",
       "description": "Remboursements et renvois arrêtés par les hooks, à approuver ou refuser sur /approvals.",
-      "id": 11,
+      "id": 14,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -546,7 +693,7 @@
         "h": 4,
         "w": 4,
         "x": 8,
-        "y": 26
+        "y": 33
       },
       "fieldConfig": {
         "defaults": {
@@ -600,7 +747,7 @@
       "type": "stat",
       "title": "Actions approuvées à relancer",
       "description": "Approuvées, mais ShopSim était injoignable : relancées automatiquement avec la même clé.",
-      "id": 12,
+      "id": 15,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -609,7 +756,7 @@
         "h": 4,
         "w": 4,
         "x": 12,
-        "y": 26
+        "y": 33
       },
       "fieldConfig": {
         "defaults": {
@@ -663,7 +810,7 @@
       "type": "stat",
       "title": "Exécutions en cours",
       "description": "Exécutions de tickets en cours, sur le maximum autorisé.",
-      "id": 13,
+      "id": 16,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -672,7 +819,7 @@
         "h": 4,
         "w": 4,
         "x": 16,
-        "y": 26
+        "y": 33
       },
       "fieldConfig": {
         "defaults": {
@@ -733,7 +880,7 @@
       "type": "stat",
       "title": "Tickets abandonnés",
       "description": "Tickets ouverts abandonnés après 3 échecs : à traiter à la main.",
-      "id": 14,
+      "id": 17,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -742,7 +889,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 26
+        "y": 33
       },
       "fieldConfig": {
         "defaults": {
@@ -796,7 +943,7 @@
       "type": "timeseries",
       "title": "Budget du jour (UTC)",
       "description": "Dépense du jour (coûts inconnus comptés au plafond d'une exécution) et plafond. Plafond atteint : pause automatique.",
-      "id": 15,
+      "id": 18,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -805,7 +952,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 30
+        "y": 37
       },
       "fieldConfig": {
         "defaults": {
@@ -861,7 +1008,7 @@
       "type": "timeseries",
       "title": "Coût des exécutions",
       "description": "Coût des exécutions terminées (coût connu), en dollars par heure.",
-      "id": 16,
+      "id": 19,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -870,7 +1017,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 30
+        "y": 37
       },
       "fieldConfig": {
         "defaults": {
@@ -917,7 +1064,7 @@
       "type": "timeseries",
       "title": "Exécutions terminées, par statut",
       "description": "Exécutions de l'agent Support terminées sur 15 min, et celles dont le coût est inconnu (interrompues, ou en échec avant le résultat).",
-      "id": 17,
+      "id": 20,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -926,7 +1073,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 30
+        "y": 37
       },
       "fieldConfig": {
         "defaults": {
@@ -982,7 +1129,7 @@
       "type": "timeseries",
       "title": "Durée des exécutions",
       "description": "Durée des exécutions réussies de l'agent Support (sur 1 h).",
-      "id": 18,
+      "id": 21,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -991,7 +1138,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 38
+        "y": 45
       },
       "fieldConfig": {
         "defaults": {
@@ -1047,7 +1194,7 @@
       "type": "timeseries",
       "title": "Appels d'outils, par résultat",
       "description": "Sur 15 min. succeeded : exécuté ; held : mis en attente d'un humain ; denied : refusé par le hook ; failed : en échec.",
-      "id": 19,
+      "id": 22,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1056,7 +1203,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 38
+        "y": 45
       },
       "fieldConfig": {
         "defaults": {
@@ -1103,7 +1250,7 @@
       "type": "timeseries",
       "title": "Décisions humaines et exécutions",
       "description": "Sur 1 h : décisions sur /approvals, puis exécution des actions approuvées par la plateforme.",
-      "id": 20,
+      "id": 23,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1112,7 +1259,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 38
+        "y": 45
       },
       "fieldConfig": {
         "defaults": {
@@ -1168,7 +1315,7 @@
       "type": "timeseries",
       "title": "File de tickets",
       "description": "Dernier relevé de la boucle : tickets ouverts, éligibles, et écartés par motif.",
-      "id": 21,
+      "id": 24,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1177,7 +1324,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 46
+        "y": 53
       },
       "fieldConfig": {
         "defaults": {

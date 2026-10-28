@@ -1,0 +1,225 @@
+# Tests des règles d'alerte : `promtool test rules tests/alerts_test.yml` depuis
+# monitoring/prometheus (lancé par agentpilot/tests/test_alert_rules.py).
+#
+# Séries simulées à la minute (`0+60x40` : 0, 60, 120… soit 1 requête par seconde). Le trafic
+# normal reprend le mélange du générateur (5 req/s, ~2 % de 404 sur /orders) : aucune alerte.
+# Chaque règle a un cas de panne qui la déclenche, et un cas limite qui ne la déclenche pas.
+rule_files:
+  - ../rules/alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # --- Trafic normal : rien ne se déclenche ------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'up{job="shopsim",instance="localhost:8000"}'
+        values: "1x40"
+      - series: 'up{job="agentpilot",instance="localhost:8001"}'
+        values: "1x40"
+      - series: 'http_requests_total{job="shopsim",method="GET",route="/customers/{customer_id}",status="200"}'
+        values: "0+54x40"
+      - series: 'http_requests_total{job="shopsim",method="GET",route="/customers/{customer_id}/orders",status="200"}'
+        values: "0+54x40"
+      - series: 'http_requests_total{job="shopsim",method="GET",route="/orders/{order_id}",status="200"}'
+        values: "0+66x40"
+      - series: 'http_requests_total{job="shopsim",method="GET",route="/orders/{order_id}",status="404"}'
+        values: "0+6x40"
+      - series: 'http_requests_total{job="shopsim",method="GET",route="/payments/{order_id}",status="200"}'
+        values: "0+72x40"
+      - series: 'http_requests_total{job="shopsim",method="GET",route="/shipments/{order_id}",status="200"}'
+        values: "0+48x40"
+      # Latences normales : tout sous 100 ms, Paiements compris
+      - series: 'http_request_duration_seconds_bucket{job="shopsim",method="GET",route="/payments/{order_id}",le="0.1"}'
+        values: "0+72x40"
+      - series: 'http_request_duration_seconds_bucket{job="shopsim",method="GET",route="/payments/{order_id}",le="1.0"}'
+        values: "0+72x40"
+      - series: 'http_request_duration_seconds_bucket{job="shopsim",method="GET",route="/payments/{order_id}",le="+Inf"}'
+        values: "0+72x40"
+      - series: 'http_request_duration_seconds_count{job="shopsim",method="GET",route="/payments/{order_id}"}'
+        values: "0+72x40"
+      - series: 'http_request_duration_seconds_bucket{job="shopsim",method="GET",route="/orders/{order_id}",le="0.1"}'
+        values: "0+72x40"
+      - series: 'http_request_duration_seconds_bucket{job="shopsim",method="GET",route="/orders/{order_id}",le="1.0"}'
+        values: "0+72x40"
+      - series: 'http_request_duration_seconds_bucket{job="shopsim",method="GET",route="/orders/{order_id}",le="+Inf"}'
+        values: "0+72x40"
+      - series: 'http_request_duration_seconds_count{job="shopsim",method="GET",route="/orders/{order_id}"}'
+        values: "0+72x40"
+      - series: 'agentpilot_state_up{job="agentpilot",instance="localhost:8001"}'
+        values: "1x40"
+      - series: 'agentpilot_runs_finished_total{job="agentpilot",instance="localhost:8001",agent="support",status="succeeded",trigger="loop"}'
+        values: "0+1x40"
+      - series: 'agentpilot_runs_finished_total{job="agentpilot",instance="localhost:8001",agent="support",status="failed",trigger="loop"}'
+        values: "0x40"
+      - series: 'agentpilot_budget_spent_today_usd{job="agentpilot",instance="localhost:8001"}'
+        values: "0+0.05x40"
+      - series: 'agentpilot_budget_daily_usd{job="agentpilot",instance="localhost:8001"}'
+        values: "5x40"
+      - series: 'agentpilot_pending_action_oldest_age_seconds{job="agentpilot",instance="localhost:8001"}'
+        values: "0 0 60 120 180 0x36"
+    alert_rule_test:
+      - {eval_time: 30m, alertname: ShopSimHighErrorRate, exp_alerts: []}
+      - {eval_time: 30m, alertname: ShopSimHighLatency, exp_alerts: []}
+      - {eval_time: 30m, alertname: ShopSimDown, exp_alerts: []}
+      - {eval_time: 30m, alertname: AgentPilotDown, exp_alerts: []}
+      - {eval_time: 30m, alertname: AgentPilotStateUnavailable, exp_alerts: []}
+      - {eval_time: 30m, alertname: AgentRunsFailing, exp_alerts: []}
+      - {eval_time: 30m, alertname: AgentBudgetNearlyReached, exp_alerts: []}
+      - {eval_time: 30m, alertname: PendingActionTooOld, exp_alerts: []}
+
+  # --- Erreurs 5xx (panne db_errors sur /orders) -----------------------------------------
+  - interval: 1m
+    input_series:
+      # /orders : 1 req/s, toutes en 500 à partir de la minute 0
+      - series: 'http_requests_total{job="shopsim",method="GET",route="/orders/{order_id}",status="500"}'
+        values: "0+60x10"
+      - series: 'http_requests_total{job="shopsim",method="GET",route="/orders/{order_id}",status="200"}'
+        values: "500x10"
+      # /payments : 4 % de 500, sous le seuil de 5 %
+      - series: 'http_requests_total{job="shopsim",method="GET",route="/payments/{order_id}",status="500"}'
+        values: "0+4x10"
+      - series: 'http_requests_total{job="shopsim",method="GET",route="/payments/{order_id}",status="200"}'
+        values: "0+96x10"
+      # /clock : une requête par minute, toutes en erreur, sous le plancher de trafic
+      - series: 'http_requests_total{job="shopsim",method="GET",route="/clock",status="500"}'
+        values: "0+1x10"
+    alert_rule_test:
+      # Condition vraie dès la minute 1, mais il faut 2 minutes de suite
+      - eval_time: 2m
+        alertname: ShopSimHighErrorRate
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: ShopSimHighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              route: "/orders/{order_id}"
+            exp_annotations:
+              summary: "Erreurs 5xx sur /orders/{order_id}"
+              description: "Plus de 5 % des requêtes de /orders/{order_id} échouent (5xx) depuis 2 minutes."
+
+  # --- Latence (panne payment_latency) ---------------------------------------------------
+  - interval: 1m
+    input_series:
+      # /payments : 1 req/s, toutes entre 1 et 5 s
+      - series: 'http_request_duration_seconds_bucket{job="shopsim",method="GET",route="/payments/{order_id}",le="0.1"}'
+        values: "0x10"
+      - series: 'http_request_duration_seconds_bucket{job="shopsim",method="GET",route="/payments/{order_id}",le="1.0"}'
+        values: "0x10"
+      - series: 'http_request_duration_seconds_bucket{job="shopsim",method="GET",route="/payments/{order_id}",le="5.0"}'
+        values: "0+60x10"
+      - series: 'http_request_duration_seconds_bucket{job="shopsim",method="GET",route="/payments/{order_id}",le="+Inf"}'
+        values: "0+60x10"
+      - series: 'http_request_duration_seconds_count{job="shopsim",method="GET",route="/payments/{order_id}"}'
+        values: "0+60x10"
+      # /clock : lente aussi, mais une requête toutes les 2 minutes : sous le plancher
+      - series: 'http_request_duration_seconds_bucket{job="shopsim",method="GET",route="/clock",le="1.0"}'
+        values: "0x10"
+      - series: 'http_request_duration_seconds_bucket{job="shopsim",method="GET",route="/clock",le="5.0"}'
+        values: "0+0.5x10"
+      - series: 'http_request_duration_seconds_bucket{job="shopsim",method="GET",route="/clock",le="+Inf"}'
+        values: "0+0.5x10"
+      - series: 'http_request_duration_seconds_count{job="shopsim",method="GET",route="/clock"}'
+        values: "0+0.5x10"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ShopSimHighLatency
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ShopSimHighLatency
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              route: "/payments/{order_id}"
+            exp_annotations:
+              summary: "Latence élevée sur /payments/{order_id}"
+              description: "Le 95e centile du temps de réponse de /payments/{order_id} dépasse 1 s depuis 3 minutes."
+
+  # --- Services injoignables ----------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Injoignables à partir de la minute 2
+      - series: 'up{job="shopsim",instance="localhost:8000"}'
+        values: "1 1 0x8"
+      - series: 'up{job="agentpilot",instance="localhost:8001"}'
+        values: "1 1 0x8"
+      - series: 'agentpilot_state_up{job="agentpilot",instance="localhost:8001"}'
+        values: "1 1 0x8"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ShopSimDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ShopSimDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: shopsim, instance: "localhost:8000"}
+            exp_annotations:
+              summary: "ShopSim injoignable"
+              description: "Prometheus ne joint plus ShopSim depuis 1 minute."
+      - eval_time: 3m
+        alertname: AgentPilotDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: AgentPilotDown
+        exp_alerts:
+          - exp_labels: {severity: warning, job: agentpilot, instance: "localhost:8001"}
+            exp_annotations:
+              summary: "AgentPilot injoignable"
+              description: "Prometheus ne joint plus AgentPilot depuis 2 minutes (service arrêté ?)."
+      - eval_time: 3m
+        alertname: AgentPilotStateUnavailable
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: AgentPilotStateUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, job: agentpilot, instance: "localhost:8001"}
+            exp_annotations:
+              summary: "État d'AgentPilot illisible"
+              description: "AgentPilot ne lit plus sa base depuis 2 minutes."
+
+  # --- Agent : échecs, budget, action oubliée ------------------------------------------------
+  - interval: 1m
+    input_series:
+      # 1 échec à la minute 2, puis 2 de plus aux minutes 10 et 12
+      - series: 'agentpilot_runs_finished_total{job="agentpilot",instance="localhost:8001",agent="support",status="failed",trigger="loop"}'
+        values: "0 0 1x7 2 2 3x8"
+      # Dépense : 3,50 $ (70 %), puis 4,25 $ (85 %) à partir de la minute 5
+      - series: 'agentpilot_budget_spent_today_usd{job="agentpilot",instance="localhost:8001"}'
+        values: "3.5x4 4.25x15"
+      - series: 'agentpilot_budget_daily_usd{job="agentpilot",instance="localhost:8001"}'
+        values: "5x20"
+      # Action en attente depuis la minute 0 : âge en secondes, au-delà d'1 h à la minute 61
+      - series: 'agentpilot_pending_action_oldest_age_seconds{job="agentpilot",instance="localhost:8001"}'
+        values: "0+60x70"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: AgentRunsFailing
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: AgentRunsFailing
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Exécutions de l'agent Support en échec"
+              description: "Au moins 3 exécutions de l'agent Support ont échoué en 30 minutes."
+      - eval_time: 3m
+        alertname: AgentBudgetNearlyReached
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: AgentBudgetNearlyReached
+        exp_alerts:
+          - exp_labels: {severity: warning, job: agentpilot, instance: "localhost:8001"}
+            exp_annotations:
+              summary: "Budget du jour presque atteint"
+              description: "Plus de 80 % du budget du jour est dépensé ; au plafond, la boucle se met en pause."
+      - eval_time: 59m
+        alertname: PendingActionTooOld
+        exp_alerts: []
+      - eval_time: 62m
+        alertname: PendingActionTooOld
+        exp_alerts:
+          - exp_labels: {severity: warning, job: agentpilot, instance: "localhost:8001"}
+            exp_annotations:
+              summary: "Action en attente d'un humain depuis plus d'une heure"
+              description: "Une action attend une décision sur /approvals depuis plus d'une heure."

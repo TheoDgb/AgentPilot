@@ -1,0 +1,94 @@
+# Règles d'alerte (J4.4) : des symptômes seulement, jamais l'état des pannes Chaos.
+#
+# Le trafic normal du générateur ne déclenche rien : ses 404 voulus ne sont pas des 5xx, la
+# latence normale reste sous 200 ms, un plancher de trafic écarte les routes presque inutilisées
+# et les durées (`for`) absorbent un pic isolé. Tests : monitoring/prometheus/tests/alerts_test.yml
+# (`promtool test rules`, lancé par agentpilot/tests/test_alert_rules.py).
+#
+# Alertes envoyées à Alertmanager, puis à AgentPilot (POST /alerts/webhook), qui les enregistre.
+# Aucune action automatique.
+groups:
+  - name: shopsim
+    rules:
+      - alert: ShopSimHighErrorRate
+        # Part des 5xx d'une route, si la route reçoit au moins 3 requêtes par minute
+        expr: |
+          (
+            sum by (route) (rate(http_requests_total{job="shopsim",status=~"5.."}[2m]))
+            / sum by (route) (rate(http_requests_total{job="shopsim"}[2m]))
+          ) > 0.05
+          and sum by (route) (rate(http_requests_total{job="shopsim"}[2m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Erreurs 5xx sur {{ $labels.route }}"
+          description: "Plus de 5 % des requêtes de {{ $labels.route }} échouent (5xx) depuis 2 minutes."
+
+      - alert: ShopSimHighLatency
+        expr: |
+          histogram_quantile(
+            0.95, sum by (le, route) (rate(http_request_duration_seconds_bucket{job="shopsim"}[5m]))
+          ) > 1
+          and sum by (route) (rate(http_request_duration_seconds_count{job="shopsim"}[5m])) > 0.05
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Latence élevée sur {{ $labels.route }}"
+          description: "Le 95e centile du temps de réponse de {{ $labels.route }} dépasse 1 s depuis 3 minutes."
+
+      - alert: ShopSimDown
+        expr: up{job="shopsim"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ShopSim injoignable"
+          description: "Prometheus ne joint plus ShopSim depuis 1 minute."
+
+  - name: agentpilot
+    rules:
+      - alert: AgentPilotDown
+        expr: up{job="agentpilot"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AgentPilot injoignable"
+          description: "Prometheus ne joint plus AgentPilot depuis 2 minutes (service arrêté ?)."
+
+      - alert: AgentPilotStateUnavailable
+        expr: agentpilot_state_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "État d'AgentPilot illisible"
+          description: "AgentPilot ne lit plus sa base depuis 2 minutes."
+
+      - alert: AgentRunsFailing
+        expr: sum(increase(agentpilot_runs_finished_total{agent="support",status="failed"}[30m])) >= 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "Exécutions de l'agent Support en échec"
+          description: "Au moins 3 exécutions de l'agent Support ont échoué en 30 minutes."
+
+      - alert: AgentBudgetNearlyReached
+        expr: |
+          agentpilot_budget_spent_today_usd / agentpilot_budget_daily_usd > 0.8
+          and agentpilot_budget_daily_usd > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Budget du jour presque atteint"
+          description: "Plus de 80 % du budget du jour est dépensé ; au plafond, la boucle se met en pause."
+
+      - alert: PendingActionTooOld
+        expr: agentpilot_pending_action_oldest_age_seconds > 3600
+        labels:
+          severity: warning
+        annotations:
+          summary: "Action en attente d'un humain depuis plus d'une heure"
+          description: "Une action attend une décision sur /approvals depuis plus d'une heure."

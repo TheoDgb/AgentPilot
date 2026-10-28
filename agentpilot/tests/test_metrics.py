@@ -1,6 +1,9 @@
 """Métriques Prometheus d'AgentPilot : exécutions, appels d'outils, décisions humaines, état du
 pilotage ; étiquettes à valeurs bornées, sans identifiant."""
 
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
 import pytest
 from fastapi.testclient import TestClient
 from prometheus_client.parser import text_string_to_metric_families
@@ -8,6 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from agentpilot import control, metrics
+from agentpilot.api_schemas import ControlStatus
 from agentpilot.app import app
 from agentpilot.db import make_session_factory
 from agentpilot.models import AgentKind, CallOutcome, PauseReason, PendingStatus, RunTrigger
@@ -230,3 +234,35 @@ def test_labels_have_bounded_values(client: TestClient, shop: Shop) -> None:
             allowed = ALLOWED_LABELS[name]
             assert allowed is None or label_value in allowed, (name, label_value)
             assert not name.endswith("_id")
+
+
+def test_oldest_pending_action_age() -> None:
+    """Jauge de la règle PendingActionTooOld : âge en secondes, 0 sans action en attente."""
+    now = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+    status = ControlStatus(
+        loop_paused=True,
+        pause_reason=None,
+        paused_by=None,
+        paused_at=None,
+        emergency_stop=False,
+        emergency_by=None,
+        emergency_at=None,
+        spent_today_usd=Decimal(0),
+        daily_budget_usd=Decimal(5),
+        running_tickets=[],
+        max_concurrent_runs=2,
+        waiting_until=None,
+        waiting_reason=None,
+        abandoned_tickets=[],
+        queue_checked_at=None,
+        open_tickets=None,
+        eligible_tickets=None,
+        skipped_tickets={},
+    )
+
+    def age(oldest: datetime | None) -> float | None:
+        registry = metrics.state_registry(status, {}, now, oldest)
+        return registry.get_sample_value("agentpilot_pending_action_oldest_age_seconds")
+
+    assert age(None) == 0
+    assert age(now - timedelta(hours=2)) == 7200

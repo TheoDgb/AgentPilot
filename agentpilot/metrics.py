@@ -164,6 +164,15 @@ def pending_counts(session: Session) -> dict[tuple[str, PendingStatus], int]:
     return counts
 
 
+def oldest_pending(session: Session) -> datetime | None:
+    """Date de la plus ancienne action en attente d'un humain."""
+    return session.scalar(
+        select(func.min(PendingAction.created_at)).where(
+            PendingAction.status == PendingStatus.PENDING
+        )
+    )
+
+
 def loop_state(status: ControlStatus, now: datetime) -> str:
     if status.loop_paused:
         return "paused_budget" if status.pause_reason is PauseReason.BUDGET else "paused_manual"
@@ -176,6 +185,7 @@ def state_registry(
     status: ControlStatus | None,
     pending: Mapping[tuple[str, PendingStatus], int] | None,
     now: datetime,
+    oldest: datetime | None = None,
 ) -> CollectorRegistry:
     """Jauges d'état ; `None` : base injoignable, seule `agentpilot_state_up` vaut alors 0."""
     registry = CollectorRegistry()
@@ -200,6 +210,12 @@ def state_registry(
             waiting.labels(tool=tool, status=pending_status).set(0)
     for (tool, pending_status), count in pending.items():
         waiting.labels(tool=tool, status=pending_status).set(count)
+
+    Gauge(
+        "agentpilot_pending_action_oldest_age_seconds",
+        "Âge de la plus ancienne action en attente d'un humain, en secondes (0 : aucune).",
+        registry=registry,
+    ).set(0 if oldest is None else max(0.0, (now - oldest).total_seconds()))
 
     Gauge(
         "agentpilot_runs_running",

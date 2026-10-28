@@ -64,6 +64,9 @@ FIELDS = frozenset(
         "pause_reason",
         "emergency",
         "count",
+        # Alertes reçues d'Alertmanager (nom de la règle, gravité)
+        "alertname",
+        "severity",
         # Générateur de trafic (compte rendu périodique) : requêtes par « méthode gabarit code »
         "requests",
         "dropped",

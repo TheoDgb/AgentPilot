@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict
 
 from agentpilot.models import (
     AgentKind,
+    AlertStatus,
     CallOutcome,
     PauseReason,
     PendingStatus,
@@ -92,6 +93,23 @@ class RunRead(BaseModel):
     finished_at: datetime | None
 
 
+class AlertRead(BaseModel):
+    """Alerte reçue d'Alertmanager (J4.4)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    alertname: str
+    severity: str | None
+    route: str | None
+    status: AlertStatus
+    summary: str | None
+    starts_at: datetime
+    ends_at: datetime | None
+    first_received_at: datetime
+    last_received_at: datetime
+
+
 class ControlStatus(BaseModel):
     """Pilotage : boucle, arrêt d'urgence, budget du jour (UTC) et santé de ShopSim."""
 
@@ -116,3 +134,5 @@ class ControlStatus(BaseModel):
     eligible_tickets: int | None
     # Tickets ouverts écartés, par motif : running, held, abandoned, handled, proposal, cooldown
     skipped_tickets: dict[str, int]
+    # Alertes en cours (déclenchées, pas encore résolues), les plus anciennes d'abord
+    active_alerts: list[AlertRead] = []

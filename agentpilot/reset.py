@@ -9,8 +9,9 @@
 2. Relance le seed de ShopSim (`shopsim/seed.py`) : données de démo, vérité terrain
    `evals/tickets.jsonl`, horloge simulée repartie du 2026-07-06 12:00, pannes Chaos arrêtées
    (leur table est recréée).
-3. Vide les tables d'AgentPilot : exécutions, journal des appels d'outils, actions en attente ;
-   interrupteurs à l'état du premier lancement (boucle en pause, pas d'arrêt d'urgence).
+3. Vide les tables d'AgentPilot : exécutions, journal des appels d'outils, actions en attente,
+   alertes reçues ; interrupteurs à l'état du premier lancement (boucle en pause, pas d'arrêt
+   d'urgence).
 
 Les logs (`logs/`) et les décisions de la CLI headless (`runs/support/`) ne sont pas touchés.
 ShopSim est joint par `DATABASE_URL`, AgentPilot par `AGENTPILOT_DATABASE_URL` : par défaut la
@@ -70,7 +71,7 @@ def main(
         seed()
         clear(bind)
     print(
-        "AgentPilot : exécutions, journal et actions en attente vidés ; boucle en pause, "
+        "AgentPilot : exécutions, journal, actions en attente et alertes vidés ; boucle en pause, "
         "arrêt d'urgence levé."
     )
     return 0
