@@ -36,7 +36,7 @@ agent = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["observability", "shopsim", "mcp_server", "agentpilot", "traffic"]
+testpaths = ["observability", "shopsim", "mcp_server", "agentpilot", "traffic", "evals"]
 addopts = "-ra"
 
 [tool.ruff]

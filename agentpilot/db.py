@@ -54,6 +54,8 @@ def init_db(bind: Engine) -> None:
     with bind.begin() as connection:
         connection.execute(CreateSchema(SCHEMA, if_not_exists=True))
         Base.metadata.create_all(connection)
+        # Valeur ajoutée après la création de l'énumération (J5.1) : pas de migrations
+        connection.execute(text(f"ALTER TYPE {SCHEMA}.run_trigger ADD VALUE IF NOT EXISTS 'eval'"))
         connection.execute(
             insert(models.Control)
             .values(id=models.CONTROL_ID, loop_paused=True, emergency_stop=False)

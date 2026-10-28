@@ -19,3 +19,5 @@ __pycache__/
 /.zprofile
 /.gitconfig
 /.ripgreprc
+# Résultats des évaluations (J5.1) : réponses aux clients, coûts
+/evals/results/

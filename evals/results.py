@@ -1,0 +1,136 @@
+"""Schéma du fichier de résultats d'une évaluation (`evals/results/<date>-<nom>.json`).
+
+Écrit par `python -m evals.run` (J5.1), relu par la notation (J5.2). Ce fichier ne contient
+jamais la vérité terrain : seulement ce que l'agent a décidé et ce qui s'est réellement passé
+(journal des appels d'outils, actions en attente, état du ticket relu dans ShopSim).
+"""
+
+import uuid
+from datetime import datetime
+from enum import StrEnum
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+from agentpilot.schemas import SupportDecision
+
+
+class EvalStatus(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    # Ctrl+C : exécutions en cours annulées, tickets restants non lancés
+    INTERRUPTED = "interrupted"
+    # ShopSim injoignable ou vérification d'isolement en échec : la mesure n'a plus de sens
+    ABORTED = "aborted"
+    # Plafond de l'évaluation atteint : tickets restants non lancés
+    BUDGET_EXHAUSTED = "budget_exhausted"
+
+
+class TicketStatus(StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+    NOT_RUN = "not_run"
+
+
+class NotRunReason(StrEnum):
+    BUDGET = "budget"
+    INTERRUPTED = "interrupted"
+    ABORTED = "aborted"
+
+
+class Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ActionCall(Strict):
+    """Appel d'un outil d'action par l'agent, tel que le journal l'a enregistré."""
+
+    # Nom court : reply_to_ticket, refund_order, resend_order, escalate_ticket, resolve_ticket
+    tool: str
+    params: dict[str, Any]
+    # succeeded, failed, held (mis en attente d'un humain) ou denied (refusé par le hook)
+    outcome: str
+    error: str | None = None
+
+
+class HeldAction(Strict):
+    """Action sensible mise en attente d'un humain ; personne ne l'approuve en évaluation."""
+
+    tool: str
+    params: dict[str, Any]
+    # over_threshold, risky_customer
+    reasons: list[str]
+    # Ce que le hook a lu lui-même dans ShopSim pour décider
+    facts: dict[str, Any]
+    status: str
+
+
+class TicketResult(Strict):
+    ticket_id: int
+    status: TicketStatus
+    not_run_reason: NotRunReason | None = None
+    run_id: uuid.UUID | None = None
+    trace_id: str | None = None
+    # Décision validée de l'agent ; null si l'exécution a échoué
+    decision: SupportDecision | None = None
+    error: str | None = None
+    error_type: str | None = None
+    # Ce qui s'est réellement passé
+    actions: list[ActionCall] = []
+    held: list[HeldAction] = []
+    # Messages réellement envoyés au client (appels reply_to_ticket réussis)
+    replies: list[str] = []
+    # Statut du ticket relu dans ShopSim après l'exécution ; null si illisible
+    ticket_after: str | None = None
+    tool_calls: int = 0
+    cost_usd: float | None = None
+    duration_ms: int | None = None
+    num_turns: int | None = None
+    model: str | None = None
+    # Arrêt d'urgence pendant l'exécution : la décision n'est qu'une proposition
+    propose_only: bool = False
+
+
+class CodeVersion(Strict):
+    commit: str | None
+    # Modifications non commitées au lancement
+    dirty: bool | None
+    # Empreinte de la consigne de l'agent (CLAUDE.md et politique de remboursement)
+    prompt_sha256: str
+
+
+class IsolationCheck(Strict):
+    """Vérification d'isolement lancée avant le premier ticket (`sdk_runner.check_context`)."""
+
+    passed: bool
+    run_id: uuid.UUID
+    trace_id: str
+    error: str | None = None
+
+
+class EvalSummary(Strict):
+    name: str
+    model_requested: str
+    # Modèles annoncés par l'agent à l'initialisation
+    models_used: list[str] = []
+    code: CodeVersion
+    simulation_now: datetime
+    started_at: datetime
+    finished_at: datetime | None = None
+    status: EvalStatus
+    # Motif d'un arrêt avant la fin (abandon, isolement en échec)
+    stop_reason: str | None = None
+    tickets_requested: list[int]
+    max_budget_usd: float
+    # Coûts connus, et plafond d'une exécution pour un coût inconnu (comme le budget du jour)
+    total_cost_usd: float = 0.0
+    runs_by_status: dict[str, int] = {}
+    isolation: IsolationCheck | None = None
+    # Aucune panne Chaos active à la fin ; null si la vérification a échoué
+    chaos_clean_at_end: bool | None = None
+
+
+class EvalReport(Strict):
+    summary: EvalSummary
+    tickets: list[TicketResult] = []

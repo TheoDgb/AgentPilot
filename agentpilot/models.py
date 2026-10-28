@@ -40,6 +40,8 @@ class RunTrigger(StrEnum):
     MANUAL = "manual"
     # Boucle de traitement de la file (`agentpilot/worker.py`)
     LOOP = "loop"
+    # Évaluation sur la vérité terrain (`python -m evals.run`)
+    EVAL = "eval"
 
 
 class PauseReason(StrEnum):

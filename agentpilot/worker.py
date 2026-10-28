@@ -356,6 +356,8 @@ class Worker:
         # Dernier relevé de la file (page de pilotage)
         self.queue: QueueSnapshot | None = None
         self._serve_scope: anyio.CancelScope | None = None
+        # Modèle de l'agent Support (l'évaluation peut en choisir un autre)
+        self.model = sdk_runner.DEFAULT_MODEL
 
     @property
     def factory(self) -> sessionmaker[Session]:
@@ -443,8 +445,10 @@ class Worker:
 
     def ticket_launch(self, run_id: uuid.UUID, ticket_id: int, done: list[str]) -> Launch:
         journal = DbJournal(self.factory, run_id)
-        query = self.state.query
-        return lambda: sdk_runner.decide_ticket(ticket_id, journal=journal, query=query, done=done)
+        query, model = self.state.query, self.model
+        return lambda: sdk_runner.decide_ticket(
+            ticket_id, journal=journal, query=query, model=model, done=done
+        )
 
     async def start_ticket(self, ticket_id: int, trigger: RunTrigger) -> tuple[Run, Launch]:
         """Crée l'exécution d'un ticket (budget et unicité vérifiés) et prépare son lancement.
