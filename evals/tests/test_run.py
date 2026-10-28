@@ -6,14 +6,14 @@ import json
 import os
 import re
 import signal
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from agentpilot import env_file, support_agent
@@ -34,8 +34,16 @@ from agentpilot.tests.conftest import (
 )
 from agentpilot.worker import MAX_CONCURRENT_RUNS, new_run
 from evals import run
+from evals.grounding import values
 from evals.results import EvalReport
-from shopsim.app.models import ChaosFault, ChaosScenario, MessageAuthor, Ticket, TicketStatus
+from shopsim.app.models import (
+    ChaosFault,
+    ChaosScenario,
+    MessageAuthor,
+    Ticket,
+    TicketMessage,
+    TicketStatus,
+)
 from shopsim.tests.conftest import MakeTicket
 
 TOKEN = "chaos-test-token"
@@ -171,6 +179,7 @@ def evaluate(
     agent: Agent,
     *args: str,
     environ: dict[str, str] | None = None,
+    seed: Callable[[], None] | None = None,
 ) -> int:
     return run.main(
         ["--yes", *args],
@@ -180,7 +189,32 @@ def evaluate(
         ground_truth=ground_truth,
         results_dir=results_dir,
         configure_logs=False,
+        seed=seed or no_seed,
     )
+
+
+def no_seed() -> None:
+    raise AssertionError("remise à zéro inattendue")
+
+
+class Reseed:
+    """Faux seed de ShopSim entre deux passages : tickets rouverts, réponses effacées."""
+
+    def __init__(self, session: Session, works: bool = True) -> None:
+        self.session = session
+        self.works = works
+        self.calls = 0
+
+    def __call__(self) -> None:
+        self.calls += 1
+        if not self.works:
+            return
+        self.session.execute(
+            delete(TicketMessage).where(TicketMessage.author != MessageAuthor.CUSTOMER)
+        )
+        self.session.execute(update(Ticket).values(status=TicketStatus.OPEN))
+        self.session.flush()
+        self.session.expire_all()
 
 
 def report(results_dir: Path) -> EvalReport:
@@ -220,7 +254,10 @@ def test_evaluation_records_decisions_and_what_really_happened(
     agent = Agent(
         {
             replied.id: (
-                [call("reply_to_ticket", ticket_id=replied.id, body=REPLY_BODY)],
+                [
+                    call("get_ticket", ticket_id=replied.id),
+                    call("reply_to_ticket", ticket_id=replied.id, body=REPLY_BODY),
+                ],
                 decision(replied, **REPLY_DECISION),
             ),
             held.id: (
@@ -259,6 +296,16 @@ def test_evaluation_records_decisions_and_what_really_happened(
     assert answer.decision.action == "reply"
     assert [(a.tool, a.outcome) for a in answer.actions] == [("reply_to_ticket", "succeeded")]
     assert answer.replies == [REPLY_BODY]
+    # Lectures d'outils gardées avec leur réponse : `facts_used` vérifiable à la notation
+    assert answer.reads is not None
+    [lookup] = answer.reads
+    assert (lookup.tool, lookup.outcome, lookup.params) == (
+        "get_ticket",
+        "succeeded",
+        {"ticket_id": replied.id},
+    )
+    assert replied.id in values(lookup.response, "id")
+    assert by_id[held.id].reads == []
     assert answer.ticket_after is not None
     assert answer.trace_id and answer.run_id and answer.cost_usd == pytest.approx(0.0217)
 
@@ -372,6 +419,139 @@ def test_ctrl_c_interrupts_the_runs(
     with session_factory() as session:
         statuses = session.scalars(select(Run.status).where(Run.agent == AgentKind.SUPPORT))
         assert RunStatus.RUNNING not in set(statuses)
+
+
+# --- Passages répétés -----------------------------------------------------------------------
+
+
+def test_passes_reset_between_them_and_share_one_series(
+    ready: None,
+    shop: Shop,
+    session: Session,
+    agentpilot_engine: Engine,
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tickets = [shop.ticket(shop.payment(1_000 + n)) for n in range(2)]
+    scripts = {
+        t.id: (
+            [call("reply_to_ticket", ticket_id=t.id, body=REPLY_BODY)],
+            decision(t, **REPLY_DECISION),
+        )
+        for t in tickets
+    }
+    agent = Agent(scripts)
+    reseed = Reseed(session)
+    results = tmp_path / "results"
+
+    code = evaluate(
+        agentpilot_engine, truth(tmp_path, *tickets), results, agent, "--passes", "2", seed=reseed
+    )
+
+    assert code == 0
+    # Remise à zéro entre les deux passages seulement
+    assert reseed.calls == 1
+    files = sorted(results.glob("*.json"))
+    assert [f.name[-8:] for f in files] == ["-p1.json", "-p2.json"]
+    reports = [EvalReport.model_validate_json(f.read_text(encoding="utf-8")) for f in files]
+    assert [r.summary.pass_index for r in reports] == [1, 2]
+    assert {r.summary.passes for r in reports} == {2}
+    assert reports[0].summary.series == reports[1].summary.series is not None
+    assert all(r.summary.status == "completed" for r in reports)
+    assert agent.ticket_prompts() == sorted([t.id for t in tickets] * 2)
+    # Tables vidées par la remise à zéro : il ne reste que le second passage
+    assert count_runs(session_factory) == 3
+    out = capsys.readouterr().out
+    assert "passage 2/2" in out and "Remise à zéro avant le passage 2" in out
+    assert "Noter : python -m evals.grade" in out and str(files[1]) in out
+
+
+def test_one_budget_for_the_whole_series(
+    ready: None,
+    shop: Shop,
+    session: Session,
+    agentpilot_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    ticket = shop.ticket(shop.payment(3_000))
+    agent = Agent({ticket.id: ([], decision(ticket, **REPLY_DECISION))})
+    results = tmp_path / "results"
+
+    # Passage 1 : 0,0317 $ ; passage 2 : 0,0317 + 0,50 réservés > 0,53 : rien n'est lancé
+    code = evaluate(
+        agentpilot_engine,
+        truth(tmp_path, ticket),
+        results,
+        agent,
+        "--passes",
+        "3",
+        "--max-budget-usd",
+        "0.53",
+        seed=Reseed(session),
+    )
+
+    assert code == 2
+    first, second = (
+        EvalReport.model_validate_json(f.read_text(encoding="utf-8"))
+        for f in sorted(results.glob("*.json"))
+    )
+    assert first.summary.status == "completed"
+    assert second.summary.status == "budget_exhausted"
+    assert second.summary.isolation is None
+    assert second.tickets[0].not_run_reason == "budget"
+    assert agent.prompts.count(CHECK_PROMPT) == 1
+
+
+def test_ctrl_c_stops_the_series(
+    ready: None,
+    shop: Shop,
+    session: Session,
+    agentpilot_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    ticket = shop.ticket(shop.payment(3_000))
+    agent = Agent({ticket.id: ([], decision(ticket, **REPLY_DECISION))}, interrupt=True)
+    reseed = Reseed(session)
+    results = tmp_path / "results"
+
+    code = evaluate(
+        agentpilot_engine, truth(tmp_path, ticket), results, agent, "--passes", "2", seed=reseed
+    )
+
+    assert code == 2
+    assert reseed.calls == 0
+    [only] = results.glob("*.json")
+    assert only.name.endswith("-p1.json")
+
+
+def test_checks_are_redone_before_each_pass(
+    ready: None,
+    shop: Shop,
+    session: Session,
+    agentpilot_engine: Engine,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ticket = shop.ticket(shop.payment(3_000))
+    reply_call = call("reply_to_ticket", ticket_id=ticket.id, body=REPLY_BODY)
+    agent = Agent({ticket.id: ([reply_call], decision(ticket, **REPLY_DECISION))})
+
+    # Seed sans effet : le ticket a déjà sa réponse au passage 2
+    code = evaluate(
+        agentpilot_engine,
+        truth(tmp_path, ticket),
+        tmp_path / "results",
+        agent,
+        "--passes",
+        "2",
+        seed=Reseed(session, works=False),
+    )
+
+    assert code == 2
+    error = capsys.readouterr().err
+    assert "Évaluation refusée (passage 2) : ShopSim n'est pas remis à zéro" in error
+    assert agent.ticket_prompts() == [ticket.id]
 
 
 def test_shopsim_unavailable_aborts(

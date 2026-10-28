@@ -45,6 +45,13 @@ def seed_shopsim() -> None:
     seed.main()
 
 
+def reset_all(bind: Engine, seed: Callable[[], None] = seed_shopsim) -> None:
+    """Seed de ShopSim relancé, tables d'AgentPilot vidées. L'appelant tient le verrou du service
+    (`service_lock`) : aussi utilisé entre deux passages d'une évaluation (`evals.run`)."""
+    seed()
+    clear(bind)
+
+
 def main(
     argv: Sequence[str] | None = None,
     bind: Engine = engine,
@@ -68,8 +75,7 @@ def main(
                 file=sys.stderr,
             )
             return 1
-        seed()
-        clear(bind)
+        reset_all(bind, seed)
     print(
         "AgentPilot : exécutions, journal, actions en attente et alertes vidés ; boucle en pause, "
         "arrêt d'urgence levé."

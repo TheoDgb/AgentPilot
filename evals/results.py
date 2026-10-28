@@ -54,6 +54,20 @@ class ActionCall(Strict):
     error: str | None = None
 
 
+class ReadCall(Strict):
+    """Lecture d'un outil par l'agent (get_order…), avec la réponse gardée au journal.
+
+    Sert à vérifier que chaque fait cité dans `decision.facts_used` vient d'une vraie réponse
+    d'outil. Réponse tronquée au-delà de 4 000 caractères (`agentpilot.hooks.clip`).
+    """
+
+    tool: str
+    params: dict[str, Any]
+    # succeeded ou failed
+    outcome: str
+    response: Any = None
+
+
 class HeldAction(Strict):
     """Action sensible mise en attente d'un humain ; personne ne l'approuve en évaluation."""
 
@@ -79,6 +93,8 @@ class TicketResult(Strict):
     # Ce qui s'est réellement passé
     actions: list[ActionCall] = []
     held: list[HeldAction] = []
+    # Lectures d'outils ; null dans un fichier d'avant J5.2 (non enregistrées)
+    reads: list[ReadCall] | None = None
     # Messages réellement envoyés au client (appels reply_to_ticket réussis)
     replies: list[str] = []
     # Statut du ticket relu dans ShopSim après l'exécution ; null si illisible
@@ -129,6 +145,10 @@ class EvalSummary(Strict):
     isolation: IsolationCheck | None = None
     # Aucune panne Chaos active à la fin ; null si la vérification a échoué
     chaos_clean_at_end: bool | None = None
+    # Passages répétés (`--passes`) : identifiant commun de la série, rang de ce passage
+    series: str | None = None
+    pass_index: int = 1
+    passes: int = 1
 
 
 class EvalReport(Strict):

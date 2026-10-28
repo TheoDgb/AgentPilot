@@ -3,6 +3,7 @@
     python -m evals.run                                   # les 48 tickets, plafond 10 $
     python -m evals.run --tickets 1-5,19 --max-budget-usd 2 --name essai
     python -m evals.run --model opus --name opus --yes    # sans confirmation (scripts, CI)
+    python -m evals.run --passes 3 --name variabilite     # 3 passages (variabilité, J5.2)
 
 Même code que le service : `Worker` d'AgentPilot (`agentpilot/worker.py`), donc mêmes hooks,
 mêmes outils, même isolement, même journal, au plus 2 exécutions en même temps. Les actions
@@ -29,21 +30,29 @@ Pas de notation ici (J5.2).
 résumé avec le chemin du fichier de résultats ; refus sur stderr. Les logs JSON vont seulement
 dans `logs/agentpilot.jsonl` (`python -m observability.query --trace <trace_id>`).
 
-Budget : un ticket n'est lancé que si la dépense, plus le plafond d'une exécution pour chacune
-en cours et pour celle-ci, reste sous `--max-budget-usd`. Le budget du jour du service ne
-s'applique pas, mais ces exécutions comptent dans sa dépense (elles sont en base).
+Passages (`--passes N`) : le premier exige la remise à zéro manuelle ; entre deux passages,
+l'évaluation remet elle-même tout à zéro (`agentpilot.reset.reset_all`, verrou toujours tenu),
+puis refait les vérifications. Un fichier par passage (`<date>-<nom>-p1.json`…), même `series`.
+Un passage arrêté avant la fin (budget, Ctrl+C, abandon) arrête la série.
+
+Budget : un ticket n'est lancé que si la dépense (de toute la série), plus le plafond d'une
+exécution pour chacune en cours et pour celle-ci, reste sous `--max-budget-usd`. Le budget du
+jour du service ne s'applique pas, mais ces exécutions comptent dans sa dépense (en base).
 """
 
 import argparse
 import asyncio
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
 import signal
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -69,9 +78,16 @@ from agentpilot.models import (
     RunTrigger,
     ToolCall,
 )
+from agentpilot.reset import reset_all, seed_shopsim
 from agentpilot.schemas import SupportDecision
 from agentpilot.sdk_runner import AgentResult, ErrorType, QueryFn
-from agentpilot.support_agent import ACTION_TOOL_NAMES, AGENT_DIR, REPO_ROOT, SKILL_PATH
+from agentpilot.support_agent import (
+    ACTION_TOOL_NAMES,
+    AGENT_DIR,
+    READ_TOOL_NAMES,
+    REPO_ROOT,
+    SKILL_PATH,
+)
 from agentpilot.worker import MAX_CONCURRENT_RUNS, Worker, finish, new_run
 from evals.results import (
     ActionCall,
@@ -82,6 +98,7 @@ from evals.results import (
     HeldAction,
     IsolationCheck,
     NotRunReason,
+    ReadCall,
     TicketResult,
     TicketStatus,
 )
@@ -339,6 +356,16 @@ def ticket_record(run: Run, result: AgentResult | None) -> TicketResult:
             )
             for action in run.pending_actions
         ],
+        reads=[
+            ReadCall(
+                tool=short_name(call.tool),
+                params=call.input,
+                outcome=call.outcome.value,
+                response=call.response,
+            )
+            for call in run.tool_calls
+            if call.tool in READ_TOOL_NAMES
+        ],
         replies=[
             str(call.input.get("body"))
             for call in calls
@@ -354,6 +381,38 @@ def ticket_record(run: Run, result: AgentResult | None) -> TicketResult:
 
 
 # --- Évaluation -----------------------------------------------------------------------------
+
+
+MAX_PASSES = 10
+
+
+def passes(value: str) -> int:
+    try:
+        count = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"nombre de passages invalide : {value}") from None
+    if not 1 <= count <= MAX_PASSES:
+        raise argparse.ArgumentTypeError(f"entre 1 et {MAX_PASSES} passages")
+    return count
+
+
+@dataclass
+class Series:
+    """Passages répétés d'une même évaluation (`--passes`)."""
+
+    started: datetime
+    passes: int
+    index: int = 1
+    # Dépense des passages déjà faits : un seul plafond pour toute la série
+    spent: Decimal = Decimal(0)
+
+    def name(self, config: str) -> str | None:
+        return f"{self.started:%Y-%m-%dT%H%M%SZ}-{config}" if self.passes > 1 else None
+
+    def filename(self, config: str, started: datetime) -> str:
+        if self.passes == 1:
+            return f"{started:%Y-%m-%dT%H%M%SZ}-{config}.json"
+        return f"{self.name(config)}-p{self.index}.json"
 
 
 def say(line: str, *, error: bool = False) -> None:
@@ -417,6 +476,7 @@ class Evaluation:
         max_budget: Decimal,
         report: EvalReport,
         path: Path,
+        spent_before: Decimal = Decimal(0),
     ) -> None:
         self.factory = factory
         self.query = query
@@ -428,6 +488,8 @@ class Evaluation:
         self.worker = Worker(SimpleNamespace(session_factory=factory, query=query))
         self.worker.model = model
         self.spent = Decimal(0)
+        # Dépense des passages précédents de la série : le plafond vaut pour toute la série
+        self.spent_before = spent_before
         self.results: dict[int, TicketResult] = {}
         # Arrêt avant la fin : plus aucun ticket n'est lancé
         self.halted: EvalStatus | None = None
@@ -532,17 +594,20 @@ class Evaluation:
         self.done += 1
         say(f"Ticket {ticket_id} terminé ({self.done}/{self.total()}) : {ticket_line(record)}")
 
+    def over_budget(self, runs: int) -> bool:
+        """Au pire, chacune de ces `runs` exécutions coûte son plafond."""
+        return self.spent_before + self.spent + RUN_RESERVE_USD * runs > self.max_budget
+
     async def run(self, ticket_ids: Sequence[int]) -> EvalStatus:
-        budget_exhausted = False
-        if await self.isolation():
+        # Passage suivant d'une série : plus de quoi payer la vérification d'isolement
+        budget_exhausted = self.over_budget(1)
+        if not budget_exhausted and await self.isolation():
             for ticket_id in ticket_ids:
                 while len(self.running()) >= MAX_CONCURRENT_RUNS and self.halted is None:
                     await asyncio.wait(self.running(), return_when=asyncio.FIRST_COMPLETED)
                 if self.halted is not None:
                     break
-                # Au pire, chaque exécution en cours et celle-ci coûtent leur plafond
-                reserved = RUN_RESERVE_USD * (len(self.running()) + 1)
-                if self.spent + reserved > self.max_budget:
+                if self.over_budget(len(self.running()) + 1):
                     budget_exhausted = True
                     break
                 task = asyncio.create_task(self.ticket(ticket_id))
@@ -585,8 +650,10 @@ async def evaluate(
     factory: sessionmaker[Session],
     query: QueryFn,
     results_dir: Path,
-) -> tuple[EvalStatus, Path]:
-    """Vérifie l'état de départ, puis lance l'évaluation ; lève `Refused` avant tout lancement."""
+    series: Series,
+) -> tuple[EvalStatus, Path, Decimal]:
+    """Vérifie l'état de départ, puis lance un passage ; lève `Refused` avant tout lancement.
+    Renvoie l'état, le fichier de résultats et la dépense du passage."""
     token = read_token({}, env_file.ENV_FILE)
     try:
         await asyncio.to_thread(check_agentpilot_reset, factory)
@@ -598,7 +665,7 @@ async def evaluate(
         raise Refused(f"Pannes Chaos actives : {', '.join(faults)} (python -m shopsim.chaos_cli)")
 
     started = datetime.now(UTC)
-    path = results_dir / f"{started:%Y-%m-%dT%H%M%SZ}-{args.name}.json"
+    path = results_dir / series.filename(args.name, started)
     report = EvalReport(
         summary=EvalSummary(
             name=args.name,
@@ -609,12 +676,18 @@ async def evaluate(
             status=EvalStatus.RUNNING,
             tickets_requested=ticket_ids,
             max_budget_usd=float(args.max_budget_usd),
+            series=series.name(args.name),
+            pass_index=series.index,
+            passes=series.passes,
         )
     )
-    evaluation = Evaluation(factory, query, args.model, args.max_budget_usd, report, path)
+    evaluation = Evaluation(
+        factory, query, args.model, args.max_budget_usd, report, path, series.spent
+    )
     evaluation.save()
+    which = f", passage {series.index}/{series.passes}" if series.passes > 1 else ""
     say(
-        f"Évaluation « {args.name} » : {len(ticket_ids)} ticket(s), modèle {args.model}, "
+        f"Évaluation « {args.name} »{which} : {len(ticket_ids)} ticket(s), modèle {args.model}, "
         f"plafond {usd(args.max_budget_usd)}"
     )
     say(f"Résultats : {path}")
@@ -633,7 +706,7 @@ async def evaluate(
     say("")
     for line in summary_lines(report, path):
         say(line)
-    return status, path
+    return status, path, evaluation.spent
 
 
 def parser() -> argparse.ArgumentParser:
@@ -659,6 +732,12 @@ def parser() -> argparse.ArgumentParser:
         default=sdk_runner.DEFAULT_MODEL,
         help=f"modèle de l'agent ({sdk_runner.DEFAULT_MODEL} par défaut)",
     )
+    parser.add_argument(
+        "--passes",
+        type=passes,
+        default=1,
+        help="passages répétés, avec remise à zéro entre deux (1 par défaut, 10 au plus)",
+    )
     parser.add_argument("--yes", action="store_true", help="ne demande pas de confirmation")
     return parser
 
@@ -669,8 +748,10 @@ def confirmed(args: argparse.Namespace, count: int) -> bool:
     if not sys.stdin.isatty():
         print("Sans terminal, ajouter --yes pour confirmer l'évaluation.", file=sys.stderr)
         return False
+    times = f" en {args.passes} passages" if args.passes > 1 else ""
     question = (
-        f"Évaluer {count} ticket(s) avec {args.model}, plafond {args.max_budget_usd} $ ? [o/N] "
+        f"Évaluer {count} ticket(s){times} avec {args.model}, plafond {args.max_budget_usd} $ "
+        "(toute la série) ? [o/N] "
     )
     return input(question).strip().lower() in YES
 
@@ -684,6 +765,7 @@ def main(
     ground_truth: Path = GROUND_TRUTH,
     results_dir: Path = RESULTS_DIR,
     configure_logs: bool = True,
+    seed: Callable[[], None] = seed_shopsim,
 ) -> int:
     """0 : évaluation complète ; 1 : refusée ; 2 : arrêtée avant la fin (budget, Ctrl+C,
     abandon)."""
@@ -714,14 +796,37 @@ def main(
             )
             return 1
         factory = make_session_factory(bind)
-        try:
-            status, path = asyncio.run(
-                evaluate(args, ticket_ids, all_ids, factory, query, results_dir)
-            )
-        except Refused as exc:
-            print(f"Évaluation refusée : {exc}", file=sys.stderr)
-            return 1
-    return 0 if status is EvalStatus.COMPLETED else 2
+        series = Series(started=datetime.now(UTC), passes=args.passes)
+        paths: list[Path] = []
+        status = EvalStatus.COMPLETED
+        for index in range(1, args.passes + 1):
+            series.index = index
+            if index > 1:
+                say("")
+                say(f"Remise à zéro avant le passage {index} (seed de ShopSim, tables vidées)")
+                # Le seed affiche sa répartition des tickets : hors de l'écran de l'évaluation
+                with contextlib.redirect_stdout(io.StringIO()):
+                    reset_all(bind, seed)
+            try:
+                status, path, spent = asyncio.run(
+                    evaluate(args, ticket_ids, all_ids, factory, query, results_dir, series)
+                )
+            except Refused as exc:
+                where = f" (passage {index})" if args.passes > 1 else ""
+                print(f"Évaluation refusée{where} : {exc}", file=sys.stderr)
+                return 1 if index == 1 else 2
+            paths.append(path)
+            series.spent += spent
+            if status is not EvalStatus.COMPLETED:
+                break
+    if args.passes > 1:
+        say("")
+        say(
+            f"Série « {args.name} » : {len(paths)}/{args.passes} passage(s), coût total "
+            f"{usd(series.spent)} (plafond {usd(args.max_budget_usd)})"
+        )
+        say(f"Noter : python -m evals.grade {' '.join(str(p) for p in paths)}")
+    return 0 if status is EvalStatus.COMPLETED and len(paths) == args.passes else 2
 
 
 if __name__ == "__main__":
