@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from evals.facts import MATCHERS, STATUS_WORDS, fact_found, forbidden_found
+from evals import policy
+from evals.facts import MATCHERS, REFUND_WINDOW_DAYS, STATUS_WORDS, fact_found, forbidden_found
 from evals.run import GROUND_TRUTH
 from shopsim.app.models import OrderStatus, PaymentStatus, ShipmentStatus
 
@@ -219,3 +220,72 @@ def test_days_ago_needs_the_admitted_counts_and_only_for_delivery() -> None:
 )
 def test_nothing_due_phrasings(text: str, found: bool) -> None:
     assert fact_found("due_cents", 0, text) is found
+
+
+@pytest.mark.parametrize(
+    ("text", "found"),
+    [
+        # Motifs d'escalade réels de la série v2 (notation suivante de 46f32f478699)
+        # a. Ticket 43, p1
+        (
+            "Client réclame 98,00 € de compensation pour retard (commande 62, payée 91,80 €). "
+            "Dédommagement de retard non prévu par la politique et montant supérieur au montant "
+            "payé.",
+            True,
+        ),
+        # b. Ticket 44, p2
+        (
+            "Le client réclame 472,00 € pour la commande 64, alors que le montant payé est de "
+            "361,00 €. La commande a aussi été livrée il y a plus de 30 jours (71 jours).",
+            True,
+        ),
+        # c. Ticket 44, p1
+        (
+            "Le client réclame 472,00 € pour la commande 64, soit plus que le montant payé "
+            "(361,00 €). La livraison date aussi de plus de 30 jours (71). Validation humaine "
+            "requise.",
+            True,
+        ),
+        # d. Ticket 45, p1
+        (
+            "Le client réclame 495,31 € pour la commande 15, alors que le montant payé est de "
+            "365,31 €. Livraison il y a 52 jours (hors délai). Montant supérieur au payé : "
+            "validation humaine requise.",
+            True,
+        ),
+        # a. Négatifs : affirmatif, autre sujet, sans « par la politique »
+        ("Le dédommagement prévu par la politique est de 10 €.", False),
+        ("Une livraison non prévue par la politique.", False),
+        ("Ce dédommagement non prévu au contrat sera étudié.", False),
+        # b. Négatifs : mauvais nombre, autre sens, non livrée, retard
+        ("Votre commande a été livrée il y a plus de 15 jours.", False),
+        ("Votre commande a été livrée il y a plus de 29 jours.", False),
+        ("Votre commande a été livrée il y a moins de 30 jours.", False),
+        ("Votre commande n'est pas encore livrée depuis plus de 30 jours.", False),
+        ("Votre colis est en retard depuis plus de 30 jours.", False),
+        # c. Négatifs : mauvais nombre, phrase niée
+        ("La livraison date de plus de 10 jours.", False),
+        ("La livraison ne date pas de plus de 30 jours.", False),
+        # d. Négatifs : dans le délai (jours entamés : 30 ne dépasse pas), retard de livraison,
+        # phrase niée, autre délai
+        ("Livraison il y a 20 jours (hors délai).", False),
+        ("Livraison il y a 30 jours (hors délai).", False),
+        ("Colis en retard depuis 40 jours (hors délai).", False),
+        ("Livré hors délai, il y a 52 jours.", False),
+        ("Livraison il y a 52 jours (pas hors délai).", False),
+        ("Livraison il y a 52 jours (hors délai de livraison).", False),
+        ("Livraison il y a 52 jours (hors délai de 15 jours).", False),
+    ],
+)
+def test_nothing_due_new_phrasings(text: str, found: bool) -> None:
+    assert fact_found("due_cents", 0, text) is found
+
+
+def test_out_of_window_phrasings_only_say_nothing_is_due() -> None:
+    """Une livraison hors délai ne dit rien d'un montant dû différent de zéro."""
+    text = "La commande a été livrée il y a plus de 30 jours."
+    assert not fact_found("due_cents", 1000, text)
+
+
+def test_refund_window_is_the_policy_value() -> None:
+    assert REFUND_WINDOW_DAYS == policy.REFUND_WINDOW.days

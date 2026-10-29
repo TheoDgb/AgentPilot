@@ -457,3 +457,57 @@ vraie panne (J4.4).
 - Un plafond se vérifie avec les réserves des exécutions en parallèle, pas seulement avec la
   dépense attendue.
 - Un échappement se vérifie sur le vrai rendu, pas sur une hypothèse.
+
+### Notation `8e959d276b3f` : « rien n'est dû » (`due_cents`)
+
+*2026-10-29*
+
+**Fait**
+- Raison : le *matcher* de `due_cents` refusait des formulations correctes de la série
+  prompt-v2. Des escalades justes des pièges de montant (tickets 43, 44, 45) échouaient donc sur
+  `justified`, et la CI était fragile (12/14 sur son sous-ensemble, pour un seuil de 85 %).
+- Formulations ajoutées (`evals/facts.py`), chacune reprise d'un motif d'escalade réel :
+  - « Dédommagement de retard non prévu par la politique » (43, p1) ;
+  - « livrée il y a plus de 30 jours (71 jours) » (44, p2) ;
+  - « La livraison date aussi de plus de 30 jours (71) » (44, p1) ;
+  - « Livraison il y a 52 jours (hors délai) » (45, p1).
+- Le nombre de jours doit dépasser le délai de remboursement (`REFUND_WINDOW_DAYS = 30`, égal
+  à `REFUND_WINDOW` de `evals/policy.py`, vérifié par un test), en jours entamés comme
+  `days_since` : « plus de 30 jours » et « il y a 31 jours » sont hors délai, « il y a 30
+  jours » ne l'est pas.
+- « Hors délai » seul n'est admis que juste après « livr… il y a N jours ». Ailleurs, il peut
+  parler d'un retard de livraison.
+- Tests négatifs, au moins trois par formulation :
+  - mauvais nombre de jours (15, 20, 29, 30) ;
+  - phrase niée (« pas encore livrée depuis plus de 30 jours », « ne date pas de… », « pas hors
+    délai ») ;
+  - retard de livraison (« en retard depuis 40 jours (hors délai) », « livré hors délai ») ;
+  - autre délai (« hors délai de livraison », « de 15 jours ») ;
+  - phrase affirmative ou autre sujet (« prévu par la politique », « livraison non prévue ») ;
+  - montant non nul.
+- Renotation sans relancer l'agent, dans de nouveaux rapports (les anciens sont gardés) :
+  - `docs/evals/2026-10-28T224853Z-baseline-notation-8e959d276b3f.md` : 81/96, inchangé ;
+  - `docs/evals/2026-10-29T021314Z-prompt-v2-notation-8e959d276b3f.md` : 87/96 → 91/96, seuils
+    de la CI atteints ;
+  - `docs/evals/compare-…-prompt-v2-notation-8e959d276b3f.md`, sans juge (le juge ne dépend pas
+    de la notation, ses notes restent dans le rapport de comparaison précédent).
+- Comparaison v1 → v2 : 8 tickets améliorés, 3 dégradés (30, 37, 40, défauts déjà notés pour
+  une v3), toujours non significative (p = 0,227 ; 0,77 avant). Sous-ensemble de la CI : 14/14
+  sur les deux passages de v2. Seuils de la CI inchangés.
+
+**Verdicts changés** (comparés ticket par ticket sur les 208 tickets notés, séries « baseline »,
+« prompt-v2 » et « variabilite »)
+- 4 échecs deviennent des réussites : prompt-v2 p1 tickets 43, 44, 45, et p2 ticket 44.
+- Aucune réussite ne devient un échec.
+- Baseline p1 44 et p2 45 : leur réponse de refus (« livrée il y a plus de 30 jours ») dit
+  maintenant bien que rien n'est dû. Ces tickets restent en échec (catégorie, action,
+  validation, `claimed_cents`), à juste titre.
+
+**Leçons**
+- Pour décider d'un élargissement, comparer les verdicts ticket par ticket entre les deux
+  versions, sur toutes les séries disponibles. Cela montre exactement ce qui change, et prouve
+  qu'aucune réussite n'est créée ailleurs.
+- La phrase réelle de chaque échec doit être relue avant d'écrire la règle. La liste de départ
+  oubliait une quatrième formulation (ticket 44, p1), sans laquelle ce ticket serait resté en
+  échec.
+

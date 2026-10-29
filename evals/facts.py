@@ -91,6 +91,37 @@ NO_AMOUNT_DUE = [
     # Hors du délai de remboursement : rien n'est remboursable (« livré hors délai » parle d'un
     # retard de livraison, et ne compte pas)
     r"(?<!pas )\bhors (du )?delai de (remboursement|30 jours)",
+    # « Dédommagement de retard non prévu par la politique » (motif réel, ticket 43, v2)
+    r"\b(montant|remboursement|dedommagement|compensation|indemnisation|somme)s?"
+    r"( (de|pour) (un |le )?retard)? (est )?non prevue?s? par la politique",
+]
+
+# Délai de remboursement après la livraison, en jours : même valeur que `REFUND_WINDOW` de
+# `evals/policy.py` (un test le vérifie), écrite ici pour rester dans l'empreinte de la notation
+REFUND_WINDOW_DAYS = 30
+
+# Livraison hors du délai de remboursement, dite par l'écart en jours (motifs réels, tickets 44
+# et 45, v2) : (motif, le nombre lu est-il hors délai ?). Jours entamés, comme `days_since` :
+# « plus de 30 jours » et « il y a 31 jours » sont hors délai, « il y a 30 jours » ne l'est pas
+OUT_OF_WINDOW: list[tuple[str, Callable[[int], bool]]] = [
+    # « livrée il y a plus de 30 jours », mais pas « pas (encore) livrée depuis plus de 30 jours »
+    (
+        r"(?<!pas )(?<!pas encore )(?<!pas ete )\blivree?s? (il y a|depuis) plus de (\d+) jours",
+        lambda days: days >= REFUND_WINDOW_DAYS,
+    ),
+    # « la livraison date (aussi) de plus de 30 jours »
+    (
+        r"\blivraison date (aussi |deja )?de plus de (\d+) jours",
+        lambda days: days >= REFUND_WINDOW_DAYS,
+    ),
+    # « livraison il y a 52 jours (hors délai) » : « hors délai » seul n'est admis que juste
+    # après l'écart depuis la livraison (ailleurs, il peut parler d'un retard de livraison ;
+    # « depuis » aussi : « en retard depuis 40 jours ») ; « hors délai de … » relève de la règle
+    # de `NO_AMOUNT_DUE`
+    (
+        r"\blivr\w* il y a (\d+) jours\W{0,3}hors (du )?delai\b(?! de)",
+        lambda days: days > REFUND_WINDOW_DAYS,
+    ),
 ]
 
 
@@ -134,9 +165,18 @@ def _date(value: FactValue, text: str) -> bool:
     return any(re.search(p, plain(text)) for p in patterns)
 
 
+def _out_of_window(text: str) -> bool:
+    for pattern, out in OUT_OF_WINDOW:
+        for found in re.finditer(pattern, plain(text)):
+            days = next(int(g) for g in found.groups() if g is not None and g.isdigit())
+            if out(days):
+                return True
+    return False
+
+
 def _amount(value: FactValue, text: str) -> bool:
     cents = int(value)
-    if cents == 0 and _any(NO_AMOUNT_DUE, text):
+    if cents == 0 and (_any(NO_AMOUNT_DUE, text) or _out_of_window(text)):
         return True
     euros, rest = divmod(cents, 100)
     currency = r"\s*(€|euros?\b)"

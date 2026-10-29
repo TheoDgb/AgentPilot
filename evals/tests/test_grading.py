@@ -317,13 +317,16 @@ def test_escalation_justification_in_the_reason_not_the_reply() -> None:
 
 
 # Version figée de la notation. Toute correction des règles est une nouvelle version : mettre à
-# jour cette empreinte, et noter le changement et sa raison dans le journal (CLAUDE.md) ; le
-# rapport donne la version utilisée. Versions :
+# jour cette empreinte, et noter le changement et sa raison dans le journal (docs/journal.md) ;
+# le rapport donne la version utilisée. Versions :
 # - fad6fdab4512 : évaluation complète « baseline » (J5.2), rapport de référence ;
 # - 46f32f478699 : erreurs de notation relevées sur « baseline » (jours comptés comme l'outil,
 #   faits cités d'une action exécutée ou d'une lecture en échec, « colis pas retrouvé »,
-#   « hors délai de 30 jours »).
-FROZEN_RULES_SHA256 = "46f32f47869924ceede0da4861cbd5dd57b9cf46e4fba0c25a2752bce27dd305"
+#   « hors délai de 30 jours ») ;
+# - 8e959d276b3f : « rien n'est dû » (`due_cents`) dit autrement sur la série prompt-v2
+#   (tickets 43 à 45 : « non prévu par la politique », « livrée il y a plus de 30 jours »,
+#   « la livraison date de plus de 30 jours », « il y a 52 jours (hors délai) »).
+FROZEN_RULES_SHA256 = "8e959d276b3f4e63c9eba08f310367df6ffe1edb196defe3acd970b79775ddf4"
 
 
 def test_rules_version_is_frozen() -> None:
