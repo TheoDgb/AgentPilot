@@ -171,6 +171,8 @@ def test_control_state_gauges(
     running = scrape(client)
     control.pause(session_factory, None, PauseReason.BUDGET)
     budget = scrape(client)
+    control.pause(session_factory, None, PauseReason.INFRA, "api_unavailable")
+    infra = scrape(client)
 
     # Premier lancement : boucle en pause
     assert value(paused, "agentpilot_loop_state", state="paused_manual") == 1
@@ -180,6 +182,8 @@ def test_control_state_gauges(
     assert value(running, "agentpilot_emergency_stop") == 1
     assert value(budget, "agentpilot_loop_state", state="paused_budget") == 1
     assert sum(value(budget, "agentpilot_loop_state", state=s) for s in metrics.LOOP_STATES) == 1
+    assert value(infra, "agentpilot_loop_state", state="paused_infra") == 1
+    assert sum(value(infra, "agentpilot_loop_state", state=s) for s in metrics.LOOP_STATES) == 1
     assert value(budget, "agentpilot_budget_daily_usd") == 7
     assert value(budget, "agentpilot_budget_spent_today_usd") == 0
     assert value(budget, "agentpilot_runs_running") == 0

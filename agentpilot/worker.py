@@ -11,6 +11,13 @@ Un tour (`Worker.tick`) :
    n'est pas relancé s'il est en cours, s'il a été traité, si une action de ce ticket a été mise
    en attente d'un humain (quel que soit son statut), ou après `MAX_ATTEMPTS` échecs.
 
+Erreur d'infrastructure pendant une exécution (`sdk_runner.INFRA_ERRORS`) : jamais comptée
+contre le ticket (ni tentative, ni abandon, ni échec d'affilée). API Anthropic, configuration ou
+CLI (`PAUSE_ERRORS`) : pause automatique de la boucle, jusqu'à ce qu'un humain la relance (une
+limite de dépense ou une clé refusée ne se règle pas seule). ShopSim injoignable : attente
+croissante, qui reprend seule dès que ShopSim répond. Jamais pour une exécution d'évaluation,
+qui a son propre arrêt.
+
 Jamais deux exécutions d'un même ticket en parallèle : index unique partiel en base
 (`one_running_run_per_ticket`), quel que soit le déclencheur ou le processus.
 
@@ -40,7 +47,7 @@ from enum import StrEnum
 from typing import Any
 
 import anyio
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -59,7 +66,7 @@ from agentpilot.models import (
     RunTrigger,
     ToolCall,
 )
-from agentpilot.sdk_runner import AgentResult
+from agentpilot.sdk_runner import INFRA_ERRORS, AgentResult, ErrorType
 from agentpilot.support_agent import ACTION_TOOL_NAMES, DEFAULT_PROMPT
 from mcp_server.shopsim_client import ShopSimUnavailable, get_json
 from observability import trace
@@ -81,6 +88,10 @@ INTERVAL_ENV = "AGENTPILOT_LOOP_INTERVAL_S"
 DEFAULT_INTERVAL_S = 30.0
 SHUTDOWN_TIMEOUT_S = 30.0
 TICKETS_PAGE = 100
+# Erreurs d'infrastructure qui mettent la boucle en pause ; ShopSim injoignable relève de
+# l'attente croissante
+PAUSE_ERRORS = INFRA_ERRORS - {ErrorType.SHOPSIM_UNAVAILABLE}
+INFRA_VALUES = sorted(str(e) for e in INFRA_ERRORS)
 
 Launch = Callable[[], Awaitable[AgentResult]]
 
@@ -169,6 +180,7 @@ def finish(factory: sessionmaker[Session], run_id: uuid.UUID, result: AgentResul
         run.model = result.model
         run.output = result.output
         run.error = result.error
+        run.error_type = result.error_type
         run.total_cost_usd = (
             None if result.total_cost_usd is None else Decimal(str(result.total_cost_usd))
         )
@@ -211,7 +223,7 @@ class TicketHistory:
     succeeded: int = 0
     # Exécutions réussies sous arrêt d'urgence (propositions seulement)
     proposals: int = 0
-    # Échecs et interruptions
+    # Échecs et interruptions, hors erreurs d'infrastructure
     attempts: int = 0
     last_failure: datetime | None = None
 
@@ -242,12 +254,15 @@ def histories(
     found: dict[int, TicketHistory] = {ticket_id: TicketHistory() for ticket_id in ids}
     with factory() as session:
         runs = session.execute(
-            select(Run.ticket_id, Run.status, Run.propose_only, Run.finished_at).where(
-                Run.agent == AgentKind.SUPPORT, Run.ticket_id.in_(ids)
-            )
+            select(
+                Run.ticket_id, Run.status, Run.propose_only, Run.finished_at, Run.error_type
+            ).where(Run.agent == AgentKind.SUPPORT, Run.ticket_id.in_(ids))
         )
-        for ticket_id, status, propose_only, finished_at in runs:
+        for ticket_id, status, propose_only, finished_at, error_type in runs:
             history = found[ticket_id]
+            if error_type in INFRA_VALUES:
+                # Jamais la faute de l'agent : ni tentative, ni délai de relance
+                continue
             if status is RunStatus.RUNNING:
                 history.running = True
             elif status is RunStatus.SUCCEEDED:
@@ -266,8 +281,11 @@ def histories(
 
 
 def abandoned(factory: sessionmaker[Session]) -> list[int]:
-    """Tickets jamais traités après `MAX_ATTEMPTS` échecs ou interruptions."""
-    failed = Run.status.in_([RunStatus.FAILED, RunStatus.INTERRUPTED])
+    """Tickets jamais traités après `MAX_ATTEMPTS` échecs ou interruptions (hors erreurs
+    d'infrastructure)."""
+    failed = Run.status.in_([RunStatus.FAILED, RunStatus.INTERRUPTED]) & or_(
+        Run.error_type.is_(None), Run.error_type.not_in(INFRA_VALUES)
+    )
     with factory() as session:
         return list(
             session.scalars(
@@ -410,8 +428,8 @@ class Worker:
                             error_type=sdk_runner.ErrorType.INTERNAL,
                         )
             await self._db(finish, run_id, result)
-            if trigger is RunTrigger.LOOP and result is not None:
-                self._count(result)
+            if result is not None and trigger is not RunTrigger.EVAL:
+                await self._after(result, trigger)
         finally:
             del self.active[run_id]
             self._log_finished(agent, trigger, result, start)
@@ -458,6 +476,16 @@ class Worker:
         run = await self._db(new_run, AgentKind.SUPPORT, ticket_id, trigger, check_budget=True)
         done = await self._db(done_actions, ticket_id)
         return run, self.ticket_launch(run.id, ticket_id, done)
+
+    async def _after(self, result: AgentResult, trigger: RunTrigger) -> None:
+        """Erreur d'infrastructure : pause ou attente, jamais comptée ; sinon, échecs d'affilée
+        de la boucle."""
+        if result.error_type in PAUSE_ERRORS:
+            await self._db(control.pause, None, PauseReason.INFRA, result.error_type)
+        elif result.error_type is ErrorType.SHOPSIM_UNAVAILABLE:
+            self._backoff("ShopSim injoignable pendant une exécution.")
+        elif trigger is RunTrigger.LOOP:
+            self._count(result)
 
     def _count(self, result: AgentResult) -> None:
         if result.error is None:

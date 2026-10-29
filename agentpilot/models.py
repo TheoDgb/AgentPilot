@@ -48,6 +48,9 @@ class PauseReason(StrEnum):
     MANUAL = "manual"
     # Plafond de dépense du jour atteint : pause automatique
     BUDGET = "budget"
+    # Erreur d'infrastructure (API Anthropic, configuration, CLI) : pause automatique, jusqu'à
+    # ce qu'un humain relance la boucle
+    INFRA = "infra"
 
 
 class AgentKind(StrEnum):
@@ -113,6 +116,9 @@ class Run(Base):
     # Décision validée (SupportDecision) ou réponse de vérification (ContextCheck)
     output: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     error: Mapped[str | None] = mapped_column(Text)
+    # Catégorie de l'échec (`sdk_runner.ErrorType`) : une erreur d'infrastructure n'est jamais
+    # comptée contre le ticket ; NULL pour les exécutions d'avant cette colonne
+    error_type: Mapped[str | None] = mapped_column(String(32))
     total_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
     duration_ms: Mapped[int | None]
     num_turns: Mapped[int | None]
@@ -215,6 +221,8 @@ class Control(Base):
     loop_paused: Mapped[bool] = mapped_column(default=True)
     pause_reason: Mapped[PauseReason | None] = mapped_column(_enum(PauseReason, "pause_reason"))
     paused_by: Mapped[str | None] = mapped_column(String(100))
+    # Pause sur une erreur d'infrastructure : sa catégorie (`sdk_runner.ErrorType`)
+    pause_detail: Mapped[str | None] = mapped_column(String(32))
     # Dernier changement de la boucle (pause ou relance)
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Les hooks refusent toute action : l'agent ne fait que proposer

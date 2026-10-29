@@ -54,8 +54,15 @@ def init_db(bind: Engine) -> None:
     with bind.begin() as connection:
         connection.execute(CreateSchema(SCHEMA, if_not_exists=True))
         Base.metadata.create_all(connection)
-        # Valeur ajoutée après la création de l'énumération (J5.1) : pas de migrations
+        # Ajouts après la création des tables ou des énumérations : pas de migrations
         connection.execute(text(f"ALTER TYPE {SCHEMA}.run_trigger ADD VALUE IF NOT EXISTS 'eval'"))
+        connection.execute(
+            text(f"ALTER TYPE {SCHEMA}.pause_reason ADD VALUE IF NOT EXISTS 'infra'")
+        )
+        for table, column in (("runs", "error_type"), ("control", "pause_detail")):
+            connection.execute(
+                text(f"ALTER TABLE {SCHEMA}.{table} ADD COLUMN IF NOT EXISTS {column} VARCHAR(32)")
+            )
         connection.execute(
             insert(models.Control)
             .values(id=models.CONTROL_ID, loop_paused=True, emergency_stop=False)
@@ -96,6 +103,7 @@ def clear(bind: Engine, loop_paused: bool = True) -> None:
             update(models.Control).values(
                 loop_paused=loop_paused,
                 pause_reason=None,
+                pause_detail=None,
                 paused_by=None,
                 paused_at=None,
                 emergency_stop=False,

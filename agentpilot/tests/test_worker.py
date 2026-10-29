@@ -17,12 +17,12 @@ from typing import Any
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, func, select, update
+from sqlalchemy import Engine, func, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from agentpilot import control, decisions
 from agentpilot.approval import REFUND
-from agentpilot.db import SessionLocal
+from agentpilot.db import SCHEMA, SessionLocal, init_db
 from agentpilot.hooks import EMERGENCY_MESSAGE, SupportHooks
 from agentpilot.journal import DbJournal
 from agentpilot.models import (
@@ -36,6 +36,7 @@ from agentpilot.models import (
     RunTrigger,
     ToolCall,
 )
+from agentpilot.sdk_runner import AgentResult, ErrorType
 from agentpilot.support_agent import ACTION_TOOL_NAMES, READ_TOOL_NAMES
 from agentpilot.tests.conftest import (
     DECISION,
@@ -56,7 +57,9 @@ from agentpilot.worker import (
     QueueSnapshot,
     Skip,
     Worker,
+    abandoned,
     done_actions,
+    histories,
     mark_interrupted,
     new_run,
 )
@@ -66,6 +69,8 @@ from shopsim.app.models import Payment, Ticket, TicketStatus
 
 # Aucun service n'écoute sur le port 9 (discard) : ShopSim injoignable
 DOWN_URL = "http://127.0.0.1:9"
+# Texte réel de la CLI quand la limite de dépense de l'API est atteinte (2026-10-29)
+API_LIMIT = "API Error: 400 You have reached your specified API usage limits."
 
 
 # --- Fixtures ----------------------------------------------------------------------------
@@ -86,6 +91,8 @@ class TicketQuery:
 
     def __init__(self, fail: bool = False) -> None:
         self.fail = fail
+        # Erreur de l'API Anthropic (limite de dépense atteinte), pas de l'agent
+        self.api_error = False
         self.gate = asyncio.Event()
         self.gate.set()
         self.prompts: list[str] = []
@@ -105,7 +112,9 @@ class TicketQuery:
         try:
             yield init_message()
             await self.gate.wait()
-            if self.fail:
+            if self.api_error:
+                yield result_message(None, is_error=True, result=API_LIMIT)
+            elif self.fail:
                 yield result_message(None, is_error=True, subtype="error_during_execution")
             else:
                 yield result_message(DECISION | {"ticket_id": ticket_id})
@@ -159,6 +168,7 @@ def add_run(
     created_at: datetime | None = None,
     finished_at: datetime | None = None,
     started: bool = True,
+    error_type: str | None = None,
 ) -> uuid.UUID:
     now = datetime.now(UTC)
     with factory() as session:
@@ -168,6 +178,7 @@ def add_run(
             status=status,
             trigger=RunTrigger.LOOP,
             propose_only=propose_only,
+            error_type=error_type,
             total_cost_usd=None if cost is None else Decimal(cost),
             model="claude-sonnet-5-5" if started else None,
             created_at=created_at or now,
@@ -768,6 +779,163 @@ async def test_failures_in_a_row_make_the_loop_wait(
 
     assert query.tickets() == [t.id for t in failing]
     assert delay == 10 and "échec" in (worker.waiting_reason or "")
+
+
+# --- Erreurs d'infrastructure -------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_api_error_pauses_the_loop_without_counting_against_the_tickets(
+    worker: Worker, query: TicketQuery, shop: Shop, live: sessionmaker[Session]
+) -> None:
+    """Limite de dépense de l'API atteinte : pause automatique, et les tickets restent à
+    traiter (ni tentative, ni délai de relance, ni échec d'affilée)."""
+    first, second = tickets(shop, 2)
+    query.api_error = True
+
+    await worker.tick()
+    await worker.drain()
+
+    settings = control.load(live)
+    assert settings.loop_paused and settings.pause_reason is PauseReason.INFRA
+    assert settings.pause_detail == "api_unavailable" and settings.paused_by is None
+    assert [r.error_type for r in runs(live, first)] == ["api_unavailable"]
+    assert [r.status for r in runs(live, first)] == [RunStatus.FAILED]
+    found = histories(live, [first.id, second.id])
+    assert all(h.attempts == 0 and h.last_failure is None for h in found.values())
+    assert worker.failures_in_row == 0
+
+    # En pause : plus rien n'est lancé
+    await worker.tick()
+    assert len(query.prompts) == 2
+
+    # Un humain relance après avoir réglé la limite : les mêmes tickets sont traités
+    query.api_error = False
+    assert control.resume(live, "Alice")
+    settings = control.load(live)
+    assert settings.pause_reason is None and settings.pause_detail is None
+    await worker.tick()
+    await worker.drain()
+    assert sorted(query.tickets()) == sorted([first.id, second.id] * 2)
+    assert [r.status for r in runs(live, first)] == [RunStatus.FAILED, RunStatus.SUCCEEDED]
+
+
+@pytest.mark.anyio
+async def test_infrastructure_errors_never_abandon_a_ticket(
+    worker: Worker, query: TicketQuery, shop: Shop, live: sessionmaker[Session]
+) -> None:
+    """Plus de `MAX_ATTEMPTS` erreurs d'infrastructure : le ticket est relancé. Une vraie faute
+    de l'agent, elle, compte toujours (abandon après `MAX_ATTEMPTS`)."""
+    blocked, failing = tickets(shop, 2)
+    long_ago = datetime.now(UTC) - RETRY_DELAY * 2
+    for error_type in ("api_unavailable", "config", "sdk_error", "shopsim_unavailable"):
+        add_run(live, blocked.id, RunStatus.FAILED, error_type=error_type, finished_at=long_ago)
+    for _ in range(MAX_ATTEMPTS):
+        add_run(live, failing.id, RunStatus.FAILED, error_type="agent_error", finished_at=long_ago)
+
+    assert abandoned(live) == [failing.id]
+    await worker.tick()
+    await worker.drain()
+
+    assert query.tickets() == [blocked.id]
+    assert worker.queue is not None and worker.queue.skipped == {Skip.ABANDONED: 1}
+
+
+@pytest.mark.anyio
+async def test_shopsim_unreachable_during_a_run_waits_instead_of_pausing(
+    worker: Worker, shop: Shop, live: sessionmaker[Session]
+) -> None:
+    """ShopSim injoignable pendant une exécution : attente croissante (elle reprend seule),
+    pas de pause, et rien n'est compté contre le ticket."""
+    [ticket] = tickets(shop, 1)
+    run = new_run(live, AgentKind.SUPPORT, ticket.id, RunTrigger.LOOP, check_budget=False)
+
+    async def unreachable() -> AgentResult:
+        return AgentResult(error="ShopSim injoignable", error_type=ErrorType.SHOPSIM_UNAVAILABLE)
+
+    await worker.execute(run, unreachable)
+
+    assert not control.load(live).loop_paused
+    assert worker.waiting_until is not None and "ShopSim" in (worker.waiting_reason or "")
+    assert worker.failures_in_row == 0
+    assert histories(live, [ticket.id])[ticket.id].attempts == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("trigger", "error_type", "paused"),
+    [
+        (RunTrigger.MANUAL, ErrorType.API_UNAVAILABLE, True),
+        (RunTrigger.LOOP, ErrorType.CONFIG, True),
+        (RunTrigger.LOOP, ErrorType.SDK_ERROR, True),
+        # L'évaluation a son propre arrêt : elle ne touche jamais à la boucle du service
+        (RunTrigger.EVAL, ErrorType.API_UNAVAILABLE, False),
+        # Vraie faute de l'agent : pas de pause
+        (RunTrigger.LOOP, ErrorType.AGENT_ERROR, False),
+    ],
+)
+async def test_which_runs_pause_the_loop(
+    worker: Worker,
+    shop: Shop,
+    live: sessionmaker[Session],
+    trigger: RunTrigger,
+    error_type: ErrorType,
+    paused: bool,
+) -> None:
+    [ticket] = tickets(shop, 1)
+    run = new_run(live, AgentKind.SUPPORT, ticket.id, trigger, check_budget=False)
+
+    async def failing() -> AgentResult:
+        return AgentResult(error="échec", error_type=error_type)
+
+    await worker.execute(run, failing)
+
+    settings = control.load(live)
+    assert settings.loop_paused is paused
+    if paused:
+        assert settings.pause_reason is PauseReason.INFRA
+        assert settings.pause_detail == error_type.value
+
+
+def test_infra_pause_is_shown_on_the_control_page(
+    client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    control.pause(session_factory, None, PauseReason.INFRA, "api_unavailable")
+
+    page = client.get("/control").text
+    status = client.get("/control/status").json()
+
+    assert "En pause : erreur d'infrastructure (api_unavailable)" in page
+    assert "limite de dépense" in page
+    assert status["pause_reason"] == "infra" and status["pause_detail"] == "api_unavailable"
+
+
+def test_init_db_upgrades_an_existing_database(agentpilot_engine: Engine) -> None:
+    """Base d'avant ces colonnes : `init_db` les ajoute, et peut tourner deux fois."""
+    with agentpilot_engine.begin() as connection:
+        connection.execute(text(f"ALTER TABLE {SCHEMA}.runs DROP COLUMN error_type"))
+        connection.execute(text(f"ALTER TABLE {SCHEMA}.control DROP COLUMN pause_detail"))
+
+    init_db(agentpilot_engine)
+    init_db(agentpilot_engine)
+
+    with agentpilot_engine.connect() as connection:
+        columns = set(
+            connection.scalars(
+                text(
+                    "SELECT table_name || '.' || column_name FROM information_schema.columns "
+                    "WHERE table_schema = :schema"
+                ),
+                {"schema": SCHEMA},
+            )
+        )
+        reasons = set(
+            connection.scalars(
+                text(f"SELECT unnest(enum_range(NULL::{SCHEMA}.pause_reason))::text")
+            )
+        )
+    assert {"runs.error_type", "control.pause_detail"} <= columns
+    assert "infra" in reasons
 
 
 # --- Pause, page de pilotage -------------------------------------------------------------

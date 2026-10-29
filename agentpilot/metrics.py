@@ -45,7 +45,7 @@ WAITING = (PendingStatus.PENDING, PendingStatus.APPROVED)
 # Exécution d'une action approuvée : faite, devenue impossible, ou ShopSim injoignable
 EXECUTION_RESULTS = ("executed", "impossible", "unavailable")
 DECISIONS = (PendingStatus.APPROVED, PendingStatus.REJECTED)
-LOOP_STATES = ("running", "paused_manual", "paused_budget", "waiting")
+LOOP_STATES = ("running", "paused_manual", "paused_budget", "paused_infra", "waiting")
 # De 5 s à 30 min : une exécution de l'agent dure de quelques secondes à quelques minutes
 RUN_DURATION_BUCKETS = (5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0)
 
@@ -175,7 +175,11 @@ def oldest_pending(session: Session) -> datetime | None:
 
 def loop_state(status: ControlStatus, now: datetime) -> str:
     if status.loop_paused:
-        return "paused_budget" if status.pause_reason is PauseReason.BUDGET else "paused_manual"
+        if status.pause_reason is PauseReason.BUDGET:
+            return "paused_budget"
+        if status.pause_reason is PauseReason.INFRA:
+            return "paused_infra"
+        return "paused_manual"
     if status.waiting_until is not None and status.waiting_until > now:
         return "waiting"
     return "running"

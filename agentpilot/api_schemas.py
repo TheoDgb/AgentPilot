@@ -115,6 +115,8 @@ class ControlStatus(BaseModel):
 
     loop_paused: bool
     pause_reason: PauseReason | None
+    # Pause sur une erreur d'infrastructure : sa catégorie (`sdk_runner.ErrorType`)
+    pause_detail: str | None = None
     paused_by: str | None
     paused_at: datetime | None
     emergency_stop: bool

@@ -88,16 +88,29 @@ def _update(factory: sessionmaker[Session], **values: object) -> None:
         session.commit()
 
 
-def pause(factory: sessionmaker[Session], name: str | None, reason: PauseReason) -> None:
-    """Met la boucle en pause ; le nom est obligatoire sauf pour la pause automatique du budget.
-    Lève `InvalidInput`."""
+def pause(
+    factory: sessionmaker[Session],
+    name: str | None,
+    reason: PauseReason,
+    detail: str | None = None,
+) -> None:
+    """Met la boucle en pause ; le nom est obligatoire sauf pour une pause automatique (budget,
+    erreur d'infrastructure, dont `detail` donne la catégorie). Lève `InvalidInput`."""
     by = _name(name) if reason is PauseReason.MANUAL else None
-    _update(factory, loop_paused=True, pause_reason=reason, paused_by=by, paused_at=_now())
+    _update(
+        factory,
+        loop_paused=True,
+        pause_reason=reason,
+        pause_detail=detail,
+        paused_by=by,
+        paused_at=_now(),
+    )
     log_event(
         logger,
         "loop.paused",
-        logging.WARNING if reason is PauseReason.BUDGET else logging.INFO,
+        logging.INFO if reason is PauseReason.MANUAL else logging.WARNING,
         pause_reason=reason,
+        **({"error_type": detail} if detail else {}),
     )
 
 
@@ -108,7 +121,14 @@ def resume(factory: sessionmaker[Session], name: str) -> bool:
     with factory() as session:
         if not budget_allows(session):
             return False
-    _update(factory, loop_paused=False, pause_reason=None, paused_by=by, paused_at=_now())
+    _update(
+        factory,
+        loop_paused=False,
+        pause_reason=None,
+        pause_detail=None,
+        paused_by=by,
+        paused_at=_now(),
+    )
     log_event(logger, "loop.resumed")
     return True
 

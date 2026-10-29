@@ -327,6 +327,7 @@ def control_status(work: worker.Worker, factory: sessionmaker[Session]) -> Contr
     return ControlStatus(
         loop_paused=settings.loop_paused,
         pause_reason=settings.pause_reason,
+        pause_detail=settings.pause_detail,
         paused_by=settings.paused_by,
         paused_at=settings.paused_at,
         emergency_stop=settings.emergency_stop,

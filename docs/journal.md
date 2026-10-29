@@ -511,3 +511,35 @@ vraie panne (J4.4).
   oubliait une quatrième formulation (ticket 44, p1), sans laquelle ce ticket serait resté en
   échec.
 
+## Après J5 — Pause automatique du service sur une erreur d'infrastructure
+
+*2026-10-29*
+
+**Fait**
+- Défaut corrigé, noté en J5.3 comme limite connue : dans le service, une erreur
+  d'infrastructure (API Anthropic qui refuse : limite de dépense, clé refusée, panne) comptait
+  comme un échec du ticket. Après 3 échecs, le ticket était abandonné alors que l'agent n'y
+  était pour rien, et la boucle ne faisait que ralentir au lieu de se mettre en pause.
+- La catégorie de l'échec est gardée sur chaque exécution (`runs.error_type`). Une erreur de
+  `sdk_runner.INFRA_ERRORS` n'est jamais comptée contre le ticket : ni tentative, ni abandon,
+  ni délai de relance, ni échec d'affilée.
+- API Anthropic, configuration ou CLI (`worker.PAUSE_ERRORS`) : pause automatique de la boucle.
+  - Raison `infra`, catégorie dans `control.pause_detail`.
+  - Affichée sur `/control` et dans `GET /control/status`, état `paused_infra` de la métrique
+    `agentpilot_loop_state`, log `loop.paused`.
+  - Sur une exécution de la boucle comme sur une exécution manuelle ; jamais sur une exécution
+    d'évaluation, qui a son propre arrêt.
+  - Pas de relance automatique : une limite de dépense ou une clé refusée demande un humain,
+    comme dans l'évaluation. S'il relance trop tôt, la première exécution remet la boucle en
+    pause, sans échec compté.
+- ShopSim injoignable pendant une exécution : pas de pause, attente croissante, qui reprend
+  seule dès que ShopSim répond.
+- Colonnes `runs.error_type` et `control.pause_detail`, et valeur `infra` de `pause_reason`,
+  ajoutées à une base existante par `init_db` (pas de base à recréer). Les exécutions d'avant
+  (`error_type` NULL) restent comptées comme avant.
+
+**Bugs ou surprises** : aucun noté.
+
+**Leçons** : aucune notée pour l'instant (vérification en conditions réelles à faire : service
+lancé avec une clé invalide).
+

@@ -54,7 +54,8 @@
 <section>
   <h2>Boucle de traitement</h2>
   {% if status.loop_paused %}
-  <p class="state">En pause{% if status.pause_reason and status.pause_reason.value == "budget" %} : budget du jour atteint{% endif %}</p>
+  <p class="state">En pause{% if status.pause_reason and status.pause_reason.value == "budget" %} : budget du jour atteint{% elif status.pause_reason and status.pause_reason.value == "infra" %} : erreur d'infrastructure ({{ status.pause_detail }}){% endif %}</p>
+  {% if status.pause_reason and status.pause_reason.value == "infra" %}<p class="muted">Aucun ticket n'est compté en échec. Vérifier la clé et la limite de dépense de l'API Anthropic (ou la configuration de l'agent), puis relancer la boucle.</p>{% endif %}
   {% else %}
   <p class="state" style="color: var(--ok)">En marche</p>
   {% endif %}
