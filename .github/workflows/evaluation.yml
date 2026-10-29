@@ -1,0 +1,144 @@
+# Évaluation de l'agent Support (J5.4), lancée à la main seulement (onglet Actions, « Run workflow »).
+# ShopSim (horloge figée) + remise à zéro, `evals.run`, puis `evals.grade` avec les seuils de
+# `evals/thresholds.toml` : le workflow échoue si l'évaluation s'arrête avant la fin ou si un
+# seuil n'est pas atteint (nommé dans le log et le résumé). Résultats, rapport et logs en
+# artefacts.
+#
+# Sécurité :
+# - `ANTHROPIC_API_KEY` : secret de l'environnement GitHub `evaluation` (branche `main` seulement),
+#   donné à la seule étape `evals.run`. Un fork ne peut ni lancer ce workflow ni lire le secret.
+# - `CHAOS_TOKEN` : tiré au hasard à chaque lancement, masqué, écrit seulement dans `.env` (lu par
+#   Docker Compose pour ShopSim et par `evals.run`), jamais dans l'environnement : l'agent ne
+#   peut pas en hériter.
+# - Paramètres passés par `env:`, jamais interpolés dans un script, et vérifiés.
+# - Une seule évaluation à la fois ; actions épinglées par SHA de commit complet.
+name: Évaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickets:
+        description: "Tickets (ex. 1-5,19) : un par catégorie, actions en attente, refus et pièges par défaut"
+        type: string
+        required: true
+        default: "1,6,13,16,19,21,24,32,33,38,42"
+      passes:
+        description: "Nombre de passages (remise à zéro entre deux)"
+        type: choice
+        options: ["1", "2", "3"]
+        default: "1"
+      prompt:
+        description: "Version de la consigne de l'agent"
+        type: choice
+        options: ["v2", "v1"]
+        default: "v2"
+      max_budget_usd:
+        description: "Plafond de toute l'évaluation, en dollars"
+        type: string
+        required: true
+        default: "1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evaluation
+  cancel-in-progress: false
+
+jobs:
+  evaluation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: evaluation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.5"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Dépendances
+        run: |
+          uv venv
+          uv pip install -e ".[dev,mcp,agent]"
+
+      # La valeur refusée n'est jamais affichée : elle pourrait contenir une commande de workflow
+      - name: Paramètres
+        env:
+          TICKETS: ${{ inputs.tickets }}
+          BUDGET: ${{ inputs.max_budget_usd }}
+        run: |
+          [[ "$TICKETS" =~ ^[0-9,-]+$ ]] || { echo "::error::tickets invalides (ex. 1-5,19)"; exit 1; }
+          [[ "$BUDGET" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::budget invalide (ex. 1.5)"; exit 1; }
+
+      - name: Jeton Chaos
+        run: |
+          token="$(openssl rand -hex 32)"
+          echo "::add-mask::$token"
+          umask 077
+          printf 'CHAOS_TOKEN=%s\n' "$token" > .env
+
+      - name: ShopSim (horloge figée)
+        run: |
+          mkdir -p logs
+          env UID="$(id -u)" GID="$(id -g)" SHOPSIM_FREEZE_CLOCK=1 \
+            docker compose up -d --build --wait app
+
+      - name: Remise à zéro
+        run: .venv/bin/python -m agentpilot.reset --yes
+
+      - name: Évaluation
+        id: run
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TICKETS: ${{ inputs.tickets }}
+          PASSES: ${{ inputs.passes }}
+          PROMPT: ${{ inputs.prompt }}
+          BUDGET: ${{ inputs.max_budget_usd }}
+        run: >-
+          .venv/bin/python -m evals.run --tickets "$TICKETS" --passes "$PASSES"
+          --prompt "$PROMPT" --max-budget-usd "$BUDGET" --name ci --yes
+
+      # Même après une évaluation arrêtée : le rapport dit ce qui a été fait
+      - name: Notation et seuils
+        if: always() && steps.run.outcome != 'skipped'
+        run: |
+          shopt -s nullglob
+          files=(evals/results/*.json)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::aucun fichier de résultats"
+            exit 1
+          fi
+          set +e
+          .venv/bin/python -m evals.grade "${files[@]}" --out report.md \
+            --thresholds evals/thresholds.toml
+          code=$?
+          set -e
+          if [ -f report.md ]; then cat report.md >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$code"
+
+      - name: Artefacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evaluation-${{ github.run_id }}
+          # Logs JSON sur liste blanche (ni secret ni texte de client) ; jamais chaos.jsonl
+          path: |
+            evals/results/*.json
+            report.md
+            logs/agentpilot.jsonl
+            logs/mcp.jsonl
+            logs/shopsim.jsonl
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Arrêt
+        if: always()
+        run: |
+          docker compose down -v || true
+          rm -f .env

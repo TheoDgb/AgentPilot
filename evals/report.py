@@ -14,6 +14,7 @@ from evals import grading
 from evals.grading import Criterion, Score, TicketGrade, Verdict
 from evals.judge import JudgeSummary
 from evals.results import EvalReport
+from evals.thresholds import Outcome
 
 CRITERIA_LABELS = {
     Criterion.CATEGORY: "Bonne catégorie",
@@ -73,6 +74,16 @@ def label(index: int, passes: int) -> str:
 
 
 @dataclass(frozen=True)
+class Gate:
+    """Seuils de réussite vérifiés (`evals.grade --thresholds`)."""
+
+    path: str
+    sha256: str
+    outcomes: list[Outcome]
+    failures: list[str]
+
+
+@dataclass(frozen=True)
 class Versions:
     """Empreintes des règles de notation et de la vérité terrain utilisées."""
 
@@ -86,12 +97,15 @@ def render(
     judge: JudgeSummary | None = None,
     graded_at: datetime,
     versions: Versions,
+    gate: Gate | None = None,
 ) -> str:
     first = passes[0].report.summary
     all_grades = [g for p in passes for g in p.grades]
     count = len(passes)
     lines = [f"# Évaluation « {first.name} »", ""]
     lines += _header(passes, graded_at, versions)
+    if gate is not None:
+        lines += _gate(gate)
     lines += _overall(passes, all_grades)
     lines += _criteria(all_grades)
     lines += _categories(all_grades)
@@ -139,6 +153,27 @@ def _header(passes: Sequence[Pass], graded_at: datetime, versions: Versions) -> 
         ),
         "",
     ]
+
+
+def _gate(gate: Gate) -> list[str]:
+    verdict = "**atteints**" if not gate.failures else "**non atteints**"
+    lines = [
+        "## Seuils de réussite",
+        "",
+        f"Seuils {verdict} (`{gate.path}`, empreinte `{gate.sha256[:12]}`).",
+        "",
+        "| Seuil | Atteint | Exigé | |",
+        "|---|---|---|---|",
+    ]
+    for o in gate.outcomes:
+        rate = "—" if o.score.rate is None else f"{o.score.rate * 100:.0f} %"
+        lines.append(
+            f"| {o.name} | {o.score.passed} / {o.score.total} ({rate}) | "
+            f"{o.required * 100:.0f} % | {'✓' if o.met else '✗'} |"
+        )
+    lines.append("")
+    lines += [f"- {f}" for f in gate.failures]
+    return [*lines, ""] if gate.failures else lines
 
 
 def _overall(passes: Sequence[Pass], grades: list[TicketGrade]) -> list[str]:

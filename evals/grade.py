@@ -7,6 +7,9 @@ Plusieurs fichiers : les passages d'une même configuration (même nom, mêmes t
 consigne), pour la variabilité. Critères vérifiés par du code (`evals/grading.py`) ; juge IA
 facultatif pour le ton et la clarté (`--judge`, `evals/judge.py`), hors score, coût affiché.
 
+Seuils de réussite (`--thresholds evals/thresholds.toml`, J5.4) : vérifiés après la notation,
+section dans le rapport ; code de sortie 3 et seuil nommé s'il n'est pas atteint.
+
 Rapport Markdown dans `docs/evals/<date>-<nom>.md` (versionné ; même fichier si l'on renote les
 mêmes résultats). Écran : score et chemin du rapport ; logs JSON dans `logs/` seulement.
 """
@@ -25,8 +28,8 @@ from pydantic import ValidationError
 
 from agentpilot.sdk_runner import QueryFn, sdk_query
 from agentpilot.support_agent import AgentRunError
-from evals import grading, judge
-from evals.report import Pass, Versions, percent, render, usd
+from evals import grading, judge, thresholds
+from evals.report import Gate, Pass, Versions, percent, render, usd
 from evals.results import EvalReport, EvalSummary, TicketStatus, infra_failure
 from evals.run import GROUND_TRUTH, REPO_ROOT, Refused, budget, check_environment
 
@@ -101,6 +104,11 @@ def parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("results", nargs="+", type=Path, help="fichier(s) de evals/results/")
     parser.add_argument("--out", type=Path, help="rapport (docs/evals/<date>-<nom>.md par défaut)")
+    parser.add_argument(
+        "--thresholds",
+        type=Path,
+        help="seuils de réussite (evals/thresholds.toml) : code 3 s'ils ne sont pas atteints",
+    )
     parser.add_argument("--judge", action="store_true", help="juge IA du ton et de la clarté")
     parser.add_argument(
         "--judge-model", default=judge.DEFAULT_MODEL, help=f"({judge.DEFAULT_MODEL} par défaut)"
@@ -123,19 +131,20 @@ def main(
     environ: Mapping[str, str] = os.environ,
     configure_logs: bool = True,
 ) -> int:
-    """0 : rapport écrit ; 1 : refusé."""
+    """0 : rapport écrit ; 1 : refusé ; 3 : rapport écrit, seuil de réussite non atteint."""
     args = parser().parse_args(argv)
     try:
         if args.judge:
             check_environment(environ)
         truths = grading.load_truths(ground_truth)
+        limits = thresholds.load(args.thresholds) if args.thresholds else None
         passes = []
         for path, report in load(args.results):
             try:
                 passes.append(Pass(path, report, grading.grade_report(report, truths)))
             except ValueError as exc:
                 raise Refused(f"{path.name} : {exc}") from None
-    except Refused as exc:
+    except (Refused, thresholds.InvalidThresholds, OSError) as exc:
         print(f"Notation refusée : {exc}", file=sys.stderr)
         return 1
     if configure_logs:
@@ -167,7 +176,13 @@ def main(
         rules_sha256=grading.rules_sha256(),
         truth_sha256=hashlib.sha256(ground_truth.read_bytes()).hexdigest(),
     )
-    text = render(passes, judge=summary, graded_at=datetime.now(UTC), versions=versions)
+    gate = None
+    if limits is not None:
+        outcomes, failures = thresholds.check(
+            [p.report for p in passes], [p.grades for p in passes], limits
+        )
+        gate = Gate(str(args.thresholds), limits.sha256, outcomes, failures)
+    text = render(passes, judge=summary, graded_at=datetime.now(UTC), versions=versions, gate=gate)
     out.write_text(text, encoding="utf-8")
     score = grading.overall([g for p in passes for g in p.grades])
     print(f"Score : {score.passed} / {score.total} tickets réussis ({percent(score)})")
@@ -177,6 +192,12 @@ def main(
         print(f"Juge IA : {usd(summary.cost_usd)} ({len(summary.items)} réponse(s) jugée(s))")
     print(f"Version de la notation : {versions.rules_sha256[:12]}")
     print(f"Rapport : {out}")
+    if gate is not None:
+        for failure in gate.failures:
+            print(failure, file=sys.stderr)
+        if gate.failures:
+            return 3
+        print("Seuils de réussite atteints")
     return 0
 
 

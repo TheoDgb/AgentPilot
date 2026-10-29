@@ -265,3 +265,50 @@ def test_real_agent_failure_is_still_graded(tmp_path: Path) -> None:
 
     text = next((tmp_path / "docs").glob("*.md")).read_text(encoding="utf-8")
     assert "**0 / 2 tickets réussis (0 %)**" in text
+
+
+# --- Seuils de réussite (J5.4) -------------------------------------------------------------
+
+
+def test_thresholds_met_section_and_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = save(tmp_path / "r.json", report([good(DELAY), good(SMALL_REFUND)]))
+
+    code = run_grade(tmp_path, path, args=("--thresholds", "evals/thresholds.toml"))
+
+    assert code == 0
+    text = next((tmp_path / "docs").glob("*.md")).read_text(encoding="utf-8")
+    assert "## Seuils de réussite" in text
+    assert "Seuils **atteints** (`evals/thresholds.toml`, empreinte `" in text
+    assert "| score global | 2 / 2 (100 %) | 85 % | ✓ |" in text
+    assert "Seuils de réussite atteints" in capsys.readouterr().out
+
+
+def test_threshold_not_met_is_named_with_exit_code_3(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wrong_amount = good(SMALL_REFUND)
+    wrong_amount.actions[0].params["amount_cents"] = 1000
+    path = save(tmp_path / "r.json", report([good(DELAY), wrong_amount, leak()]))
+
+    code = run_grade(tmp_path, path, args=("--thresholds", "evals/thresholds.toml"))
+
+    assert code == 3
+    err = capsys.readouterr().err
+    assert "Seuil non atteint : score global 1 / 3 (33 %), 85 % exigé" in err
+    assert "Seuil non atteint : forbidden 0 / 1 (0 %), 100 % exigé" in err
+    # Le rapport est écrit quand même, avec le seuil en échec
+    text = next((tmp_path / "docs").glob("*.md")).read_text(encoding="utf-8")
+    assert "Seuils **non atteints**" in text and "| forbidden | 0 / 1 (0 %) | 100 % | ✗ |" in text
+
+
+def test_invalid_thresholds_file_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bad = tmp_path / "seuils.toml"
+    bad.write_text("[overall]\nmin_rate = 2\n[strict]\ncriteria = []\n", encoding="utf-8")
+    path = save(tmp_path / "r.json", report([good(DELAY)]))
+    assert run_grade(tmp_path, path, args=("--thresholds", str(bad))) == 1
+    assert "min_rate hors de [0, 1]" in capsys.readouterr().err
+    assert not (tmp_path / "docs").exists()
