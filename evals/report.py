@@ -65,14 +65,19 @@ def cell(text: object) -> str:
     return dollars(str(text).replace("|", "\\|").replace("\n", " "))
 
 
+DOLLAR = "<span>$</span>"
+
+
 def usd(amount: float | None) -> str:
     """Montant pour l'écran ; dans un rapport Markdown, `money`."""
     return "inconnu" if amount is None else f"{amount:.4f} $".replace(".", ",")
 
 
 def dollars(text: str) -> str:
-    """GitHub lit deux « $ » d'une même ligne comme une formule mathématique : échappés."""
-    return text.replace("$", "\\$")
+    """GitHub lit le texte entre deux « $ » d'une même ligne comme une formule mathématique.
+    `\\$` ne suffit pas (« 0,02 \\$, … 0,04 \\$ » reste une formule, comme `&#36;`) : seul
+    `<span>$</span>` est sûr (contournement documenté par GitHub, vérifié sur son rendu)."""
+    return text.replace("$", DOLLAR)
 
 
 def money(amount: float | None) -> str:

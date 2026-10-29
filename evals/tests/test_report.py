@@ -1,6 +1,5 @@
 """Commande `python -m evals.grade` et rapport Markdown, sur des résultats inventés."""
 
-import re
 from pathlib import Path
 
 import pytest
@@ -110,19 +109,54 @@ def test_tickets_never_launched_do_not_flag_unrecorded_reads(tmp_path: Path) -> 
     assert "Lectures d'outils non enregistrées" not in text
 
 
+def bare_dollars(text: str) -> list[str]:
+    """Lignes du rapport avec un « $ » hors de `<span>$</span>` : formule pour GitHub."""
+    return [line for line in text.splitlines() if "$" in line.replace(report_module.DOLLAR, "")]
+
+
 def test_dollars_are_escaped_for_github_math(tmp_path: Path) -> None:
     """GitHub lit le texte entre deux « $ » d'une ligne comme une formule (« l e p l u s
-    c h e r ») : chaque « $ » du rapport est échappé, y compris dans un texte de tableau."""
-    path = save(tmp_path / "r.json", report([good(DELAY), good(SMALL_REFUND)]))
-    assert run_grade(tmp_path, path) == 0
+    c h e r ») ; `\\$` ne suffit pas devant une virgule. Chaque « $ » de tout le rapport est
+    dans `<span>$</span>` : coût total, par ticket, juge, deux passages, et un motif d'échec
+    qui cite une phrase avec un « $ »."""
+    unfaithful = good(LARGE_REFUND)
+    unfaithful.replies = ["Nous avons remboursé 80 $, et la commande n°112 est close." + SIGNATURE]
+    first = save(tmp_path / "p1.json", report([good(DELAY), unfaithful], pass_index=1, passes=2))
+    second = save(
+        tmp_path / "p2.json", report([good(DELAY), good(LARGE_REFUND)], pass_index=2, passes=2)
+    )
+    answer = {"tone": 3, "clarity": 4, "justification": "Coûte 5 $, puis 6 $."}
+    query = FakeQuery(result_message(answer, total_cost_usd=0.002))
+
+    code = run_grade(
+        tmp_path,
+        first,
+        second,
+        args=("--judge",),
+        query=query,
+        environ={"ANTHROPIC_API_KEY": "sk-ant"},
+    )
+
+    assert code == 0
     text = next((tmp_path / "docs").glob("*.md")).read_text(encoding="utf-8")
-    assert "le plus cher ticket" in text
-    assert "0,0300 \\$" in text
-    unescaped = [line for line in text.splitlines() if re.search(r"(?<!\\)\$", line)]
-    assert unescaped == []
-    assert report_module.cell("10 $ | 5 $") == "10 \\$ \\| 5 \\$"
+    # Les lignes à montants sont bien là, et celle du premier lancement en CI
+    for expected in (
+        "- Coût total de l'évaluation : 0,1200 <span>$</span>",
+        "- Par ticket : moyenne 0,0300 <span>$</span>, le plus cher ticket",
+        "- Juge IA : 0,0080 <span>$</span>",
+        "80 <span>$</span>, et la commande",
+    ):
+        assert expected in text, expected
+    assert bare_dollars(text) == []
+    assert report_module.cell("10 $, | 5 $") == "10 <span>$</span>, \\| 5 <span>$</span>"
     # L'écran garde le « $ » tel quel
     assert report_module.usd(0.03) == "0,0300 $"
+
+
+def test_bare_dollar_check_catches_the_old_escape() -> None:
+    """Garde-fou du test : la ligne cassée du premier lancement en CI serait refusée."""
+    broken = "- Par ticket : moyenne 0,0263 \\$, le plus cher ticket 6 (0,0486 \\$)"
+    assert bare_dollars(broken) == [broken]
 
 
 def test_regrading_the_same_results_writes_the_same_report(tmp_path: Path) -> None:
@@ -204,7 +238,7 @@ def test_judge_section_with_cost_and_low_scores(
     text = next((tmp_path / "docs").glob("*.md")).read_text(encoding="utf-8")
     assert "## Juge IA : ton et clarté (facultatif)" in text
     assert "jamais compté dans le score global" in text
-    assert "coût 0,0040 \\$" in text
+    assert "coût 0,0040 <span>$</span>" in text
     assert "Moyennes sur 5 : ton 3,0, clarté 4,0" in text
     assert "| 1 | p1 | 3 | 4 | Un peu sec. |" in text
     assert "Juge IA : 0,0040 $ (2 réponse(s) jugée(s))" in capsys.readouterr().out

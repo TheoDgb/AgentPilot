@@ -10,6 +10,7 @@ from claude_agent_sdk import ClaudeAgentOptions
 from agentpilot.tests.conftest import FakeQuery, result_message
 from evals import compare
 from evals.compare_report import signed
+from evals.report import DOLLAR
 from evals.results import EvalReport, EvalStatus
 from evals.tests.builders import (
     DELAY,
@@ -161,7 +162,9 @@ def test_judge_both_series_in_the_same_run(
     assert query.calls == 6
     text = next((tmp_path / "docs").glob("*.md")).read_text(encoding="utf-8")
     assert "## Juge IA : ton et clarté (facultatif)" in text
-    assert "Juge IA (les deux séries) : 0,0120 \\$." in text
+    assert "Juge IA (les deux séries) : 0,0120 <span>$</span>." in text
+    # Aucun « $ » hors de `<span>$</span>` : sinon GitHub y lit une formule
+    assert [line for line in text.splitlines() if "$" in line.replace(DOLLAR, "")] == []
     assert "| Ton | 2,7 | 3,3 | +0,7 | non significatif (1 ↑ / 0 ↓, p = 1,000) |" in text
     # Ticket 33 : réponse fautive de A, escalade de B
     assert "| 33 | 2,0 → 4,0 | 4,0 → 4,0 |" in text
