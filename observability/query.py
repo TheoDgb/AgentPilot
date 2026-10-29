@@ -1,7 +1,10 @@
-"""Lecture des logs JSON, base du futur outil `search_logs` de l'agent Ops (J6).
+"""Lecture des logs JSON, base des outils de logs du serveur MCP Ops (`mcp_server/ops/`).
 
 Le service se choisit dans une liste fixe (`SERVICES`), jamais par un chemin : `chaos.jsonl`,
-et tout autre fichier, restent hors de portée.
+et tout autre fichier, restent hors de portée ; un lien symbolique est refusé.
+
+Avec une fenêtre (`since`), le fichier est lu depuis la fin et la lecture s'arrête une fois la
+fenêtre passée (à `ORDER_MARGIN` près) : les logs ne sont jamais découpés et grossissent vite.
 
 En ligne de commande, les trois services fusionnés par heure :
 `python -m observability.query --trace <trace_id>` (voir `--help`).
@@ -9,36 +12,90 @@ En ligne de commande, les trois services fusionnés par heure :
 
 import argparse
 import json
+import os
 import sys
 from collections import deque
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 SERVICES = ("shopsim", "mcp", "agentpilot")
 LEVELS = ("debug", "info", "warning", "error", "critical")
 MAX_LIMIT = 200
+# Plusieurs processus écrivent dans un même fichier (un serveur MCP par exécution) : l'ordre des
+# heures n'y est pas strict. La lecture depuis la fin continue jusqu'à cette marge avant `since`
+ORDER_MARGIN = timedelta(seconds=60)
+BLOCK_SIZE = 64 * 1024
 
 
 def log_file(log_dir: Path, service: str) -> Path:
     if service not in SERVICES:
         raise ValueError(f"service inconnu : {service!r} (attendu : {', '.join(SERVICES)})")
-    return log_dir / f"{service}.jsonl"
+    path = log_dir / f"{service}.jsonl"
+    if path.is_symlink():
+        raise ValueError(f"fichier de logs refusé (lien symbolique) : {service}")
+    return path
+
+
+def _parse(raw: bytes | str) -> dict[str, Any] | None:
+    try:
+        line = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        # Ligne en cours d'écriture par un autre processus
+        return None
+    return line if isinstance(line, dict) and isinstance(line.get("ts"), str) else None
+
+
+def _open(path: Path, mode: str) -> IO[Any]:
+    # Sans suivre de lien : un lien posé entre la vérification et l'ouverture est refusé aussi
+    return os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), mode, encoding=None)
 
 
 def _lines(path: Path) -> Iterator[dict[str, Any]]:
     if not path.is_file():
         return
-    with path.open(encoding="utf-8") as file:
+    with _open(path, "rb") as file:
         for raw in file:
-            try:
-                line = json.loads(raw)
-            except json.JSONDecodeError:
-                # Ligne en cours d'écriture par un autre processus
-                continue
-            if isinstance(line, dict):
+            line = _parse(raw)
+            if line is not None:
                 yield line
+
+
+def _reversed_raw(path: Path) -> Iterator[bytes]:
+    """Lignes brutes du fichier, de la dernière à la première, lues par blocs."""
+    with _open(path, "rb") as file:
+        position = file.seek(0, os.SEEK_END)
+        rest = b""
+        while position > 0:
+            size = min(BLOCK_SIZE, position)
+            position -= size
+            file.seek(position)
+            parts = (file.read(size) + rest).split(b"\n")
+            rest = parts[0]
+            for raw in reversed(parts[1:]):
+                if raw.strip():
+                    yield raw
+        if rest.strip():
+            yield rest
+
+
+def recent_lines(log_dir: Path, service: str, since: datetime) -> Iterator[dict[str, Any]]:
+    """Lignes depuis `since`, de la plus récente à la plus ancienne ; la lecture s'arrête une
+    fois passée `since - ORDER_MARGIN`."""
+    path = log_file(log_dir, service)
+    if not path.is_file():
+        return
+    stop = since - ORDER_MARGIN
+    for raw in _reversed_raw(path):
+        line = _parse(raw)
+        if line is None:
+            continue
+        at = datetime.fromisoformat(line["ts"])
+        if at < stop:
+            return
+        if at >= since:
+            yield line
 
 
 def read_logs(
@@ -54,27 +111,37 @@ def read_logs(
 ) -> list[dict[str, Any]]:
     """Dernières lignes correspondant aux filtres (au plus `MAX_LIMIT`), dans l'ordre du fichier.
 
-    `level` : niveau minimal ; `status_min` : code HTTP minimal (500 = erreurs serveur).
+    `level` : niveau minimal ; `status_min` : code HTTP minimal (500 = erreurs serveur). Avec
+    `since`, lecture depuis la fin du fichier (`recent_lines`).
     """
     path = log_file(log_dir, service)
     if level is not None and level not in LEVELS:
         raise ValueError(f"niveau inconnu : {level!r}")
     minimum = LEVELS.index(level) if level is not None else 0
     limit = max(1, min(limit, MAX_LIMIT))
+
+    def keep(line: dict[str, Any]) -> bool:
+        if line.get("level") in LEVELS and LEVELS.index(line["level"]) < minimum:
+            return False
+        if trace_id is not None and line.get("trace_id") != trace_id:
+            return False
+        if route is not None and line.get("route") != route:
+            return False
+        status = line.get("status")
+        return status_min is None or (isinstance(status, int) and status >= status_min)
+
+    if since is not None:
+        newest: list[dict[str, Any]] = []
+        for line in recent_lines(log_dir, service, since):
+            if keep(line):
+                newest.append(line)
+                if len(newest) == limit:
+                    break
+        return newest[::-1]
     found: deque[dict[str, Any]] = deque(maxlen=limit)
     for line in _lines(path):
-        if since is not None and datetime.fromisoformat(line["ts"]) < since:
-            continue
-        if line.get("level") in LEVELS and LEVELS.index(line["level"]) < minimum:
-            continue
-        if trace_id is not None and line.get("trace_id") != trace_id:
-            continue
-        if route is not None and line.get("route") != route:
-            continue
-        status = line.get("status")
-        if status_min is not None and not (isinstance(status, int) and status >= status_min):
-            continue
-        found.append(line)
+        if keep(line):
+            found.append(line)
     return list(found)
 
 

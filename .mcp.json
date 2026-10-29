@@ -6,6 +6,17 @@
       "env": {
         "SHOPSIM_URL": "http://localhost:8000"
       }
+    },
+    "ops": {
+      "command": ".venv/bin/python",
+      "args": ["-m", "mcp_server.ops.server"],
+      "env": {
+        "LOG_DIR": "logs",
+        "PROMETHEUS_URL": "http://localhost:9090",
+        "AGENTPILOT_URL": "http://localhost:8001",
+        "SHOPSIM_URL": "http://localhost:8000",
+        "ALERTMANAGER_URL": "http://localhost:9093"
+      }
     }
   }
 }

@@ -16,12 +16,8 @@ Logs JSON sur stderr et dans `$LOG_DIR/mcp.jsonl` : une ligne `tool.call` par ap
 L'agent ne peut pas la choisir : elle vient de l'environnement, pas des arguments.
 """
 
-import functools
 import logging
 import os
-import time
-from collections.abc import Awaitable, Callable
-from typing import Any
 
 # Parent lu avant les imports lents : s'il meurt pendant ceux-ci, le serveur le voit quand même
 PARENT_PID = os.getppid()
@@ -29,11 +25,13 @@ PARENT_PID = os.getppid()
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 from mcp_types import ToolAnnotations  # noqa: E402
 
+from mcp_server import tool_logging  # noqa: E402
 from mcp_server.action_tools import ACTION_TOOLS  # noqa: E402
 from mcp_server.parent_watch import exit_with_parent  # noqa: E402
 from mcp_server.read_tools import READ_TOOLS  # noqa: E402
+from mcp_server.tool_logging import Tool  # noqa: E402
 from observability import trace  # noqa: E402
-from observability.logs import configure, error_type, log_event  # noqa: E402
+from observability.logs import configure, log_event  # noqa: E402
 
 ACTIONS_ENV = "SHOPSIM_MCP_ACTIONS"
 LOG_DIR_ENV = "LOG_DIR"
@@ -59,39 +57,9 @@ READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True)
 ACTION = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True)
 
 
-Tool = Callable[..., Awaitable[Any]]
-
-
 def logged(tool: Tool) -> Tool:
-    """Même outil (nom, description, paramètres), avec une ligne `tool.call` par appel."""
-
-    @functools.wraps(tool)
-    async def wrapper(**arguments: Any) -> Any:  # noqa: ANN401
-        fields = {key: arguments[key] for key in LOGGED_ARGUMENTS if key in arguments}
-        start = time.perf_counter()
-
-        def log_call(outcome: str, level: int, **extra: Any) -> None:  # noqa: ANN401
-            duration_ms = round((time.perf_counter() - start) * 1000)
-            log_event(
-                logger,
-                "tool.call",
-                level,
-                tool=tool.__name__,
-                outcome=outcome,
-                duration_ms=duration_ms,
-                **fields,
-                **extra,
-            )
-
-        try:
-            result = await tool(**arguments)
-        except Exception as exc:
-            log_call("error", logging.WARNING, error_type=error_type(exc))
-            raise
-        log_call("ok", logging.INFO)
-        return result
-
-    return wrapper
+    """Même outil, avec une ligne `tool.call` par appel (`mcp_server.tool_logging`)."""
+    return tool_logging.logged(tool, logger, {key: key for key in LOGGED_ARGUMENTS})
 
 
 def build_server(enable_actions: bool) -> MCPServer:

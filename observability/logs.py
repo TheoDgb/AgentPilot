@@ -67,6 +67,13 @@ FIELDS = frozenset(
         # Alertes reçues d'Alertmanager (nom de la règle, gravité)
         "alertname",
         "severity",
+        # Serveur MCP Ops : arguments des outils (listes fermées et nombres seulement)
+        "log_service",
+        "log_level",
+        "status_filter",
+        "since_minutes",
+        "metric",
+        "window",
         # Générateur de trafic (compte rendu périodique) : requêtes par « méthode gabarit code »
         "requests",
         "dropped",

@@ -11,9 +11,9 @@ from typing import Any
 
 import pytest
 
-from observability import logs, trace
+from observability import logs, query, trace
 from observability.logs import configure, configure_isolated, log_event, register_secret
-from observability.query import main, read_logs
+from observability.query import main, read_logs, recent_lines
 
 REQUIRED = {"ts", "level", "service", "event", "trace_id", "logger"}
 TRACE = "4bf92f3577b34da6a3ce929d0e0e4736"
@@ -234,6 +234,61 @@ def test_read_logs_accepts_only_the_fixed_list_of_services(tmp_path: Path, name:
 
     with pytest.raises(ValueError, match="service inconnu"):
         read_logs(tmp_path, name)
+
+
+def test_reading_from_the_end_gives_the_same_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fenêtre lue depuis la fin (petits blocs : des lignes coupées entre deux blocs) : mêmes
+    lignes, dans le même ordre, que la lecture complète filtrée."""
+    monkeypatch.setattr(query, "BLOCK_SIZE", 97)
+    entries = [
+        entry(90 - n, event="http.request", status=500 if n % 7 == 0 else 200, n=n)
+        for n in range(90)
+    ]
+    write(tmp_path / "shopsim.jsonl", *entries)
+    since = datetime(2026, 7, 6, 12, tzinfo=UTC) - timedelta(minutes=40)
+
+    tail = read_logs(tmp_path, "shopsim", since=since, limit=200)
+    full = [e for e in read_logs(tmp_path, "shopsim", limit=200) if e["ts"] >= since.isoformat()]
+
+    assert [e["n"] for e in tail] == [e["n"] for e in full] == list(range(50, 90))
+    assert [e["n"] for e in read_logs(tmp_path, "shopsim", since=since, limit=3)] == [87, 88, 89]
+    assert [e["n"] for e in read_logs(tmp_path, "shopsim", since=since, status_min=500)] == [
+        56,
+        63,
+        70,
+        77,
+        84,
+    ]
+
+
+def test_reading_from_the_end_keeps_slightly_unordered_lines(tmp_path: Path) -> None:
+    """Plusieurs serveurs MCP écrivent dans `mcp.jsonl` : une ligne un peu plus ancienne écrite
+    après une plus récente reste lue tant qu'elle est dans la marge (`ORDER_MARGIN`)."""
+    write(
+        tmp_path / "mcp.jsonl",
+        entry(20, event="old"),
+        entry(9, event="in_window"),
+        entry(11, event="just_before_window"),  # écrite après, mais avant la fenêtre
+        entry(8, event="late_but_in_window"),
+        entry(10, event="written_late"),  # dans la fenêtre, après une ligne plus récente
+    )
+    since = datetime(2026, 7, 6, 12, tzinfo=UTC) - timedelta(minutes=10)
+
+    events = [e["event"] for e in recent_lines(tmp_path, "mcp", since)]
+
+    assert events == ["written_late", "late_but_in_window", "in_window"]
+
+
+def test_a_symbolic_link_is_never_read(tmp_path: Path) -> None:
+    write(tmp_path / "chaos.jsonl", entry(1, event="http.request", path="/chaos/db_errors"))
+    (tmp_path / "shopsim.jsonl").symlink_to(tmp_path / "chaos.jsonl")
+
+    with pytest.raises(ValueError, match="lien symbolique"):
+        read_logs(tmp_path, "shopsim")
+    with pytest.raises(ValueError, match="lien symbolique"):
+        list(recent_lines(tmp_path, "shopsim", datetime(2026, 7, 6, tzinfo=UTC)))
 
 
 # --- Ligne de commande --------------------------------------------------------------------
