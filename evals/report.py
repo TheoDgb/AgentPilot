@@ -35,8 +35,10 @@ LIMITS = """\
   à dire au client (dans la réponse), ou de justification (dans la réponse, le motif
   d'escalade ou `facts_used`, avec une liste fermée d'équivalents comme `days_since_delivery`),
   ou non notés (`UNGRADED` : ni utiles au client ni fondement de la décision).
-- `facts_used` vérifié dans les réponses d'outils gardées au journal ; une réponse tronquée
-  (plus de 4 000 caractères) ne compte pas contre l'agent. Fichier de résultats d'avant J5.2,
+- `facts_used` vérifié dans les réponses d'outils gardées au journal ; une réponse non gardée
+  en entier ne compte pas contre l'agent (réponse tronquée au-delà de 4 000 caractères, erreur
+  d'une lecture en échec, réponse d'une action exécutée). Jours depuis la livraison comptés
+  comme l'outil (jours entamés). Fichier de résultats d'avant J5.2,
   sans lectures enregistrées : faits cités admis sans vérification (signalé dans l'en-tête).
 - Non noté (la vérité terrain ne le prévoit pas) : résoudre ou non le ticket, le nombre de
   réponses, le texte du motif d'escalade (hors faits), une escalade en plus d'un remboursement

@@ -316,10 +316,14 @@ def test_escalation_justification_in_the_reason_not_the_reply() -> None:
     )
 
 
-# Version figée de la notation, utilisée telle quelle pour l'évaluation complète (J5.2). Toute
-# correction des règles est une nouvelle version : mettre à jour cette empreinte, et noter le
-# changement et sa raison dans le journal (CLAUDE.md) ; le rapport donne la version utilisée.
-FROZEN_RULES_SHA256 = "fad6fdab4512571084a4054be7480ab26414408be60653ece73fa694b927fc4b"
+# Version figée de la notation. Toute correction des règles est une nouvelle version : mettre à
+# jour cette empreinte, et noter le changement et sa raison dans le journal (CLAUDE.md) ; le
+# rapport donne la version utilisée. Versions :
+# - fad6fdab4512 : évaluation complète « baseline » (J5.2), rapport de référence ;
+# - 46f32f478699 : erreurs de notation relevées sur « baseline » (jours comptés comme l'outil,
+#   faits cités d'une action exécutée ou d'une lecture en échec, « colis pas retrouvé »,
+#   « hors délai de 30 jours »).
+FROZEN_RULES_SHA256 = "46f32f47869924ceede0da4861cbd5dd57b9cf46e4fba0c25a2752bce27dd305"
 
 
 def test_rules_version_is_frozen() -> None:
@@ -455,4 +459,66 @@ def test_refusal_date_said_as_days_ago_passes_but_not_a_wrong_count() -> None:
     bad = result(LATE_REFUND, decision(LATE_REFUND, wrong), [reply(21, wrong)])
     assert reason(grade_ticket(bad, LATE_REFUND), Criterion.FACTS) == (
         "fait(s) manquant(s) : delivered_at"
+    )
+
+
+def test_morning_delivery_counted_like_the_tool() -> None:
+    """Vrai cas (« baseline », ticket 17) : livré un matin, l'outil compte un jour de plus que le
+    calendrier ; le nombre cité par l'agent est le bon."""
+    ok = good(SMALL_REFUND)
+    assert ok.decision is not None
+    ok.decision.facts_used = [UsedFact(**used("get_shipment", "days_since_delivery", 22))]
+    morning = read(
+        "get_shipment",
+        status="delivered",
+        delivered_at="2026-06-15T09:00:00Z",
+        days_since_delivery=22,
+    )
+    ok.reads = [morning]
+    assert verdicts(grade_ticket(ok, SMALL_REFUND))[Criterion.JUSTIFIED] is Verdict.PASS
+    # Négatif : le compte du calendrier, faux pour une livraison du matin
+    bad = good(SMALL_REFUND)
+    assert bad.decision is not None
+    bad.decision.facts_used = [UsedFact(**used("get_shipment", "days_since_delivery", 21))]
+    bad.reads = [
+        morning.model_copy(update={"response": {**morning.response, "days_since_delivery": 21}})
+    ]
+    assert reason(grade_ticket(bad, SMALL_REFUND), Criterion.JUSTIFIED) == (
+        "justification manquante : delivered_at"
+    )
+
+
+def test_cited_response_of_the_executed_refund_is_not_held_against_the_agent() -> None:
+    ok = good(SMALL_REFUND)
+    assert ok.decision is not None
+    ok.decision.facts_used.append(UsedFact(**used("refund_order", "status", "done")))
+    assert verdicts(grade_ticket(ok, SMALL_REFUND))[Criterion.JUSTIFIED] is Verdict.PASS
+    # Négatif : remboursement en attente d'un humain, rien n'a pu répondre « done »
+    bad = good(LARGE_REFUND)
+    assert bad.decision is not None
+    bad.decision.facts_used.append(UsedFact(**used("refund_order", "status", "done")))
+    assert reason(grade_ticket(bad, LARGE_REFUND), Criterion.JUSTIFIED) == (
+        "cité(s) sans réponse d'outil correspondante : refund_order.status"
+    )
+
+
+def test_out_of_refund_window_justifies_nothing_due_in_the_escalation_reason() -> None:
+    """Vrai cas (« baseline » p2, ticket 44) : le motif dit « hors délai de 30 jours »."""
+    text = "Un conseiller reprend votre dossier." + SIGNATURE
+    why = "Le client réclame 96,00 €. Livraison il y a 71 jours (hors délai de 30 jours)."
+    ok = result(
+        AMOUNT_TRAP,
+        decision(AMOUNT_TRAP, text),
+        [call("escalate_ticket", ticket_id=42, reason=why), reply(42, text)],
+    )
+    assert verdicts(grade_ticket(ok, AMOUNT_TRAP))[Criterion.JUSTIFIED] is Verdict.PASS
+    # Négatif : livraison en retard, ce qui ne dit pas que rien n'est dû
+    late = why.replace("(hors délai de 30 jours)", "(livrée hors délai)")
+    bad = result(
+        AMOUNT_TRAP,
+        decision(AMOUNT_TRAP, text),
+        [call("escalate_ticket", ticket_id=42, reason=late), reply(42, text)],
+    )
+    assert reason(grade_ticket(bad, AMOUNT_TRAP), Criterion.JUSTIFIED) == (
+        "justification manquante : due_cents"
     )

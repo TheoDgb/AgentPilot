@@ -1,7 +1,6 @@
 """Recherche des faits et des données interdites dans les réponses (`evals/facts.py`)."""
 
 import json
-from datetime import date
 
 import pytest
 
@@ -137,9 +136,6 @@ def test_forbidden_email_and_tracking_ignore_case() -> None:
     assert not forbidden_found("owner_email", "hugo.dubois.31@example.com", "Bonjour Hugo")
 
 
-TODAY = date(2026, 7, 6)
-
-
 @pytest.mark.parametrize(
     ("text", "found"),
     [
@@ -159,6 +155,24 @@ def test_lost_parcel_said_unfindable(text: str, found: bool) -> None:
 @pytest.mark.parametrize(
     ("text", "found"),
     [
+        # Vraies réponses de l'évaluation « baseline » (tickets 7 et 6)
+        ("Votre colis n'a malheureusement pas pu être retrouvé par le transporteur.", True),
+        ("Le transporteur n'a pas retrouvé votre colis et une enquête est ouverte.", True),
+        # Négatifs : retrouvé, sujet qui n'est pas le colis, colis cité après, autre phrase
+        ("Votre colis a été retrouvé par le transporteur.", False),
+        ("Si vous n'avez pas retrouvé l'avis de passage, écrivez-nous.", False),
+        ("Si vous n'avez pas retrouvé le colis dans votre boîte, écrivez-nous.", False),
+        ("Le colis est en route. Vous n'avez pas retrouvé votre code ?", False),
+        ("Le transporteur ne trouve pas d'anomalie : retrouvez votre colis en ligne.", False),
+    ],
+)
+def test_lost_parcel_said_not_found(text: str, found: bool) -> None:
+    assert fact_found("shipment_status", "lost", text) is found
+
+
+@pytest.mark.parametrize(
+    ("text", "found"),
+    [
         ("Votre commande n°60 a été livrée il y a 45 jours.", True),
         ("Elle vous a été livrée depuis 45 jours.", True),
         ("Livrée le 22 mai 2026.", True),
@@ -170,13 +184,14 @@ def test_lost_parcel_said_unfindable(text: str, found: bool) -> None:
     ],
 )
 def test_delivery_date_said_as_days_ago(text: str, found: bool) -> None:
-    assert fact_found("delivered_at", "2026-05-22", text, TODAY) is found
+    assert fact_found("delivered_at", "2026-05-22", text, {45}) is found
 
 
-def test_days_ago_needs_the_simulated_date_and_only_for_delivery() -> None:
+def test_days_ago_needs_the_admitted_counts_and_only_for_delivery() -> None:
     assert not fact_found("delivered_at", "2026-05-22", "Livrée il y a 45 jours.")
+    assert fact_found("delivered_at", "2026-05-22", "Livrée il y a 46 jours.", {45, 46})
     # Une date estimée ne se dit pas en jours écoulés
-    assert not fact_found("estimated_delivery", "2026-05-22", "Il y a 45 jours.", TODAY)
+    assert not fact_found("estimated_delivery", "2026-05-22", "Il y a 45 jours.", {45})
 
 
 @pytest.mark.parametrize(
@@ -192,6 +207,14 @@ def test_days_ago_needs_the_simulated_date_and_only_for_delivery() -> None:
         ("Aucun remboursement ne vous a été versé à ce jour.", False),
         ("Le client réclame un dédommagement.", False),
         ("Aucun dédommagementaire.", False),
+        # Hors du délai de remboursement (vrai motif d'escalade du ticket 44, « baseline » p2)
+        ("Livraison il y a 71 jours (hors délai de 30 jours). Validation humaine requise.", True),
+        ("La commande est hors du délai de remboursement.", True),
+        # Négatifs : nié, retard de livraison, autre délai
+        ("La commande n'est pas hors délai de 30 jours.", False),
+        ("Votre colis a été livré hors délai.", False),
+        ("Hors délai de livraison : le colis a 5 jours de retard.", False),
+        ("Demande hors délai de 15 jours pour l'échange.", False),
     ],
 )
 def test_nothing_due_phrasings(text: str, found: bool) -> None:

@@ -20,7 +20,7 @@ d'un renvoi attendu.
 
 import hashlib
 from collections.abc import Iterable, Sequence
-from datetime import date
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
@@ -45,10 +45,6 @@ HAPPENED = frozenset({"succeeded", "held"})
 
 # Fichiers qui définissent les règles de notation : leur empreinte est la version de la notation
 RULES_FILES = ("grading.py", "facts.py", "fidelity.py", "grounding.py")
-
-
-# Date simulée des évaluations (la vérité terrain est calculée à cette date)
-SIMULATION_DAY = SIMULATION_NOW.date()
 
 
 def rules_sha256() -> str:
@@ -339,15 +335,21 @@ def escalation_reasons(result: TicketResult) -> list[str]:
     return reasons
 
 
+def said(key: str, value: FactValue, text: str, result: TicketResult, now: datetime) -> bool:
+    """Fait dit dans `text` ; date de livraison aussi en jours écoulés, comptés comme l'outil."""
+    days = grounding.elapsed_days(str(value), now, result.reads) if key in facts.DAYS_AGO else ()
+    return facts.fact_found(key, value, text, days)
+
+
 def check_facts(
-    result: TicketResult, truth: TicketGroundTruth, today: date
+    result: TicketResult, truth: TicketGroundTruth, now: datetime
 ) -> tuple[CriterionResult, int]:
     """Faits à dire au client : dans la réponse au client seulement."""
     to_say, _ = split_facts(truth)
     if not to_say:
         return _na(Criterion.FACTS), 0
     text = "\n".join(customer_texts(result))
-    missing = [k for k, v in to_say.items() if not facts.fact_found(k, v, text, today)]
+    missing = [k for k, v in to_say.items() if not said(k, v, text, result, now)]
     found = len(to_say) - len(missing)
     if missing:
         return _ko(Criterion.FACTS, f"fait(s) manquant(s) : {', '.join(missing)}"), found
@@ -359,7 +361,9 @@ SHOWN_CITED = 3
 WRONG = (grounding.Check.NOT_READ, grounding.Check.MISMATCH)
 
 
-def check_justified(result: TicketResult, truth: TicketGroundTruth, today: date) -> CriterionResult:
+def check_justified(
+    result: TicketResult, truth: TicketGroundTruth, now: datetime
+) -> CriterionResult:
     """Faits de justification trouvés (réponse, motif d'escalade ou `facts_used`), et chaque
     fait cité dans `facts_used` vérifié dans les lectures d'outils du journal."""
     _, justification = split_facts(truth)
@@ -369,7 +373,7 @@ def check_justified(result: TicketResult, truth: TicketGroundTruth, today: date)
         return _na(Criterion.JUSTIFIED)
     problems = []
     if reads is not None:
-        checks = [(fact, grounding.check(fact, reads)) for fact in used]
+        checks = [(fact, grounding.check(fact, reads, result.actions)) for fact in used]
         wrong = [f for f, c in checks if c in WRONG]
         if wrong:
             # Outil et champ seulement : la valeur peut être une donnée d'un autre client
@@ -381,7 +385,7 @@ def check_justified(result: TicketResult, truth: TicketGroundTruth, today: date)
     missing = [
         k
         for k, v in justification.items()
-        if not facts.fact_found(k, v, text, today) and not grounding.cited(k, v, used, today)
+        if not said(k, v, text, result, now) and not grounding.cited(k, v, used, now, result.reads)
     ]
     if missing:
         problems.insert(0, f"justification manquante : {', '.join(missing)}")
@@ -414,7 +418,7 @@ def check_faithful(result: TicketResult) -> CriterionResult:
 
 
 def grade_ticket(
-    result: TicketResult, truth: TicketGroundTruth, today: date = SIMULATION_DAY
+    result: TicketResult, truth: TicketGroundTruth, now: datetime = SIMULATION_NOW
 ) -> TicketGrade:
     to_say, _ = split_facts(truth)
     grade = TicketGrade(
@@ -446,10 +450,10 @@ def grade_ticket(
             check_approval(result, truth),
             check_amount(result, truth),
         ]
-    facts_result, grade.facts_found = check_facts(result, truth, today)
+    facts_result, grade.facts_found = check_facts(result, truth, now)
     grade.criteria += [
         facts_result,
-        check_justified(result, truth, today),
+        check_justified(result, truth, now),
         check_forbidden(result, truth),
         check_faithful(result),
     ]
@@ -461,8 +465,8 @@ def grade_report(report: EvalReport, truths: dict[int, TicketGroundTruth]) -> li
     missing = [t.ticket_id for t in report.tickets if t.ticket_id not in truths]
     if missing:
         raise ValueError(f"tickets absents de la vérité terrain : {missing}")
-    today = report.summary.simulation_now.date()
-    return [grade_ticket(t, truths[t.ticket_id], today) for t in report.tickets]
+    now = report.summary.simulation_now
+    return [grade_ticket(t, truths[t.ticket_id], now) for t in report.tickets]
 
 
 # --- Scores ---------------------------------------------------------------------------------

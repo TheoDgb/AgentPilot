@@ -11,7 +11,7 @@ casse et le mot entier (« Petit » n'est pas « un petit retard »).
 
 import re
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import date
 
 FactValue = str | int | bool
@@ -39,8 +39,16 @@ STATUS_WORDS: dict[str, dict[str, list[str]]] = {
         "out_for_delivery": [r"en cours de livraison", r"en livraison", r"livre\w* aujourd'hui"],
         "delivered": [r"\blivre"],
         "delayed": [r"retard"],
-        # « introuvable » nié (« n'est pas / plus introuvable ») ne compte pas
-        "lost": [r"\bperdu", r"\begare", r"\bperte\b", r"(?<!pas )(?<!plus )\bintrouvable"],
+        # « introuvable » nié (« n'est pas / plus introuvable ») ne compte pas ; « pas
+        # retrouvé » seulement après le colis ou le transporteur (« si vous n'avez pas retrouvé
+        # le colis dans votre boîte » ne dit pas qu'il est perdu)
+        "lost": [
+            r"\bperdu",
+            r"\begare",
+            r"\bperte\b",
+            r"(?<!pas )(?<!plus )\bintrouvable",
+            r"\b(colis|transporteur)\b[^.]*\bpas (pu )?(etre )?retrouve",
+        ],
     },
     "payment_status": {
         "pending": [
@@ -80,6 +88,9 @@ NO_AMOUNT_DUE = [
     # « … ne vous a été versé » (rien de fait, ce qui ne dit pas que rien n'est dû)
     r"aucune? (montant|remboursement|dedommagement|compensation|somme)\b(?! (n'a|ne \w+ a)\b)",
     r"rien (ne vous )?(n'est )?du",
+    # Hors du délai de remboursement : rien n'est remboursable (« livré hors délai » parle d'un
+    # retard de livraison, et ne compte pas)
+    r"(?<!pas )\bhors (du )?delai de (remboursement|30 jours)",
 ]
 
 
@@ -139,14 +150,14 @@ def _days(value: FactValue, text: str) -> bool:
     return re.search(rf"(?<!\d){int(value)}\s+jours", plain(text)) is not None
 
 
-def _days_ago(value: FactValue, text: str, today: date) -> bool:
-    """Date dite comme un écart (« livrée il y a 45 jours »), exact à la date simulée."""
-    days = (today - date.fromisoformat(str(value))).days
-    return re.search(rf"(il y a|depuis) {days} jours", plain(text)) is not None
+def _days_ago(days: Collection[int], text: str) -> bool:
+    """Date dite comme un écart (« livrée il y a 45 jours »), avec un des nombres admis."""
+    return any(re.search(rf"(il y a|depuis) {d} jours", plain(text)) for d in days)
 
 
 # Faits de date qui peuvent aussi se dire en jours écoulés : l'agent ne calcule jamais une date,
-# l'outil lui donne `days_since_delivery`
+# l'outil lui donne `days_since_delivery` (nombres admis calculés comme lui :
+# `evals.grounding.elapsed_days`)
 DAYS_AGO = frozenset({"delivered_at"})
 
 
@@ -183,14 +194,14 @@ MATCHERS: dict[str, Callable[[FactValue, str], bool]] = {
 }
 
 
-def fact_found(key: str, value: FactValue, text: str, today: date | None = None) -> bool:
+def fact_found(key: str, value: FactValue, text: str, days_ago: Collection[int] = ()) -> bool:
     """Le fait `key: value` est-il dit dans `text` ? `KeyError` pour une clé sans matcher.
 
-    `today` (date simulée) : accepte aussi une date de `DAYS_AGO` dite en jours écoulés.
+    `days_ago` : nombres de jours écoulés admis pour une date de `DAYS_AGO` (« il y a N jours »).
     """
     if MATCHERS[key](value, text):
         return True
-    return key in DAYS_AGO and today is not None and _days_ago(value, text, today)
+    return key in DAYS_AGO and _days_ago(days_ago, text)
 
 
 def forbidden_found(key: str, value: str, text: str) -> bool:
