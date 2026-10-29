@@ -1,0 +1,459 @@
+# Journal du projet
+
+Ce qui a été fait à chaque jalon, les bugs ou surprises rencontrés, et les leçons retenues.
+Reconstitué le 2026-10-29 à partir de la section Avancement de `CLAUDE.md` (version actuelle
+et versions d'avant les condensations `d2bc3d4` et `b59000c`) et des messages de commit. Rien
+n'y est ajouté de mémoire : là où les sources ne disent rien, le journal le dit. Le résumé de
+l'avancement et les règles en vigueur restent dans `CLAUDE.md`.
+
+## J0 — Dépôt et outillage
+
+*2026-10-23 (premiers commits, `.gitignore`) et 2026-10-24 (`2281e9c`)*
+
+**Fait**
+- Dépôt, Python 3.12 géré par uv, `pyproject.toml`, commande `/test`.
+- Arborescence posée d'avance avec des fichiers vides (`agents/support/`, `evals/`,
+  `mcp_server/`, `shopsim/`…), dont certains ont été supprimés plus tard sans avoir servi :
+  `agentpilot/approvals.py` et `agentpilot/runner.py` en J3.5, `evals/run_eval.py` en J5.1.
+
+**Bugs ou surprises** : aucun noté dans les sources.
+
+**Leçons** : aucune notée dans les sources.
+
+## J1 — ShopSim
+
+*2026-10-24 au 2026-10-25 (`208f1aa` à `528f478`)*
+
+**Fait**
+- J1.1 (`208f1aa`) : Docker Compose (PostgreSQL et FastAPI), clients et commandes,
+  `GET /orders/{id}`, seed, premier test ; base publiée sur le port 5433.
+- J1.2 (`5d8e475`) : service Paiements, remboursements idempotents, `/health`.
+- J1.3 (`02b0ca0`) : service Livraisons, date de référence, dates cohérentes avec les statuts.
+- J1.4a (`f6b961e`) : clients et tickets en lecture.
+  - `GET /customers/{id}` (ancienneté, tickets résolus, remboursements) et
+    `GET /customers/{id}/orders`.
+  - `GET /tickets` paginé (filtre `status`) et `GET /tickets/{id}` avec ses messages.
+  - Seed : 48 tickets ouverts cohérents avec les données (8 catégories, dont 3 types de
+    pièges) et 12 tickets historiques. Clients à risque créés par des gestes commerciaux
+    partiels, et 4 petites commandes livrées (ids 201 à 204) pour les actions automatiques.
+  - Vérité terrain écrite seulement dans `evals/tickets.jsonl`, règles métier dans
+    `evals/policy.py`.
+  - Tests : aucune fuite de la vérité terrain dans l'API, déterminisme du seed.
+- J1.4b (`1f5f48b`, planifié à part dans `49053da`) : actions sur les tickets.
+  - Réponse avec `Idempotency-Key` obligatoire : 400 sans clé, 200 au rejeu, 409 si la clé
+    sert à une autre demande.
+  - Escalade avec motif : même motif rejoué, 200 sans effet ; autre motif, 409.
+  - Résolution : rejouée, 200 sans effet.
+  - Répondre ou escalader un ticket résolu : 409.
+- J1.5 (`528f478`) : endpoint Chaos.
+  - 4 pannes, avec leur état en base (partagé entre processus, remis à zéro par le seed).
+  - Jeton `X-Chaos-Token` comparé à `CHAOS_TOKEN` (vide = Chaos fermé), jamais donné aux
+    agents.
+  - Les logs imitent de vraies erreurs, sans mention de la panne ; `/health` et `/chaos` ne
+    sont jamais touchés.
+- **Décision** : ShopSim terminé, ses API ne changent plus sans accord. Ajouts validés depuis :
+  - `GET /customers/{id}/refunds` (J2.1) ;
+  - `POST /orders/{id}/resend` (J3.1) ;
+  - `GET /clock` et `SHOPSIM_FREEZE_CLOCK` (J3.2) ;
+  - `author` sur `POST /tickets/{id}/reply` (J3.4) ;
+  - `GET /metrics` (J4.2) ;
+  - `POST /tickets`, jamais exposé aux agents (J4.3).
+
+**Bugs ou surprises** : aucun noté dans les sources (seulement une coquille de CLAUDE.md
+corrigée, `b9ad12e`).
+
+**Leçons** : aucune notée comme telle. Principe posé dès J1.4b : un rejeu d'une action déjà
+faite réussit sans effet (200), 409 seulement si la demande est incompatible.
+
+## J2 — Serveur MCP et agent Support en headless
+
+*2026-10-26 (`42867a8`, `c275c9e`)*
+
+**Fait**
+- J2.1 : serveur MCP en lecture seule (SDK officiel), qui appelle l'API HTTP de ShopSim et
+  jamais la base.
+  - 8 outils : tickets ouverts, ticket, commande, client, ses commandes, ses remboursements,
+    paiement, livraison.
+  - Erreurs de ShopSim (404, 5xx, délai dépassé, service injoignable) renvoyées à l'agent en
+    message lisible, sans planter le serveur.
+  - Aucun outil d'action, aucun accès au Chaos ; `.mcp.json` à la racine.
+  - Dépendances dans l'extra `[mcp]`, absent de l'image ShopSim.
+  - Ajout validé à ShopSim : `GET /customers/{id}/refunds`, pour la règle « client à risque ».
+- J2.2 : agent Support en headless (`agentpilot/run_support.py`), décision JSON validée
+  (`SupportDecision`), sans action.
+  - Consigne et skill `refund-policy` reprise de `evals/policy.py`.
+  - Permissions limitées aux outils `mcp__shopsim__*` : ni fichiers, ni shell, ni web.
+  - `--check` : l'agent restitue sa politique et sa signature, et ne connaît rien du CLAUDE.md
+    développeur (questions pièges). Isolement ainsi prouvé.
+
+**Bugs ou surprises** : aucun noté dans les sources de J2 (voir J3.1 pour la date réelle
+retenue par l'agent lors d'un `--check`).
+
+**Leçons** : aucune notée comme telle.
+
+## J3 — Agent Support dans le service AgentPilot
+
+*2026-10-26 au 2026-10-27 (`182df9b` à `1b8dfd5`)*
+
+**Fait**
+- J3.1 (`182df9b`) : 5 outils d'action dans le serveur MCP (répondre, rembourser, renvoyer,
+  escalader, résoudre).
+  - Chargés seulement si `SHOPSIM_MCP_ACTIONS=1` ; lecture seule par défaut.
+  - Clés d'idempotence calculées par le serveur : un rejeu renvoie `already_done`.
+  - Ajouts validés à ShopSim : `POST /orders/{id}/resend` et une horloge de simulation unique
+    (`clock.now`), avec un test qui interdit `datetime.now()` ailleurs.
+- J3.2 (`226dfe4`) : agent lancé par le Claude Agent SDK dans le service FastAPI ; exécutions
+  enregistrées dans le schéma `agentpilot`.
+  - Isolement par le SDK : aucune source de réglages, consigne de l'agent seule, 8 outils de
+    lecture, dossiers de travail et de configuration temporaires vides.
+  - Bloc `computed` dans les outils de lecture : jours depuis la livraison, retard, reste
+    remboursable, remboursements dans la fenêtre de risque.
+  - Ajouts validés à ShopSim : `GET /clock` et `SHOPSIM_FREEZE_CLOCK=1`.
+- J3.3 (`8ff81a7`) : actions sous hooks.
+  - Le code relit ShopSim lui-même et met en attente tout remboursement ou renvoi de plus de
+    50 €, ou pour un client à risque.
+  - Réponses et escalades sans validation.
+  - Refus durs : autre ticket, commande d'un autre client, ShopSim illisible.
+  - Journal de chaque appel dans `agentpilot.tool_calls`. Sans hooks, le lancement est refusé.
+- J3.4 (`bc3c313`) : page d'approbation `/approvals`, rendue côté serveur (Jinja2).
+  - Approuver exécute l'action une seule fois, même après un double clic ou avec deux
+    approbateurs (`UPDATE … WHERE status = 'pending'`), après revérification dans ShopSim et
+    avec la clé enregistrée.
+  - Refuser exige un motif.
+  - Ajout validé à ShopSim : `author` sur les réponses, jamais choisi par l'agent.
+  - Nouvelle dépendance : jinja2.
+- J3.5 (`1b8dfd5`) : traitement continu.
+  - Boucle de 2 exécutions au plus, jamais deux fois le même ticket en parallèle (index unique
+    partiel, 409).
+  - Reprise au démarrage sans double action.
+  - Arrêt d'urgence relu par les hooks avant chaque action.
+  - Budget du jour avec pause automatique.
+  - Attente croissante si ShopSim est en panne ; page `/control`.
+  - Pas d'agent orphelin : `claude_guard.py` (`PR_SET_PDEATHSIG`) et `parent_watch.py`.
+- **Vérifié en conditions réelles** : approbation et refus. Ctrl+C et `kill -9` pendant des
+  exécutions : relance unique, aucune double réponse ni double remboursement, aucun processus
+  orphelin. Arrêt d'urgence et panne de ShopSim.
+
+**Bugs ou surprises**
+- Lors d'un `--check`, l'agent avait retenu la date réelle que Claude Code ajoute à la
+  consigne. La consigne précise désormais que seule la date de la simulation compte (J3.1).
+- Premier lancement réel de la boucle : `DetachedInstanceError` dans `new_run`. Les tests
+  utilisaient une connexion partagée avec points de sauvegarde (`expire_on_commit=False`,
+  J3.2), ce qui masquait la lecture d'un objet hors de sa session. Corrigé, avec un test de
+  régression ; les tests passent depuis par une seule fabrique de sessions, avec de vraies
+  connexions et de vrais commits (J3.5).
+- Limites laissées en place, notées dans CLAUDE.md :
+  - pages d'approbation et de pilotage sans authentification ni protection CSRF ;
+  - exécution interrompue après une escalade, sans décision enregistrée ;
+  - arrêt de la CLI à la mort du service sous Linux seulement.
+
+**Leçons** : aucune notée comme telle. Principes posés dans les commits :
+- « Le code calcule, le modèle juge » : les jours, retards et restes remboursables sont
+  calculés par le code et donnés à l'agent (J3.2).
+- Barrière indépendante du modèle : pas de remboursement ni de renvoi d'une commande qui
+  n'appartient pas au client du ticket (J3.1). La valeur d'un remboursement retenue par le hook
+  est le plus grand du montant demandé et du reste remboursable, pour que l'agent ne puisse pas
+  sous-déclarer (J3.3).
+- Un hook en erreur refuse l'action (J3.5).
+- Tester les sessions comme en production (vraies connexions, vrais commits), sinon un bug
+  n'apparaît qu'au premier lancement réel (J3.5).
+
+## J4 — Logs, métriques, trafic et alertes
+
+*2026-10-27 au 2026-10-28 (`f7396ea` à `7665b28`)*
+
+**Fait**
+- J4.1 (`f7396ea`) : logs JSON avec `trace_id` de bout en bout.
+  - Paquet `observability/` : une ligne par événement, champs sur liste blanche, filet
+    anti-secret.
+  - Trace W3C : exécution → serveur MCP (`TRACEPARENT`) → ShopSim (`traceparent`).
+  - Requêtes `/chaos` seulement dans `chaos.jsonl` ; lecture par
+    `python -m observability.query`, même code que le futur outil de l'agent Ops.
+- J4.2 (`f81f670`) : métriques Prometheus (ShopSim et AgentPilot) et tableau de bord Grafana
+  provisionné.
+  - Aucune métrique sur l'état des pannes ; aucun identifiant ni montant en étiquette.
+  - Nouvelle dépendance : prometheus-client.
+  - Aussi : `python -m shopsim.chaos_cli` et `python -m agentpilot.reset` (verrou du service).
+- J4.3 (`11c16f4`) : générateur de trafic (`python -m traffic`).
+  - Liste blanche de routes, débit en boucle ouverte.
+  - Nouveaux tickets désactivés par défaut et plafonnés.
+  - Ajout validé à ShopSim : `POST /tickets`.
+- J4.4 (`7665b28`) : 8 alertes Prometheus sur symptômes seulement, testées par `promtool`.
+  Alertmanager les envoie à AgentPilot (`agentpilot.alerts`), sans action automatique.
+- **Vérifié en conditions réelles**
+  - J4.1 : même trace dans les trois services sur un vrai run ; panne `db_errors` visible sans
+    marqueur ; requêtes Chaos seulement dans `chaos.jsonl` (ni dans les autres fichiers, ni dans
+    `docker compose logs`).
+  - J4.2 :
+    - cibles collectées ;
+    - latence et 5xx des pannes visibles, sans trace de Chaos dans `/metrics` ;
+    - remboursement du ticket 19 mis en attente puis approuvé, visible sur Grafana ;
+    - remise à zéro refusée service lancé.
+  - J4.3 :
+    - 204 commandes découvertes dans Docker ;
+    - trafic de fond pendant `payment_latency` et `db_errors` ;
+    - arrêt propre par SIGTERM ;
+    - 2 × 2 tickets créés et relus, cohérents avec les données, `--max-tickets` respecté.
+  - J4.4 :
+    - 10 min de trafic normal sans alerte ;
+    - `db_errors` : `ShopSimHighErrorRate` sur `/orders/{order_id}` et
+      `/customers/{customer_id}/orders`, résolue environ 2 min après l'arrêt ;
+    - `payment_latency` : `ShopSimHighLatency` sur `/payments/{order_id}`, résolue environ
+      5 min après, le p95 étant calculé sur 5 min ;
+    - une ligne par occurrence malgré les envois répétés, aucune exécution créée.
+
+    Non essayée en réel : `AgentPilotDown`, couverte par les tests.
+
+**Bugs ou surprises**
+- Le SDK MCP posait son propre gestionnaire de logs texte : retiré (J4.1).
+- Le chemin `evals/tickets.jsonl` a dû être rétabli dans la ligne J1 de CLAUDE.md : une
+  question piège de `--check` en dépend (J4.1).
+- Reprise : la consigne listait les actions de toutes les exécutions passées, si bien qu'une
+  relance après un seed croyait le ticket déjà escaladé. Elle ne liste plus que les actions des
+  exécutions interrompues ou en échec depuis la dernière réussie (J4.2).
+- Le test du tableau de bord déduisait les codes HTTP des requêtes déjà faites : il dépendait
+  de l'ordre d'exécution des tests. Corrigé (J4.4).
+- Limites laissées en place, notées dans CLAUDE.md :
+  - supervision Linux seulement (réseau hôte) ;
+  - compteurs remis à zéro à chaque redémarrage ;
+  - logs sans rotation (environ 100 Mo par jour avec le générateur à 5 req/s) ;
+  - `logs/` à créer avant `docker compose up` ;
+  - webhook d'alertes sans authentification ;
+  - `AgentPilotDown` enregistrée seulement à sa résolution.
+
+**Leçons** : aucune notée comme telle. Principe posé dans les commits : alerter sur des
+symptômes, jamais sur l'état du Chaos, pour que l'agent Ops (J6) diagnostique comme sur une
+vraie panne (J4.4).
+
+## J5 — Évaluation en CI
+
+*2026-10-28 au 2026-10-29 (`42c3681` à `1d50a1d`)*
+
+### J5.1 : lanceur d'évaluation (`42c3681`)
+
+**Fait**
+- `python -m evals.run` : l'agent Support est lancé sur les tickets de la vérité terrain, avec
+  le même code que le service (`Worker`, hooks, outils, isolement, 2 exécutions au plus),
+  précédé de la vérification d'isolement. Nouveau déclencheur `eval`.
+- Refus avant tout lancement :
+  - `CHAOS_TOKEN` dans le shell ;
+  - service lancé (verrou de la base) ;
+  - AgentPilot ou ShopSim non remis à zéro ;
+  - horloge non figée ;
+  - panne Chaos active ou invérifiable.
+- Actions sensibles mises en attente, jamais approuvées. Plafond jamais dépassé (0,50 $
+  réservés par exécution en cours).
+- Résultats datés dans `evals/results/` : décision, actions faites, en attente ou refusées,
+  réponses, statut du ticket relu, coût, durée, erreurs, `trace_id`. États d'arrêt :
+  `budget_exhausted`, `interrupted`, `aborted`.
+- **Vérifié en conditions réelles** sur 5 tickets (1, 16, 19, 21, 37) pour 0,19 $ :
+  - refus attendus tant que la panne `db_errors` était active ;
+  - réponse ;
+  - remboursement de 10,45 € fait ;
+  - remboursement de 385,09 € en attente et absent de ShopSim ;
+  - refus hors délai ;
+  - injection escaladée.
+
+**Bugs ou surprises**
+- La vérification de remise à zéro refusait les 12 tickets historiques du seed (n° 49 à 60,
+  déjà traités), absents de la ShopSim de test : corrigé.
+- Les exécutions d'un test fuyaient sur le suivant : la fixture `ready` vide maintenant les
+  tables d'AgentPilot.
+
+**Leçons**
+- Une vérification de l'état de départ s'essaie aussi sur le vrai seed : la ShopSim de test
+  n'a pas les tickets historiques.
+
+### J5.2 : notation et rapport (`75bfb95`)
+
+**Fait**
+- `python -m evals.grade` : 8 critères vérifiés par du code, sans IA.
+  - `category`, `action`, `approval` (décision et journal) et `amount`.
+  - `facts` : faits à dire au client.
+  - `justified` : faits de justification, et chaque fait cité dans `facts_used` vérifié contre
+    les vraies réponses d'outils, désormais enregistrées.
+  - `forbidden` : données d'un autre client, dans la réponse au client seulement.
+  - `faithful` : aucune action annoncée comme faite si elle attend un humain ou n'a pas eu
+    lieu.
+- Faits à dire, de justification ou non notés, choisis par l'intérêt du client (`JUSTIFICATION`,
+  `UNGRADED`) ; `tickets.jsonl` inchangé.
+- Version de la notation figée (`fad6fdab4512`), fixée par un test.
+- `evals.run --passes N` : remise à zéro automatique entre les passages, un plafond pour la
+  série, variabilité et `pass^k` dans le rapport.
+- Juge IA facultatif (`--judge`, haiku, 0,50 $ au plus) : ton et clarté, hors score.
+- Rapports versionnés dans `docs/evals/`.
+- **Vérifié en conditions réelles** : essai J5.1 5/5. Série « variabilite » (8 tickets × 2
+  passages) 16/16, aucun ticket instable, 0,44 $ ; juge 0,01 $.
+
+**Bugs ou surprises**
+- L'essai J5.1 passait de 3/5 à 5/5 sans aucune faute de l'agent, une fois la notation
+  limitée à ce que le client a besoin de savoir.
+- Sur la série « variabilite », 11 échecs sur 16 (11/16) ont été relus : aucun n'était une
+  faute de l'agent.
+- Le juge IA lisait les dates de la réponse à sa propre date et les croyait incohérentes : 4
+  notes basses sur 9 venaient de là.
+
+**Leçons**
+1. Noter ce que le client a besoin de savoir, pas tout ce qui fonde la décision. Les faits sont
+   à dire (`facts`), de justification (`justified`, vérifiés contre les vraies réponses
+   d'outils) ou non notés, choisis par l'intérêt du client.
+2. Élargir un *matcher* d'après de vraies réponses, c'est risquer le surajustement. Il faut :
+   - relire chaque échec ;
+   - n'ajouter que des formulations correctes ;
+   - toujours ajouter des tests négatifs (mauvais nombre, phrase niée, mot proche), qui
+     montrent qu'une mauvaise réponse échoue encore.
+3. La version de la notation est figée (empreinte des règles, fixée par un test). Une
+   correction est une nouvelle version, notée dans le journal et dans le rapport ; sinon deux
+   scores ne se comparent pas.
+4. Un juge IA lit les dates à sa propre date : il faut lui donner la date simulée, sinon il
+   pénalise des réponses justes.
+
+### Évaluation complète « baseline » et notation `46f32f478699` (`1889aa4`)
+
+**Fait**
+- Série « baseline » : 48 tickets × 2 passages, consigne alors en place (v1), sonnet.
+  - 73/96 avec la version figée `fad6fdab4512`, juge 0,06 $
+    (`docs/evals/2026-10-28T224853Z-baseline.md`, rapport de référence, inchangé).
+  - 81/96 avec la nouvelle version `46f32f478699`
+    (`…-baseline-notation-46f32f478699.md`).
+- Nouvelle version de la notation, règle par règle, chacune avec ses tests négatifs :
+  1. Les jours depuis la livraison sont comptés comme l'outil (jours entamés, `days_since` du
+     serveur MCP, heure lue dans `get_shipment`). Cela fait un jour de plus que le calendrier
+     pour une livraison du matin (tickets 17, 20, 24).
+  2. Un fait cité d'une action exécutée (`refund_order.status`) ou le champ `error` d'une
+     lecture en échec est invérifiable (réponse non gardée), et non plus « non lu » (tickets
+     17, 18, 30).
+  3. Un colis perdu peut être dit « pas (pu être) retrouvé », après le colis ou le transporteur
+     (tickets 6, 7).
+  4. « Hors délai de 30 jours » vaut « rien n'est dû » (ticket 44).
+- Relecture de 8 tickets réussis au hasard : aucune fausse réussite.
+
+**Bugs ou surprises**
+- Restaient des erreurs de l'agent :
+  - pièges de montant 44 et 45 refusés au lieu d'escalader ;
+  - catégorie du ticket 31 ;
+  - numéro de commande omis.
+
+  S'y ajoutait le ticket 47 (liste des transporteurs, qu'aucun outil ne donne). Tout cela a été
+  traité en J5.3 comme des améliorations de l'agent, sans toucher à la vérité terrain ni à la
+  consigne.
+
+### J5.3 : comparaison de configurations, consigne v2 adoptée (`7117f53`)
+
+**Fait**
+- Consigne v2 (`agents/support/v2/`), qui corrige seulement les défauts de « baseline » :
+  - pièges de montant comparés au montant payé avant le délai (44, 45) ;
+  - liste des transporteurs (47) ;
+  - numéro de commande toujours cité ;
+  - raison d'escalade jamais devinée (36) ;
+  - aucun fait sans outil (15) ;
+  - ton moins administratif ;
+  - délai de suivi de 48 h ouvrées, tiré de `evals/policy.py` (`HUMAN_FOLLOW_UP_HOURS`).
+- Versions de la consigne (`support_agent.PROMPTS`) et `evals.run --prompt`, avec la version
+  et l'empreinte dans les résultats.
+- `python -m evals.compare` :
+  - les deux séries renotées avec la même notation ;
+  - scores par critère et par catégorie côte à côte ;
+  - tickets améliorés et dégradés, coût, juge sur les deux séries ;
+  - test de signe exact apparié par ticket.
+- **Résultat** (même modèle `claude-sonnet-5-5`, même notation `46f32f478699`) :
+  - 81/96 → 87/96 ;
+  - `action` et `approval` 92 → 96/96, `facts` 61 → 70/70 ;
+  - 7 tickets améliorés (6, 7, 24, 25 : numéro de commande ; 47 : transporteurs ; 45 : escalade
+    du piège de montant ; 41), 5 dégradés ;
+  - coût identique (2,11 $ et 2,13 $), juge 0,12 $
+    (`docs/evals/compare-2026-10-28T224853Z-baseline-vs-2026-10-29T021314Z-prompt-v2.md`).
+- **Décision (2026-10-29)** : v2 adoptée comme consigne par défaut du service et de
+  l'évaluation, v1 gardée pour comparer. Limites de cette décision :
+  1. L'écart global n'est pas significatif (7 ↑ / 5 ↓, p = 0,77). La v2 est adoptée parce que
+     les défauts visés sont corrigés de façon stable et sans coût, pas parce qu'un gain est
+     démontré.
+  2. Le juge ne voit aucun écart (ton 3,6 et clarté 3,9 dans les deux séries), alors que le
+     comptage en mesure de nets :
+     - « 48 h ouvrées » dans 42 réponses sur 96, contre 0 en v1 ;
+     - délais vagues : 33 → 5 ;
+     - formules administratives : 14 → 0.
+
+     Le juge n'est pas calibré, et ses notes ne sont pas à surinterpréter.
+  3. Défauts restants pour une v3 :
+     - catégorie des questions de statut (`delivery_delay` au lieu de `simple_question`,
+       tickets 30 et 31) ;
+     - faits inventés dans `facts_used` (paraphrase ou champ inexistant, tickets 37 et 40,
+       déjà vu au 41 en v1) ;
+     - *matcher* de `due_cents` trop étroit : « non prévu par la politique », « livrée il y a
+       plus de 30 jours » et « hors délai » seul ne sont pas reconnus. Les tickets 43, 44 et
+       45 sont comptés en échec alors que l'escalade est juste. À corriger dans une nouvelle
+       version de la notation, avec ses tests négatifs.
+
+**Bugs ou surprises**
+- Première série v2 : la limite de dépense de l'API a été atteinte au ticket 9. 40 tickets ont
+  été comptés comme des fautes de l'agent, et le passage marqué `completed`. Correction :
+  - `sdk_runner` reconnaît une erreur de l'API (`api_error_status`, `AssistantMessage.error`,
+    texte « API Error: NNN ») ;
+  - `evals.run` arrête la série sur une erreur d'infrastructure (`INFRA_ERRORS`), avec le
+    ticket en cause `interrupted`, jamais `failed` ;
+  - `evals.grade` et `evals.compare` refusent les anciens fichiers qui comptent ces erreurs
+    comme des fautes.
+- Le même défaut existe encore dans le service, qui abandonne un ticket après 3 erreurs de
+  l'API au lieu de mettre la boucle en pause (limite connue).
+- Un écart arrondi à zéro s'affichait « +0,0 » dans le rapport de comparaison : corrigé en
+  « 0,0 ».
+
+**Leçons**
+- Une erreur d'infrastructure ne doit jamais passer pour une faute de l'agent : elle arrête la
+  série.
+- Un écart de score ne vaut rien sans son test de significativité.
+
+### J5.4 : intégration continue GitHub Actions (`4997d4d`, `e05ec03`, `5924d8b`, `1d50a1d`)
+
+**Fait**
+- Workflows dans `.github/workflows/`.
+- `tests.yml` : à chaque push et pull request, `ruff check`, `ruff format --check` puis `pytest`
+  complet. PostgreSQL de service, règles d'alerte par les images de Compose. Aucun secret,
+  jamais `pull_request_target`, jeton en lecture seule. Badge dans le README.
+- `evaluation.yml` : lancée à la main seulement, une seule à la fois.
+  - Déroulé : ShopSim à horloge figée, remise à zéro, `evals.run`, puis `evals.grade` avec
+    les seuils ; rapport dans le résumé du lancement, résultats et logs en artefacts.
+  - Clé d'API dans l'environnement GitHub `evaluation`, donnée à la seule étape `evals.run`.
+  - Jeton Chaos tiré au hasard, masqué, jamais dans l'environnement.
+  - Paramètres jamais interpolés dans un script.
+- Seuils de réussite versionnés (`evals/thresholds.toml`) : score global de 85 %, aucun échec
+  admis sur `action`, `approval`, `forbidden` et `faithful`. Code de sortie 3 avec le seuil
+  nommé ; une évaluation incomplète échoue toujours.
+- Actions épinglées par SHA de commit complet (checkout v7.0.1, setup-uv v10.3.3,
+  upload-artifact v7.0.2), version en commentaire, vérifiée par
+  `evals/tests/test_workflows.py`.
+- Sous-ensemble par défaut porté à 14 tickets, avec les défauts corrigés (44, 45, 47). Règle :
+  chaque défaut corrigé a son ticket dans ce sous-ensemble. Plafond par défaut de 2,50 $ pour
+  environ 0,35 $ dépensés par passage.
+- **Vérifié en conditions réelles**
+  - « Tests » vert sur GitHub (toute la suite, alertes comprises).
+  - « Évaluation » v2 verte (11/11 sur l'ancien sous-ensemble par défaut).
+  - Échec volontaire, v1 sur les tickets 44 et 45 : rouge, avec les seuils `action` et
+    `approval` nommés.
+
+**Bugs ou surprises**
+- Le premier lancement s'est arrêté en `budget_exhausted` après 0,08 $ sur 1 $. Le deuxième
+  ticket ne tenait jamais à côté du premier (isolement + 2 × 0,50 $ de réserve > 1 $) et le
+  passage s'arrêtait au lieu d'attendre. Désormais, un ticket attend la fin des exécutions en
+  cours ; l'arrêt n'a lieu que si plus rien n'est en cours.
+- L'avertissement « Lectures d'outils non enregistrées » s'affichait sur un fichier neuf, à
+  cause des tickets jamais lancés (`not_run`, sans lecture par construction). Les lectures
+  étaient bien enregistrées.
+- Sur GitHub, les « $ » du rapport étaient lus comme des formules (« l e p l u s c h e r »).
+  - `\$`, puis `&#36;`, ne suffisaient pas : devant une virgule, un « $ » ouvre quand même une
+    formule.
+  - Seul `<span>$</span>` marche ; vérifié avec l'API de rendu Markdown de GitHub.
+  - Le premier test reposait sur l'hypothèse fausse que `\$` suffisait. Il vérifie maintenant
+    chaque ligne du rapport.
+- Avec 1 $, deux exécutions ne tenaient jamais en parallèle : plafond porté à 2 $, puis à
+  2,50 $ avec les 14 tickets.
+- **Limite** : avec 44 et 45 dans le sous-ensemble, la v2 n'a que 12/14 (86 %) sur un passage
+  de la série v2, pour un seuil de 85 %, à cause du *matcher* de `due_cents` trop étroit
+  (`justified` en échec alors que l'escalade est juste). Un seul autre échec rend la CI rouge.
+  À corriger par la nouvelle version de la notation prévue en J5.3.
+
+**Leçons**
+- Un plafond se vérifie avec les réserves des exécutions en parallèle, pas seulement avec la
+  dépense attendue.
+- Un échappement se vérifie sur le vrai rendu, pas sur une hypothèse.
