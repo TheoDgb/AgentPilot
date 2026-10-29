@@ -11,7 +11,9 @@ import pytest
 from agentpilot import run_support, support_agent
 from agentpilot.support_agent import (
     AGENT_DIR,
+    DEFAULT_PROMPT,
     DEVELOPER_ONLY_FACTS,
+    PROMPTS,
     REPO_ROOT,
     SKILL_PATH,
     build_system_prompt,
@@ -114,15 +116,30 @@ def saved(runs_dir: Path, pattern: str) -> dict[str, Any]:
 
 def test_system_prompt_contains_instructions_policy_and_date() -> None:
     prompt = build_system_prompt(TODAY)
+    default = PROMPTS[DEFAULT_PROMPT]
 
-    assert (AGENT_DIR / "CLAUDE.md").read_text(encoding="utf-8").strip() in prompt
-    assert skill_body(SKILL_PATH.read_text(encoding="utf-8")).strip() in prompt
+    assert default.instructions.read_text(encoding="utf-8").strip() in prompt
+    assert skill_body(default.skill.read_text(encoding="utf-8")).strip() in prompt
     # L'en-tête YAML de la skill n'est pas transmis
     assert "name: refund-policy" not in prompt
     assert "Aujourd'hui, nous sommes le 2026-07-06." in prompt
     # Claude Code ajoute la date réelle à sa consigne, même en --bare : seule la date de la
     # simulation compte (observé : sans cette phrase, l'agent a pris la date réelle)
     assert "Ignore toute autre date" in prompt
+
+
+def test_system_prompt_of_another_version() -> None:
+    """La v2 est la consigne par défaut depuis J5.3 ; la v1 reste disponible pour comparer."""
+    assert DEFAULT_PROMPT == "v2"
+    prompt = build_system_prompt(TODAY, "v1")
+
+    assert (AGENT_DIR / "CLAUDE.md").read_text(encoding="utf-8").strip() in prompt
+    assert skill_body(SKILL_PATH.read_text(encoding="utf-8")).strip() in prompt
+    v2 = PROMPTS["v2"].instructions.read_text(encoding="utf-8").strip()
+    assert v2 not in prompt and v2 in build_system_prompt(TODAY)
+    assert "Aujourd'hui, nous sommes le 2026-07-06." in prompt
+    with pytest.raises(KeyError):
+        build_system_prompt(TODAY, "v9")
 
 
 def test_command_locks_the_agent_down(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -21,10 +21,13 @@ journal de chaque appel. Sans hooks, le lancement est refusé.
 
 Une exécution ne lève pas d'exception pour un échec de l'agent : `AgentResult.error` le dit,
 avec ce qui a été mesuré jusque-là (coût, outils appelés), pour être enregistré tel quel.
+`AgentResult.error_type` distingue les fautes de l'agent des erreurs d'infrastructure
+(`INFRA_ERRORS` : API Anthropic, ShopSim, configuration, CLI), jamais imputables à l'agent.
 """
 
 import asyncio
 import os
+import re
 import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import aclosing
@@ -93,11 +96,29 @@ class ErrorType(StrEnum):
 
     CONFIG = "config"
     SHOPSIM_UNAVAILABLE = "shopsim_unavailable"
+    # L'API Anthropic a renvoyé une erreur (limite de dépense, clé refusée, surcharge, panne)
+    API_UNAVAILABLE = "api_unavailable"
     AGENT_ERROR = "agent_error"
     INVALID_OUTPUT = "invalid_output"
     TIMEOUT = "timeout"
     SDK_ERROR = "sdk_error"
     INTERNAL = "internal"
+
+
+# Erreurs d'infrastructure : jamais une faute de l'agent. Une évaluation s'arrête dessus
+# (`evals.run`) et ne les note jamais (`evals.grade`)
+INFRA_ERRORS = frozenset(
+    {
+        ErrorType.API_UNAVAILABLE,
+        ErrorType.SHOPSIM_UNAVAILABLE,
+        ErrorType.CONFIG,
+        ErrorType.SDK_ERROR,
+    }
+)
+# Erreurs de l'API qui ne passeront pas d'elles-mêmes (`AssistantMessage.error`)
+API_FAILURES = frozenset({"authentication_failed", "billing_error", "rate_limit", "server_error"})
+# Résultat en erreur d'une CLI qui ne donne pas `api_error_status` (avant 2.1.110)
+API_ERROR_TEXT = re.compile(r"^API Error: \d{3}\b")
 
 
 @dataclass
@@ -114,6 +135,10 @@ class AgentResult:
     duration_ms: int | None = None
     num_turns: int | None = None
     available_tools: list[str] | None = None
+    # Erreur de l'API signalée en cours d'exécution (`AssistantMessage.error`), et code HTTP de
+    # l'appel qui a échoué (`ResultMessage.api_error_status`)
+    api_failure: str | None = None
+    api_status: int | None = None
 
 
 def build_options(
@@ -126,6 +151,7 @@ def build_options(
     model: str,
     hooks: SupportHooks,
     cli: str,
+    prompt_version: str = support_agent.DEFAULT_PROMPT,
 ) -> ClaudeAgentOptions:
     cwd = workdir / "cwd"
     config_dir = workdir / "claude-config"
@@ -135,7 +161,7 @@ def build_options(
         # Lanceur qui lie la vie de la CLI à celle du service, puis exécute `cli`
         cli_path=claude_guard.write_launcher(workdir),
         # Remplace la consigne de Claude Code : seule la consigne de l'agent est envoyée
-        system_prompt=support_agent.build_system_prompt(today),
+        system_prompt=support_agent.build_system_prompt(today, prompt_version),
         setting_sources=[],
         skills=[],
         plugins=[],
@@ -172,14 +198,27 @@ def build_options(
     )
 
 
+def api_error(result: AgentResult, final: ResultMessage) -> bool:
+    """Échec venu de l'API Anthropic, pas de l'agent : toute erreur renvoyée par l'API (la CLI a
+    déjà réessayé les erreurs passagères). La limite de dépense répond par exemple en HTTP 400."""
+    return (
+        final.api_error_status is not None
+        or result.api_failure in API_FAILURES
+        or API_ERROR_TEXT.match(final.result or "") is not None
+    )
+
+
 def _record_final(result: AgentResult, final: ResultMessage) -> None:
     result.session_id = final.session_id
     result.total_cost_usd = final.total_cost_usd
     result.duration_ms = final.duration_ms
     result.num_turns = final.num_turns
+    result.api_status = final.api_error_status
     if final.is_error or final.subtype != "success":
         result.error = f"L'agent a échoué : {final.result or final.subtype}"
-        result.error_type = ErrorType.AGENT_ERROR
+        result.error_type = (
+            ErrorType.API_UNAVAILABLE if api_error(result, final) else ErrorType.AGENT_ERROR
+        )
     elif final.structured_output is None:
         result.error = "L'agent n'a pas rendu de sortie structurée"
         result.error_type = ErrorType.INVALID_OUTPUT
@@ -200,7 +239,9 @@ async def _collect(messages: AsyncIterator[Any], result: AgentResult) -> None:
                 SUPPORT_TOOL_NAMES,
             )
         elif isinstance(message, AssistantMessage):
-            if result.available_tools is None:
+            if message.error is not None:
+                result.api_failure = message.error
+            if result.available_tools is None and message.error is None:
                 raise AgentRunError("L'agent a répondu avant l'initialisation")
         elif isinstance(message, ResultMessage):
             _record_final(result, message)
@@ -221,6 +262,7 @@ async def run_agent(
     query: QueryFn = sdk_query,
     model: str = DEFAULT_MODEL,
     timeout_s: float = TIMEOUT_S,
+    prompt_version: str = support_agent.DEFAULT_PROMPT,
 ) -> AgentResult:
     """Lance l'agent ; renvoie la sortie structurée brute (non validée) ou l'erreur."""
     result = AgentResult(simulation_date=today)
@@ -231,8 +273,14 @@ async def run_agent(
     try:
         api_key = support_agent.load_api_key(environ)
         cli = claude_guard.real_cli(environ)
-        if cli is None:
-            raise AgentRunError("CLI Claude Code introuvable (ni celle du SDK, ni dans le PATH)")
+    except AgentRunError as exc:
+        result.error, result.error_type = str(exc), ErrorType.CONFIG
+        return result
+    if cli is None:
+        result.error = "CLI Claude Code introuvable (ni celle du SDK, ni dans le PATH)"
+        result.error_type = ErrorType.CONFIG
+        return result
+    try:
         shopsim_url = environ.get("SHOPSIM_URL", DEFAULT_SHOPSIM_URL)
         with tempfile.TemporaryDirectory(prefix="agentpilot-") as workdir:
             options = build_options(
@@ -244,6 +292,7 @@ async def run_agent(
                 model=model,
                 hooks=hooks,
                 cli=cli,
+                prompt_version=prompt_version,
             )
             with anyio.fail_after(timeout_s):
                 async with aclosing(query(prompt=prompt, options=options)) as messages:
@@ -276,9 +325,11 @@ async def decide_ticket(
     query: QueryFn = sdk_query,
     model: str = DEFAULT_MODEL,
     done: Sequence[str] = (),
+    prompt_version: str = support_agent.DEFAULT_PROMPT,
 ) -> AgentResult:
     """Décision de l'agent Support sur un ticket ; `output` est une SupportDecision validée.
-    `done` : actions déjà faites par une exécution précédente (reprise)."""
+    `done` : actions déjà faites par une exécution précédente (reprise) ; `prompt_version` :
+    version de la consigne (`support_agent.PROMPTS`)."""
     try:
         today = await _today(environ)
     except AgentRunError as exc:
@@ -291,6 +342,7 @@ async def decide_ticket(
         environ=environ,
         query=query,
         model=model,
+        prompt_version=prompt_version,
     )
     if result.error is None:
         try:
@@ -310,6 +362,7 @@ async def check_context(
     environ: Mapping[str, str] = os.environ,
     query: QueryFn = sdk_query,
     model: str = DEFAULT_MODEL,
+    prompt_version: str = support_agent.DEFAULT_PROMPT,
 ) -> AgentResult:
     """Preuve d'isolement : consigne, politique et date reçues, rien du CLAUDE.md développeur.
     Sans ticket : les hooks refusent toute action."""
@@ -325,6 +378,7 @@ async def check_context(
         environ=environ,
         query=query,
         model=model,
+        prompt_version=prompt_version,
     )
     if result.error is None:
         try:

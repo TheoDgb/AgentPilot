@@ -4,6 +4,7 @@
     python -m evals.run --tickets 1-5,19 --max-budget-usd 2 --name essai
     python -m evals.run --model opus --name opus --yes    # sans confirmation (scripts, CI)
     python -m evals.run --passes 3 --name variabilite     # 3 passages (variabilité, J5.2)
+    python -m evals.run --prompt v2 --name prompt-v2      # autre version de la consigne (J5.3)
 
 Même code que le service : `Worker` d'AgentPilot (`agentpilot/worker.py`), donc mêmes hooks,
 mêmes outils, même isolement, même journal, au plus 2 exécutions en même temps. Les actions
@@ -29,6 +30,10 @@ Pas de notation ici (J5.2).
 Écran : progression (ticket lancé, ticket terminé avec son statut et son coût), puis un
 résumé avec le chemin du fichier de résultats ; refus sur stderr. Les logs JSON vont seulement
 dans `logs/agentpilot.jsonl` (`python -m observability.query --trace <trace_id>`).
+
+Erreur d'infrastructure (`sdk_runner.INFRA_ERRORS` : API Anthropic, ShopSim, configuration, CLI)
+pendant un ticket ou la vérification d'isolement : le passage s'arrête (`aborted`), donc la série
+aussi ; le ticket en cause est `interrupted` (jamais `failed`), hors de la notation.
 
 Passages (`--passes N`) : le premier exige la remise à zéro manuelle ; entre deux passages,
 l'évaluation remet elle-même tout à zéro (`agentpilot.reset.reset_all`, verrou toujours tenu),
@@ -80,13 +85,13 @@ from agentpilot.models import (
 )
 from agentpilot.reset import reset_all, seed_shopsim
 from agentpilot.schemas import SupportDecision
-from agentpilot.sdk_runner import AgentResult, ErrorType, QueryFn
+from agentpilot.sdk_runner import INFRA_ERRORS, AgentResult, ErrorType, QueryFn
 from agentpilot.support_agent import (
     ACTION_TOOL_NAMES,
-    AGENT_DIR,
+    DEFAULT_PROMPT,
+    PROMPTS,
     READ_TOOL_NAMES,
     REPO_ROOT,
-    SKILL_PATH,
 )
 from agentpilot.worker import MAX_CONCURRENT_RUNS, Worker, finish, new_run
 from evals.results import (
@@ -278,7 +283,7 @@ async def active_faults(token: str | None) -> list[str]:
 # --- Résultats ------------------------------------------------------------------------------
 
 
-def code_version() -> CodeVersion:
+def code_version(prompt_version: str = DEFAULT_PROMPT) -> CodeVersion:
     def git(*args: str) -> str | None:
         try:
             done = subprocess.run(
@@ -292,7 +297,8 @@ def code_version() -> CodeVersion:
     # Fichiers non suivis ignorés : seules comptent les modifications du code versionné
     status = git("status", "--porcelain", "--untracked-files=no")
     digest = hashlib.sha256()
-    for path in (AGENT_DIR / "CLAUDE.md", SKILL_PATH):
+    # Empreinte des fichiers de la version testée de la consigne
+    for path in PROMPTS[prompt_version].paths():
         digest.update(path.read_bytes())
     return CodeVersion(
         commit=commit.strip() if commit else None,
@@ -319,6 +325,21 @@ def write_atomic(path: Path, report: EvalReport) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(report.model_dump_json(indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
+
+
+def infra_reason(result: AgentResult) -> str:
+    """Motif d'arrêt d'une évaluation sur une erreur d'infrastructure."""
+    if result.error_type is ErrorType.SHOPSIM_UNAVAILABLE:
+        return "ShopSim injoignable pendant l'évaluation"
+    if result.error_type is ErrorType.API_UNAVAILABLE:
+        status = f" : HTTP {result.api_status}" if result.api_status is not None else ""
+        return (
+            "API Anthropic indisponible (limite de dépense, clé refusée ou panne) pendant "
+            f"l'évaluation{status}"
+        )
+    if result.error_type is ErrorType.CONFIG:
+        return "Configuration de l'agent invalide (clé d'API ou CLI absente)"
+    return "CLI Claude Code en erreur pendant l'évaluation"
 
 
 def ticket_record(run: Run, result: AgentResult | None) -> TicketResult:
@@ -477,16 +498,19 @@ class Evaluation:
         report: EvalReport,
         path: Path,
         spent_before: Decimal = Decimal(0),
+        prompt_version: str = DEFAULT_PROMPT,
     ) -> None:
         self.factory = factory
         self.query = query
         self.model = model
+        self.prompt_version = prompt_version
         self.max_budget = max_budget
         self.report = report
         self.path = path
         # Le Worker du service, sur un état minimal : mêmes lancements, mêmes logs
         self.worker = Worker(SimpleNamespace(session_factory=factory, query=query))
         self.worker.model = model
+        self.worker.prompt_version = prompt_version
         self.spent = Decimal(0)
         # Dépense des passages précédents de la série : le plafond vaut pour toute la série
         self.spent_before = spent_before
@@ -536,10 +560,19 @@ class Evaluation:
             check_budget=False,
         )
         journal = DbJournal(self.factory, run.id)
-        await self.worker.execute(
-            run,
-            lambda: sdk_runner.check_context(journal=journal, query=self.query, model=self.model),
-        )
+        kept: list[AgentResult] = []
+
+        async def check() -> AgentResult:
+            result = await sdk_runner.check_context(
+                journal=journal,
+                query=self.query,
+                model=self.model,
+                prompt_version=self.prompt_version,
+            )
+            kept.append(result)
+            return result
+
+        await self.worker.execute(run, check)
         with self.factory() as session:
             checked = session.get_one(Run, run.id)
             self.spent += charged_cost(checked)
@@ -548,7 +581,10 @@ class Evaluation:
             self.report.summary.isolation = IsolationCheck(
                 passed=passed, run_id=checked.id, trace_id=checked.trace_id, error=checked.error
             )
-        if not passed and self.halted is None:
+        if not passed and kept and kept[0].error_type in INFRA_ERRORS:
+            # Pas une fuite de consigne : l'isolement n'a pas pu être vérifié
+            self._abort(f"{infra_reason(kept[0])} : aucun ticket lancé")
+        elif not passed:
             self._abort("Vérification d'isolement en échec : aucun ticket lancé")
         self.save()
         if passed:
@@ -587,9 +623,11 @@ class Evaluation:
             ]
         except ShopSimError:
             record.ticket_after = None
+        if result is not None and result.error_type in INFRA_ERRORS:
+            # Jamais une faute de l'agent : hors de la notation, et plus aucun lancement
+            record.status = TicketStatus.INTERRUPTED
+            self._abort(infra_reason(result))
         self.results[ticket_id] = record
-        if result is not None and result.error_type is ErrorType.SHOPSIM_UNAVAILABLE:
-            self._abort("ShopSim injoignable pendant l'évaluation")
         self.save()
         self.done += 1
         say(f"Ticket {ticket_id} terminé ({self.done}/{self.total()}) : {ticket_line(record)}")
@@ -670,7 +708,8 @@ async def evaluate(
         summary=EvalSummary(
             name=args.name,
             model_requested=args.model,
-            code=code_version(),
+            prompt_version=args.prompt,
+            code=code_version(args.prompt),
             simulation_now=simulation_now,
             started_at=started,
             status=EvalStatus.RUNNING,
@@ -682,13 +721,20 @@ async def evaluate(
         )
     )
     evaluation = Evaluation(
-        factory, query, args.model, args.max_budget_usd, report, path, series.spent
+        factory,
+        query,
+        args.model,
+        args.max_budget_usd,
+        report,
+        path,
+        series.spent,
+        prompt_version=args.prompt,
     )
     evaluation.save()
     which = f", passage {series.index}/{series.passes}" if series.passes > 1 else ""
     say(
         f"Évaluation « {args.name} »{which} : {len(ticket_ids)} ticket(s), modèle {args.model}, "
-        f"plafond {usd(args.max_budget_usd)}"
+        f"consigne {args.prompt}, plafond {usd(args.max_budget_usd)}"
     )
     say(f"Résultats : {path}")
     loop = asyncio.get_running_loop()
@@ -733,6 +779,12 @@ def parser() -> argparse.ArgumentParser:
         help=f"modèle de l'agent ({sdk_runner.DEFAULT_MODEL} par défaut)",
     )
     parser.add_argument(
+        "--prompt",
+        choices=sorted(PROMPTS),
+        default=DEFAULT_PROMPT,
+        help=f"version de la consigne de l'agent ({DEFAULT_PROMPT} par défaut, celle du service)",
+    )
+    parser.add_argument(
         "--passes",
         type=passes,
         default=1,
@@ -750,8 +802,8 @@ def confirmed(args: argparse.Namespace, count: int) -> bool:
         return False
     times = f" en {args.passes} passages" if args.passes > 1 else ""
     question = (
-        f"Évaluer {count} ticket(s){times} avec {args.model}, plafond {args.max_budget_usd} $ "
-        "(toute la série) ? [o/N] "
+        f"Évaluer {count} ticket(s){times} avec {args.model}, consigne {args.prompt}, "
+        f"plafond {args.max_budget_usd} $ (toute la série) ? [o/N] "
     )
     return input(question).strip().lower() in YES
 

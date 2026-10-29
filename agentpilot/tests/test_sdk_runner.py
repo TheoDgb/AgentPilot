@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import CLINotFoundError, ProcessError
+from claude_agent_sdk import AssistantMessage, CLINotFoundError, ProcessError
 
 from agentpilot import sdk_runner
 from agentpilot.hooks import SupportHooks
@@ -286,6 +286,24 @@ async def test_check_fails_on_wrong_answers(changes: dict[str, Any], message: st
     assert message in (result.error or "")
 
 
+async def test_another_prompt_version_for_the_ticket_and_the_check() -> None:
+    """Évaluation d'une autre consigne (`evals.run --prompt v1`) : le ticket et la vérification
+    d'isolement reçoivent cette version ; le service garde la version par défaut."""
+    fake = happy_path()
+    await decide_ticket(21, environ=ENVIRON, query=fake, prompt_version="v1")
+    assert fake.options is not None
+    assert fake.options.system_prompt == build_system_prompt(TODAY, "v1")
+    assert fake.options.system_prompt != build_system_prompt(TODAY)
+
+    check = FakeQuery(init_message(), result_message(expected_context(TODAY).model_dump()))
+    result = await check_context(
+        journal=MemoryJournal(), environ=ENVIRON, query=check, prompt_version="v1"
+    )
+    assert result.error is None
+    assert check.options is not None
+    assert check.options.system_prompt == build_system_prompt(TODAY, "v1")
+
+
 async def test_check_runs_without_ticket() -> None:
     """Pendant la vérification, les hooks n'ont pas de ticket : toute action est refusée."""
     fake = FakeQuery(init_message(), result_message(expected_context(TODAY).model_dump()))
@@ -320,3 +338,86 @@ def test_action_tools_are_the_mcp_action_tools() -> None:
         "mcp__shopsim__escalate_ticket",
         "mcp__shopsim__resolve_ticket",
     }
+
+
+# --- Erreurs d'infrastructure : jamais une faute de l'agent ----------------------------
+
+# Résultat réellement reçu le 2026-10-29 (évaluation « prompt-v2 », ticket 9)
+USAGE_LIMIT = (
+    "API Error: 400 You have reached your specified API usage limits. You will regain access "
+    "on 2026-11-01 at 00:00 UTC."
+)
+
+
+def failed_result(text: str, **changes: Any) -> Any:  # noqa: ANN401
+    return result_message(None, is_error=True, result=text, total_cost_usd=0.0, **changes)
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        # Limite de dépense : HTTP 400, texte d'une CLI sans `api_error_status`
+        [init_message(), failed_result(USAGE_LIMIT)],
+        # Code HTTP donné par la CLI : clé refusée, limite de débit, surcharge
+        [init_message(), failed_result("Invalid API key", api_error_status=401)],
+        [init_message(), failed_result("Rate limited", api_error_status=429)],
+        [init_message(), failed_result("Overloaded", api_error_status=529)],
+        # Nature de l'erreur dans un message de l'agent
+        [
+            init_message(),
+            AssistantMessage(content=[], model="claude-sonnet-5-5", error="billing_error"),
+            failed_result("Credit balance is too low"),
+        ],
+    ],
+)
+async def test_api_errors_are_infrastructure(messages: list[Any]) -> None:
+    result = await decide_ticket(21, environ=ENVIRON, query=FakeQuery(*messages))
+
+    assert result.error_type is sdk_runner.ErrorType.API_UNAVAILABLE
+    assert result.error_type in sdk_runner.INFRA_ERRORS
+    assert result.output is None
+
+
+@pytest.mark.parametrize(
+    ("final", "error_type"),
+    [
+        # Négatifs : échecs de l'agent lui-même, sans erreur de l'API
+        (
+            result_message(None, subtype="error_max_turns", is_error=True),
+            sdk_runner.ErrorType.AGENT_ERROR,
+        ),
+        (failed_result("Je ne peux pas traiter ce ticket."), sdk_runner.ErrorType.AGENT_ERROR),
+        # « API Error » cité ailleurs qu'au début (par exemple dans un ticket) : pas l'API
+        (failed_result("Le client écrit « API Error: 400 »."), sdk_runner.ErrorType.AGENT_ERROR),
+        (result_message(None), sdk_runner.ErrorType.INVALID_OUTPUT),
+    ],
+)
+async def test_agent_failures_stay_agent_failures(final: Any, error_type: Any) -> None:  # noqa: ANN401
+    result = await decide_ticket(21, environ=ENVIRON, query=FakeQuery(init_message(), final))
+
+    assert result.error_type is error_type
+    assert result.error_type not in sdk_runner.INFRA_ERRORS
+
+
+async def test_ignored_api_warning_does_not_make_an_agent_failure_infrastructure() -> None:
+    """`invalid_request` n'est pas dans `API_FAILURES` : sans code HTTP, faute de l'agent."""
+    messages = [
+        init_message(),
+        AssistantMessage(content=[], model="claude-sonnet-5-5", error="invalid_request"),
+        result_message(None, subtype="error_max_turns", is_error=True),
+    ]
+    result = await decide_ticket(21, environ=ENVIRON, query=FakeQuery(*messages))
+    assert result.error_type is sdk_runner.ErrorType.AGENT_ERROR
+
+
+async def test_missing_api_key_or_cli_is_configuration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sdk_runner.support_agent, "ENV_FILE", tmp_path / ".env")
+    no_key = await decide_ticket(21, environ={}, query=happy_path())
+    assert no_key.error_type is sdk_runner.ErrorType.CONFIG
+
+    monkeypatch.setattr(sdk_runner.claude_guard, "real_cli", lambda environ: None)
+    no_cli = await decide_ticket(21, environ=ENVIRON, query=happy_path())
+    assert no_cli.error_type is sdk_runner.ErrorType.CONFIG
+    assert no_cli.error == "CLI Claude Code introuvable (ni celle du SDK, ni dans le PATH)"

@@ -196,3 +196,72 @@ def test_judge_refused_with_chaos_token_in_the_environment(
     assert code == 1
     assert "CHAOS_TOKEN" in capsys.readouterr().err
     assert query.prompt is None
+
+
+# --- Erreurs d'infrastructure : jamais une faute de l'agent ------------------------------
+
+USAGE_LIMIT = (
+    "L'agent a échoué : API Error: 400 You have reached your specified API usage limits. "
+    "You will regain access on 2026-11-01 at 00:00 UTC."
+)
+
+
+def infra(status: str, error_type: str, error: str = "erreur") -> TicketResult:
+    return result(DELAY, None, [], status=status, error_type=error_type, error=error)
+
+
+def test_ticket_stopped_by_the_infrastructure_is_not_graded(tmp_path: Path) -> None:
+    down = infra("interrupted", "api_unavailable", USAGE_LIMIT)
+    path = save(tmp_path / "r.json", report([good(SMALL_REFUND), down]))
+
+    assert run_grade(tmp_path, path) == 0
+
+    text = next((tmp_path / "docs").glob("*.md")).read_text(encoding="utf-8")
+    assert "**1 / 1 tickets réussis (100 %)**" in text
+    assert "ticket 1 (interrupted, api_unavailable)" in text
+
+
+@pytest.mark.parametrize(
+    ("error_type", "error"),
+    [
+        # Fichier d'avant la distinction : l'erreur de l'API passait pour une faute de l'agent
+        ("agent_error", USAGE_LIMIT),
+        ("shopsim_unavailable", "Horloge de ShopSim illisible"),
+        ("config", "ANTHROPIC_API_KEY absente : la renseigner dans .env"),
+    ],
+)
+def test_old_file_counting_an_infrastructure_error_as_an_agent_failure_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], error_type: str, error: str
+) -> None:
+    path = save(
+        tmp_path / "old.json", report([good(SMALL_REFUND), infra("failed", error_type, error)])
+    )
+
+    assert run_grade(tmp_path, path) == 1
+
+    assert "old.json : 1 ticket(s) (1) en échec à cause de l'infrastructure" in (
+        capsys.readouterr().err
+    )
+    assert not (tmp_path / "docs").exists()
+
+
+def test_real_agent_failure_is_still_graded(tmp_path: Path) -> None:
+    """Négatif : un échec de l'agent (sortie invalide, texte qui cite « API Error » ailleurs
+    qu'au début) reste noté comme un échec."""
+    failures = [
+        infra("failed", "invalid_output", "L'agent n'a pas rendu de sortie structurée"),
+        result(
+            SMALL_REFUND,
+            None,
+            [],
+            status="failed",
+            error_type="agent_error",
+            error="L'agent a échoué : le client cite « API Error: 400 »",
+        ),
+    ]
+    path = save(tmp_path / "r.json", report(failures))
+
+    assert run_grade(tmp_path, path) == 0
+
+    text = next((tmp_path / "docs").glob("*.md")).read_text(encoding="utf-8")
+    assert "**0 / 2 tickets réussis (0 %)**" in text

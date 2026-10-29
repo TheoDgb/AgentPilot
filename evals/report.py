@@ -121,7 +121,8 @@ def _header(passes: Sequence[Pass], graded_at: datetime, versions: Versions) -> 
     return [
         f"- Configuration : `{summary.name}`, modèle demandé `{summary.model_requested}`, "
         f"modèles utilisés {', '.join(f'`{m}`' for m in models) or 'inconnus'}",
-        f"- Code : commit `{commit}`{dirty}, empreinte de la consigne `{code.prompt_sha256[:12]}`",
+        f"- Code : commit `{commit}`{dirty}, consigne {summary.prompt_version} (empreinte "
+        f"`{code.prompt_sha256[:12]}`)",
         f"- Date simulée : {summary.simulation_now:%Y-%m-%d %H:%M} UTC ; lancée le "
         f"{summary.started_at:%Y-%m-%d %H:%M} UTC",
         f"- Passages : {len(passes)} ({states})",
@@ -280,12 +281,16 @@ def _failures(passes: Sequence[Pass]) -> list[str]:
 
 def _not_graded(passes: Sequence[Pass]) -> list[str]:
     count = len(passes)
-    items = [
-        f"{label(i, count) + ' ' if count > 1 else ''}ticket {g.ticket_id} ({g.status.value})"
-        for i, p in enumerate(passes, start=1)
-        for g in p.grades
-        if g.passed is None
-    ]
+    items = []
+    for i, p in enumerate(passes, start=1):
+        errors = {t.ticket_id: t.error_type for t in p.report.tickets}
+        for g in p.grades:
+            if g.passed is not None:
+                continue
+            # Erreur d'infrastructure (API, ShopSim…) : jamais une faute de l'agent
+            why = ", ".join(x for x in (g.status.value, errors.get(g.ticket_id)) if x)
+            where = label(i, count) + " " if count > 1 else ""
+            items.append(f"{where}ticket {g.ticket_id} ({why})")
     if not items:
         return []
     return ["## Tickets non notés", "", ", ".join(items), ""]

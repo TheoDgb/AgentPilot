@@ -60,7 +60,7 @@ from agentpilot.models import (
     ToolCall,
 )
 from agentpilot.sdk_runner import AgentResult
-from agentpilot.support_agent import ACTION_TOOL_NAMES
+from agentpilot.support_agent import ACTION_TOOL_NAMES, DEFAULT_PROMPT
 from mcp_server.shopsim_client import ShopSimUnavailable, get_json
 from observability import trace
 from observability.logs import log_event
@@ -356,8 +356,10 @@ class Worker:
         # Dernier relevé de la file (page de pilotage)
         self.queue: QueueSnapshot | None = None
         self._serve_scope: anyio.CancelScope | None = None
-        # Modèle de l'agent Support (l'évaluation peut en choisir un autre)
+        # Modèle et version de la consigne de l'agent Support (l'évaluation peut en choisir
+        # d'autres ; le service garde toujours ceux par défaut)
         self.model = sdk_runner.DEFAULT_MODEL
+        self.prompt_version = DEFAULT_PROMPT
 
     @property
     def factory(self) -> sessionmaker[Session]:
@@ -445,9 +447,9 @@ class Worker:
 
     def ticket_launch(self, run_id: uuid.UUID, ticket_id: int, done: list[str]) -> Launch:
         journal = DbJournal(self.factory, run_id)
-        query, model = self.state.query, self.model
+        query, model, version = self.state.query, self.model, self.prompt_version
         return lambda: sdk_runner.decide_ticket(
-            ticket_id, journal=journal, query=query, model=model, done=done
+            ticket_id, journal=journal, query=query, model=model, done=done, prompt_version=version
         )
 
     async def start_ticket(self, ticket_id: int, trigger: RunTrigger) -> tuple[Run, Launch]:

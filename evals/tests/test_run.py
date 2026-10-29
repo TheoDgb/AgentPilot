@@ -107,6 +107,19 @@ REPLY_DECISION = {
 }
 
 
+# Limite de dépense de l'API atteinte : résultat réellement reçu le 2026-10-29
+API_LIMIT = result_message(
+    None,
+    is_error=True,
+    api_error_status=400,
+    total_cost_usd=0.0,
+    result=(
+        "API Error: 400 You have reached your specified API usage limits. You will regain "
+        "access on 2026-11-01 at 00:00 UTC."
+    ),
+)
+
+
 class Agent:
     """Faux SDK de l'évaluation : vérification d'isolement, puis, pour chaque ticket de la
     consigne, ses appels d'outils joués avec les vrais hooks (`HookDrivingQuery`)."""
@@ -118,9 +131,14 @@ class Agent:
         check_ok: bool = True,
         results_dir: Path | None = None,
         interrupt: bool = False,
+        api_down: set[int] | None = None,
+        check_api_down: bool = False,
     ) -> None:
         self.scripts = scripts
         self.check_ok = check_ok
+        # Tickets (ou vérification d'isolement) pour lesquels l'API Anthropic refuse l'appel
+        self.api_down = api_down or set()
+        self.check_api_down = check_api_down
         self.results_dir = results_dir
         self.interrupt = interrupt
         self.prompts: list[str] = []
@@ -133,6 +151,8 @@ class Agent:
     def __call__(self, *, prompt: str, options: ClaudeAgentOptions) -> AsyncIterator[Any]:
         self.prompts.append(prompt)
         self.options.append(options)
+        if prompt == CHECK_PROMPT and self.check_api_down:
+            return FakeQuery(init_message(), API_LIMIT)(prompt=prompt, options=options)
         if prompt == CHECK_PROMPT:
             answer = expected_context(TODAY).model_dump()
             if not self.check_ok:
@@ -142,6 +162,8 @@ class Agent:
             )
         found = re.search(r"ticket n°(\d+)", prompt)
         assert found is not None
+        if int(found[1]) in self.api_down:
+            return FakeQuery(init_message(), API_LIMIT)(prompt=prompt, options=options)
         calls, output = self.scripts[int(found[1])]
         stream = HookDrivingQuery(*calls, output=output)(prompt=prompt, options=options)
         return self._counted(stream)
@@ -374,6 +396,37 @@ def test_agent_gets_the_service_prompt_and_nothing_from_the_ground_truth(
         assert "CHAOS_TOKEN" not in options.env
 
 
+def test_another_prompt_version_is_evaluated_and_recorded(
+    ready: None,
+    shop: Shop,
+    agentpilot_engine: Engine,
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    """`--prompt v1` : la vérification d'isolement et le ticket reçoivent la v1, dont la
+    version et l'empreinte vont dans les résultats ; sans option, la v2 du service."""
+    ticket = shop.ticket(shop.payment(3_000))
+    agent = Agent({ticket.id: ([], decision(ticket, **REPLY_DECISION))})
+    results = tmp_path / "out"
+
+    code = evaluate(agentpilot_engine, truth(tmp_path, ticket), results, agent, "--prompt", "v1")
+
+    assert code == 0
+    v1 = support_agent.build_system_prompt(TODAY, "v1")
+    assert [o.system_prompt for o in agent.options] == [v1, v1]
+    summary = report(results).summary
+    assert summary.prompt_version == "v1"
+    assert summary.code.prompt_sha256 == run.code_version("v1").prompt_sha256
+    assert summary.code.prompt_sha256 != run.code_version().prompt_sha256
+    assert run.code_version().prompt_sha256 == run.code_version("v2").prompt_sha256
+
+
+def test_unknown_prompt_version_is_refused() -> None:
+    with pytest.raises(SystemExit):
+        run.parser().parse_args(["--prompt", "v9"])
+    assert run.parser().parse_args([]).prompt == "v2"
+
+
 def test_budget_cap_stops_launching(
     ready: None,
     shop: Shop,
@@ -580,9 +633,77 @@ def test_shopsim_unavailable_aborts(
     result = report(results)
     assert result.summary.status == "aborted"
     assert result.summary.stop_reason == "ShopSim injoignable pendant l'évaluation"
+    # Jamais une faute de l'agent : interrompu, hors de la notation
     assert result.tickets[0].error_type == "shopsim_unavailable"
+    assert result.tickets[0].status == "interrupted"
     assert result.tickets[-1].status == "not_run"
     assert result.tickets[-1].not_run_reason == "aborted"
+
+
+def test_api_error_stops_the_series_and_is_never_an_agent_failure(
+    ready: None,
+    shop: Shop,
+    session: Session,
+    agentpilot_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Cas réel du 2026-10-29 : limite de dépense atteinte au milieu du passage 1."""
+    tickets = [shop.ticket(shop.payment(1_000 + n)) for n in range(4)]
+    agent = Agent(
+        {t.id: ([], decision(t, **REPLY_DECISION)) for t in tickets}, api_down={tickets[1].id}
+    )
+    reseed = Reseed(session)
+    results = tmp_path / "results"
+
+    code = evaluate(
+        agentpilot_engine,
+        truth(tmp_path, *tickets),
+        results,
+        agent,
+        "--passes",
+        "2",
+        seed=reseed,
+    )
+
+    assert code == 2
+    # Pas de passage 2 : ni remise à zéro, ni second fichier
+    assert reseed.calls == 0
+    [only] = results.glob("*.json")
+    result = EvalReport.model_validate_json(only.read_text(encoding="utf-8"))
+    assert result.summary.status == "aborted"
+    assert result.summary.stop_reason == (
+        "API Anthropic indisponible (limite de dépense, clé refusée ou panne) pendant "
+        "l'évaluation : HTTP 400"
+    )
+    by_id = {t.ticket_id: t for t in result.tickets}
+    down = by_id[tickets[1].id]
+    assert down.status == "interrupted" and down.error_type == "api_unavailable"
+    # Plus aucun lancement après l'erreur (au plus 2 exécutions en même temps)
+    assert by_id[tickets[3].id].status == "not_run"
+    assert by_id[tickets[3].id].not_run_reason == "aborted"
+    assert "failed" not in {t.status for t in result.tickets}
+
+
+def test_isolation_check_without_the_api_is_not_an_isolation_failure(
+    ready: None,
+    shop: Shop,
+    agentpilot_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    ticket = shop.ticket(shop.payment(3_000))
+    agent = Agent({ticket.id: ([], decision(ticket, **REPLY_DECISION))}, check_api_down=True)
+    results = tmp_path / "results"
+
+    code = evaluate(agentpilot_engine, truth(tmp_path, ticket), results, agent)
+
+    assert code == 2
+    result = report(results)
+    assert result.summary.status == "aborted"
+    assert result.summary.stop_reason == (
+        "API Anthropic indisponible (limite de dépense, clé refusée ou panne) pendant "
+        "l'évaluation : HTTP 400 : aucun ticket lancé"
+    )
+    assert agent.ticket_prompts() == []
 
 
 def test_failed_isolation_check_launches_no_ticket(

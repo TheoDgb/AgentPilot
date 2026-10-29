@@ -20,6 +20,9 @@ APPROVAL_THRESHOLD_CENTS = 5_000
 # Client à risque : au moins 3 remboursements sur les 90 derniers jours
 RISK_WINDOW = timedelta(days=90)
 RISK_MIN_REFUNDS = 3
+# Un conseiller reprend un dossier (escalade, action en attente) sous 48 h ouvrées : délai
+# annoncé au client par la consigne v2 de l'agent Support (sans effet sur la vérité terrain)
+HUMAN_FOLLOW_UP_HOURS = 48
 
 
 def within_refund_window(delivered_at: datetime, now: datetime) -> bool:

@@ -27,7 +27,7 @@ from agentpilot.sdk_runner import QueryFn, sdk_query
 from agentpilot.support_agent import AgentRunError
 from evals import grading, judge
 from evals.report import Pass, Versions, percent, render, usd
-from evals.results import EvalReport
+from evals.results import EvalReport, EvalSummary, TicketStatus, infra_failure
 from evals.run import GROUND_TRUTH, REPO_ROOT, Refused, budget, check_environment
 
 REPORTS_DIR = REPO_ROOT / "docs" / "evals"
@@ -42,6 +42,19 @@ def load(paths: Sequence[Path]) -> list[tuple[Path, EvalReport]]:
             raise Refused(
                 f"fichier de résultats illisible : {path} ({type(exc).__name__})"
             ) from None
+    for path, report in loaded:
+        # Fichier d'avant la distinction : une erreur d'infrastructure y passe pour une faute
+        broken = [
+            t.ticket_id
+            for t in report.tickets
+            if t.status is TicketStatus.FAILED and infra_failure(t)
+        ]
+        if broken:
+            raise Refused(
+                f"{path.name} : {len(broken)} ticket(s) ({shown(broken)}) en échec à cause de "
+                "l'infrastructure (API Anthropic, ShopSim, configuration ou CLI), enregistrés "
+                "comme des fautes de l'agent : relancer l'évaluation"
+            )
     first = loaded[0][1].summary
     for path, report in loaded[1:]:
         summary = report.summary
@@ -58,6 +71,16 @@ def load(paths: Sequence[Path]) -> list[tuple[Path, EvalReport]]:
             )
     # Ordre des passages : rang dans la série, puis date
     return sorted(loaded, key=lambda x: (x[1].summary.pass_index, x[1].summary.started_at))
+
+
+def shown(ids: Sequence[int], limit: int = 10) -> str:
+    more = f" (+{len(ids) - limit})" if len(ids) > limit else ""
+    return ", ".join(map(str, ids[:limit])) + more
+
+
+def stem(summary: EvalSummary) -> str:
+    """Même nom que les résultats : identifiant de la série, sinon date et nom."""
+    return summary.series or f"{summary.started_at:%Y-%m-%dT%H%M%SZ}-{summary.name}"
 
 
 def replies_to_judge(passes: Sequence[Pass]) -> list[judge.Reply]:
@@ -138,10 +161,7 @@ def main(
         except AgentRunError as exc:
             print(f"Notation refusée : {exc}", file=sys.stderr)
             return 1
-    first = passes[0].report.summary
-    # Même nom que les résultats : identifiant de la série, sinon date et nom de l'évaluation
-    stem = first.series or f"{first.started_at:%Y-%m-%dT%H%M%SZ}-{first.name}"
-    out = args.out or reports_dir / f"{stem}.md"
+    out = args.out or reports_dir / f"{stem(passes[0].report.summary)}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     versions = Versions(
         rules_sha256=grading.rules_sha256(),

@@ -6,6 +6,7 @@ vérification de la consigne reçue (`--check`).
 """
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -23,8 +24,33 @@ from observability.logs import register_secret
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENT_DIR = REPO_ROOT / "agents" / "support"
+# Skill de la v1 de la consigne (`PROMPTS`)
 SKILL_PATH = AGENT_DIR / "skills" / "refund-policy" / "SKILL.md"
 SETTINGS_PATH = AGENT_DIR / "settings.json"
+
+
+@dataclass(frozen=True)
+class PromptFiles:
+    """Une version de la consigne : instructions (CLAUDE.md) et politique (skill)."""
+
+    instructions: Path
+    skill: Path
+
+    def paths(self) -> tuple[Path, Path]:
+        return (self.instructions, self.skill)
+
+
+# Versions de la consigne. `DEFAULT_PROMPT` sert au service (boucle, CLI) et par défaut à
+# l'évaluation ; une autre version ne se choisit que pour une évaluation (`evals.run --prompt`),
+# afin d'être comparée avec la même notation (`evals.compare`). v2 adoptée le 2026-10-29
+# (J5.3, `docs/evals/compare-…-baseline-vs-…-prompt-v2.md`) ; v1 gardée pour comparer
+PROMPTS = {
+    "v1": PromptFiles(AGENT_DIR / "CLAUDE.md", SKILL_PATH),
+    "v2": PromptFiles(
+        AGENT_DIR / "v2" / "CLAUDE.md", AGENT_DIR / "v2" / "skills" / "refund-policy" / "SKILL.md"
+    ),
+}
+DEFAULT_PROMPT = "v2"
 DEFAULT_SHOPSIM_URL = "http://localhost:8000"
 
 SIGNATURE = "Le service client Lumen"
@@ -92,10 +118,12 @@ def skill_body(text: str) -> str:
     return text
 
 
-def build_system_prompt(today: date) -> str:
-    """CLAUDE.md de l'agent + politique (skill refund-policy) + date du jour de la simulation."""
-    instructions = (AGENT_DIR / "CLAUDE.md").read_text(encoding="utf-8").strip()
-    policy = skill_body(SKILL_PATH.read_text(encoding="utf-8")).strip()
+def build_system_prompt(today: date, version: str = DEFAULT_PROMPT) -> str:
+    """CLAUDE.md de l'agent + politique (skill refund-policy) + date du jour de la simulation,
+    dans la `version` demandée de la consigne (`KeyError` pour une version inconnue)."""
+    files = PROMPTS[version]
+    instructions = files.instructions.read_text(encoding="utf-8").strip()
+    policy = skill_body(files.skill.read_text(encoding="utf-8")).strip()
     return (
         f"{instructions}\n\n{policy}\n\n## Date du jour\n\n"
         f"Aujourd'hui, nous sommes le {today.isoformat()}. C'est la seule date valable pour "

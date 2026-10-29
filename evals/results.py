@@ -5,6 +5,7 @@ jamais la vérité terrain : seulement ce que l'agent a décidé et ce qui s'est
 (journal des appels d'outils, actions en attente, état du ticket relu dans ShopSim).
 """
 
+import re
 import uuid
 from datetime import datetime
 from enum import StrEnum
@@ -13,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from agentpilot.schemas import SupportDecision
+from agentpilot.sdk_runner import INFRA_ERRORS
 
 
 class EvalStatus(StrEnum):
@@ -37,6 +39,11 @@ class NotRunReason(StrEnum):
     BUDGET = "budget"
     INTERRUPTED = "interrupted"
     ABORTED = "aborted"
+
+
+# Fichier d'avant la distinction des erreurs d'infrastructure : erreur de l'API reconnue au
+# texte du résultat de l'agent
+OLD_API_ERROR = re.compile(r"^L'agent a échoué : API Error: \d{3}\b")
 
 
 class Strict(BaseModel):
@@ -108,6 +115,14 @@ class TicketResult(Strict):
     propose_only: bool = False
 
 
+def infra_failure(ticket: TicketResult) -> bool:
+    """Ticket en échec à cause de l'infrastructure (API Anthropic, ShopSim, configuration, CLI),
+    jamais une faute de l'agent ; reconnu aussi dans un fichier d'avant cette distinction."""
+    if ticket.error_type in INFRA_ERRORS:
+        return True
+    return ticket.error is not None and OLD_API_ERROR.match(ticket.error) is not None
+
+
 class CodeVersion(Strict):
     commit: str | None
     # Modifications non commitées au lancement
@@ -128,6 +143,9 @@ class IsolationCheck(Strict):
 class EvalSummary(Strict):
     name: str
     model_requested: str
+    # Version de la consigne (`agentpilot.support_agent.PROMPTS`) ; absente avant J5.3, où seule
+    # la v1 existait (la version par défaut est la v2 depuis)
+    prompt_version: str = "v1"
     # Modèles annoncés par l'agent à l'initialisation
     models_used: list[str] = []
     code: CodeVersion
