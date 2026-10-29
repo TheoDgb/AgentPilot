@@ -538,8 +538,26 @@ vraie panne (J4.4).
   ajoutées à une base existante par `init_db` (pas de base à recréer). Les exécutions d'avant
   (`error_type` NULL) restent comptées comme avant.
 
-**Bugs ou surprises** : aucun noté.
+- **Vérifié en conditions réelles** (2026-10-29), service lancé avec une clé d'API invalide
+  après une remise à zéro :
+  - tickets 36 et 48 en `failed`, `error_type=api_unavailable`, 0 $ ; boucle en pause (`infra`,
+    `api_unavailable`), aucun ticket abandonné, `agentpilot_loop_state{state="paused_infra"}`
+    à 1 ;
+  - service relancé avec la vraie clé, boucle relancée : les tickets 36 et 48 repartent les
+    premiers, 1 min 42 s après leur échec (comptés en échec, ils auraient attendu le délai de
+    relance de 5 min), et réussissent ; 8 autres tickets traités ensuite, tous en `succeeded`.
 
-**Leçons** : aucune notée pour l'instant (vérification en conditions réelles à faire : service
-lancé avec une clé invalide).
+**Bugs ou surprises**
+- Premier essai sans effet : la boucle était dans sa pause de départ, puis, une fois relancée,
+  les 11 tickets ouverts restants étaient tous écartés (déjà traités lors d'une session
+  précédente). Aucune exécution, donc aucune pause : il fallait d'abord une remise à zéro
+  complète.
+- Les tickets en échec ont d'abord été devinés d'après l'ordre de la file (4 et 37, à tort) ; les
+  logs (`run.finished`, `loop.paused`) ont montré que c'étaient le 36 et le 48.
+
+**Leçons**
+- Un essai en conditions réelles part d'un état connu (remise à zéro) ; sinon une absence
+  d'effet ne prouve rien.
+- Lire les logs plutôt que déduire : `observability.query` filtré sur `run.started`,
+  `run.finished` et `loop.paused` donne la preuve directement.
 
