@@ -891,7 +891,7 @@ def test_refused_with_an_active_fault(
         ChaosFault(
             scenario=ChaosScenario.PAYMENT_LATENCY,
             activated_at=datetime(2026, 7, 6, 12, 0, tzinfo=UTC),
-            request_count=0,
+            started_real_at=datetime(2026, 10, 29, 12, 0, tzinfo=UTC),
         )
     )
     shop.session.flush()

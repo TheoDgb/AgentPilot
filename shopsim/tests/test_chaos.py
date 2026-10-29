@@ -2,6 +2,7 @@
 
 import time
 from collections.abc import Iterator
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,9 +10,10 @@ from httpx import Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from shopsim.app.clock import SIMULATION_NOW
 from shopsim.app.db import Base
 from shopsim.app.models import ChaosFault, ChaosScenario, Refund
-from shopsim.tests.conftest import MakeOrder, MakePayment, MakeTicket
+from shopsim.tests.conftest import MakeOrder, MakePayment, MakeTicket, SimClock
 
 TOKEN = "test-chaos-token"
 AUTH = {"X-Chaos-Token": TOKEN}
@@ -165,44 +167,91 @@ def test_db_errors(client: TestClient, make_payment: MakePayment, make_ticket: M
 # --- connection_saturation -------------------------------------------------------------
 
 
-def test_connection_saturation(
-    client: TestClient, make_order: MakeOrder, slept: list[float]
+def test_connection_saturation_rises_with_elapsed_time(
+    client: TestClient, make_order: MakeOrder, slept: list[float], sim_clock: SimClock
 ) -> None:
+    """De 0 à 5 s en 10 min de temps réel, puis le plafond : selon le temps écoulé depuis
+    l'activation, jamais selon le nombre de requêtes."""
     order = make_order()
     activate(client, "connection_saturation")
 
-    for _ in range(3):
+    delays = []
+    for minutes in (0, 0.5, 1, 5, 10, 20):
+        sim_clock.elapse(timedelta(minutes=minutes))
+        slept.clear()
         assert client.get(f"/orders/{order.id}").status_code == 200
+        delays.append(sum(slept))
 
-    # Le temps de réponse augmente avec le nombre de requêtes
-    assert slept == [0.05, 0.1, 0.15]
+    assert delays == [0, 0.25, 0.5, 2.5, 5.0, 5.0]
+
+
+def test_connection_saturation_does_not_depend_on_throughput(
+    client: TestClient, make_order: MakeOrder, slept: list[float], sim_clock: SimClock
+) -> None:
+    """Vingt requêtes au même instant attendent la même durée : un générateur plus rapide ne
+    fait pas monter la panne plus vite."""
+    order = make_order()
+    activate(client, "connection_saturation")
+    sim_clock.elapse(timedelta(minutes=2))
+
+    for _ in range(20):
+        client.get(f"/orders/{order.id}")
+
+    assert slept == [1.0] * 20
+
+
+def test_connection_saturation_stops_and_restarts_from_zero(
+    client: TestClient, make_order: MakeOrder, slept: list[float], sim_clock: SimClock
+) -> None:
+    order = make_order()
+    activate(client, "connection_saturation")
+    sim_clock.elapse(timedelta(minutes=8))
+    client.get(f"/orders/{order.id}")
+    assert slept == [4.0]
 
     stop(client, "connection_saturation")
     slept.clear()
     client.get(f"/orders/{order.id}")
-
     assert slept == []
 
     # Une nouvelle activation repart de zéro
     activate(client, "connection_saturation")
+    sim_clock.elapse(timedelta(minutes=9))
     client.get(f"/orders/{order.id}")
+    assert slept == [0.5]
 
-    assert slept == [0.05]
 
-
-def test_connection_saturation_is_capped(
-    client: TestClient, make_order: MakeOrder, slept: list[float], session: Session
+def test_a_fault_created_without_real_start_gets_the_real_time(
+    session: Session, sim_clock: SimClock
 ) -> None:
-    order = make_order()
-    activate(client, "connection_saturation")
-    fault = session.get(ChaosFault, ChaosScenario.CONNECTION_SATURATION)
-    assert fault is not None
-    fault.request_count = 500
+    """Toute panne créée sans `started_real_at` (tests, scripts) reste valide : l'heure réelle
+    de la création, par `clock.real_now`."""
+    sim_clock.elapse(timedelta(minutes=3))
+    session.add(ChaosFault(scenario=ChaosScenario.DB_ERRORS, activated_at=SIMULATION_NOW))
     session.flush()
 
+    fault = session.get(ChaosFault, ChaosScenario.DB_ERRORS)
+    assert fault is not None
+    assert fault.started_real_at == SimClock.REAL_START + timedelta(minutes=3)
+
+
+def test_connection_saturation_rises_even_with_a_frozen_clock(
+    client: TestClient,
+    make_order: MakeOrder,
+    slept: list[float],
+    sim_clock: SimClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Horloge de la simulation figée (évaluation) : la date simulée ne bouge plus, mais la
+    panne suit le temps réel."""
+    monkeypatch.setenv("SHOPSIM_FREEZE_CLOCK", "1")
+    order = make_order()
+    activate(client, "connection_saturation")
+    sim_clock.elapse(timedelta(minutes=5))
+
     client.get(f"/orders/{order.id}")
 
-    assert slept == [5.0]
+    assert slept == [2.5]
 
 
 # --- bad_deploy ------------------------------------------------------------------------

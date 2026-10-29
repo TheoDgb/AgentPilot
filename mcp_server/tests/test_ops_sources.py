@@ -226,6 +226,37 @@ async def test_trend_tells_a_climb_from_a_jump(fake: FakeSources) -> None:
     ][0] == "/payments/{order_id}"
 
 
+async def test_series_without_any_value_are_left_out(fake: FakeSources) -> None:
+    """Route sans trafic : p95 NaN à tous les points, retirée ; une route avec au moins un
+    point garde ses `null`."""
+    trend_answers(
+        fake,
+        {
+            "/orders/{order_id}": {"now": "0.02"},
+            "/refunds": {"15m_ago": "NaN", "10m_ago": "NaN", "5m_ago": "NaN", "now": "NaN"},
+        },
+    )
+    p95 = promql("shopsim_latency_p95", "5m")["value"]
+    fake.prometheus[p95] = vector(
+        ({"route": "/orders/{order_id}"}, "0.02"), ({"route": "/refunds"}, "NaN")
+    )
+
+    trend = data(await call("query_metrics", metric="shopsim_latency_trend"))["series"]
+    latency = data(await call("query_metrics", metric="shopsim_latency_p95"))["series"]
+
+    assert [s["route"] for s in trend] == ["/orders/{order_id}"]
+    assert trend[0]["p95_s"] == {"15m_ago": None, "10m_ago": None, "5m_ago": None, "now": 0.02}
+    assert latency == [{"labels": {"route": "/orders/{order_id}"}, "value": 0.02}]
+
+
+async def test_description_warns_that_percentiles_are_estimates() -> None:
+    async with Client(mcp) as client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+
+    description = tools["query_metrics"].description or ""
+    assert "histogram buckets" in description and "summarize_logs" in description
+
+
 # --- Alertes -----------------------------------------------------------------------------
 
 

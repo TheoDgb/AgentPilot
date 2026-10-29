@@ -221,7 +221,13 @@ async def test_refund_of_another_customer_order_is_refused(
 async def test_refund_during_bad_deploy_is_readable(
     shopsim: str, session: Session, delivered: Payment, ticket: Ticket
 ) -> None:
-    session.add(ChaosFault(scenario=ChaosScenario.BAD_DEPLOY, activated_at=SIMULATION_NOW))
+    session.add(
+        ChaosFault(
+            scenario=ChaosScenario.BAD_DEPLOY,
+            activated_at=SIMULATION_NOW,
+            started_real_at=datetime.now(UTC),
+        )
+    )
     session.flush()
 
     result = await call(

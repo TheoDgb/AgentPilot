@@ -199,7 +199,8 @@ async def test_shopsim_internal_error_is_readable(
 ) -> None:
     order = make_order()
     # Panne posée directement en base : le serveur MCP n'a aucun accès au Chaos
-    session.add(ChaosFault(scenario=ChaosScenario.DB_ERRORS, activated_at=datetime.now(UTC)))
+    now = datetime.now(UTC)
+    session.add(ChaosFault(scenario=ChaosScenario.DB_ERRORS, activated_at=now, started_real_at=now))
     session.flush()
 
     result = await call("get_order", order_id=order.id)

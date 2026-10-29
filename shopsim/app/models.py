@@ -224,6 +224,14 @@ class Resend(Base):
     replacement_order: Mapped[Order] = relationship(foreign_keys=[replacement_order_id])
 
 
+def _real_now() -> datetime:
+    """Heure réelle par `clock.real_now` (que les tests figent), importé à l'appel : `clock`
+    importe ce module."""
+    from shopsim.app import clock
+
+    return clock.real_now()
+
+
 class ChaosFault(Base):
     """Panne active : la ligne existe tant que la panne n'est pas arrêtée.
 
@@ -237,5 +245,7 @@ class ChaosFault(Base):
         primary_key=True,
     )
     activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    # Requêtes reçues depuis l'activation (panne connection_saturation)
-    request_count: Mapped[int] = mapped_column(default=0)
+    # Heure réelle de l'activation (pas la date simulée, figée pendant une évaluation) : la
+    # panne connection_saturation monte selon le temps réellement écoulé depuis. Par défaut,
+    # l'heure réelle de la création : toute panne créée reste valide
+    started_real_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_real_now)

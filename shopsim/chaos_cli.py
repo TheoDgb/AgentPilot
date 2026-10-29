@@ -36,7 +36,7 @@ ALL = "all"
 DESCRIPTIONS = {
     ChaosScenario.PAYMENT_LATENCY: "Paiements répond en 4 s au lieu de 100 ms",
     ChaosScenario.DB_ERRORS: "les lectures des commandes renvoient 500",
-    ChaosScenario.CONNECTION_SATURATION: "chaque requête attend 50 ms de plus (plafond 5 s)",
+    ChaosScenario.CONNECTION_SATURATION: "les requêtes ralentissent (0 à 5 s en 10 min)",
     ChaosScenario.BAD_DEPLOY: "seuls les remboursements échouent (500)",
 }
 

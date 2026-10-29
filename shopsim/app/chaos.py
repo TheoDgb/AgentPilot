@@ -13,13 +13,15 @@ import logging
 import os
 import secrets
 import time
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from observability.logs import log_event
+from shopsim.app import clock
 from shopsim.app.db import get_session
 from shopsim.app.models import ChaosFault, ChaosScenario
 
@@ -27,9 +29,10 @@ logger = logging.getLogger("shopsim")
 
 # payment_latency : temps de réponse du service Paiements pendant la panne
 CHAOS_PAYMENT_LATENCY_MS = 4_000
-# connection_saturation : attente de n × 50 ms à la n-ième requête, plafonnée à 5 s
-SATURATION_STEP_MS = 50
+# connection_saturation : attente qui monte de 0 à 5 s en 10 min de temps réel, puis reste à 5 s.
+# Selon le temps écoulé, pas le nombre de requêtes : la montée ne dépend pas du débit
 SATURATION_MAX_MS = 5_000
+SATURATION_RAMP = timedelta(minutes=10)
 
 
 def is_active(session: Session, scenario: ChaosScenario) -> bool:
@@ -77,15 +80,24 @@ def raise_if_bad_deploy(session: Session) -> None:
         raise _internal_error()
 
 
+def saturation_delay_s(elapsed: timedelta) -> float:
+    """Attente d'une requête, `elapsed` après l'activation : montée linéaire jusqu'au plafond."""
+    share = min(1.0, max(0.0, elapsed / SATURATION_RAMP))
+    return share * SATURATION_MAX_MS / 1000
+
+
 def apply_connection_saturation(session: Annotated[Session, Depends(get_session)]) -> None:
-    """connection_saturation : chaque requête attend un peu plus que la précédente."""
-    count = session.execute(
-        update(ChaosFault)
-        .where(ChaosFault.scenario == ChaosScenario.CONNECTION_SATURATION)
-        .values(request_count=ChaosFault.request_count + 1)
-        .returning(ChaosFault.request_count)
-    ).scalar_one_or_none()
-    if count is None:
+    """connection_saturation : les requêtes ralentissent peu à peu, comme une base dont les
+    connexions s'épuisent ; à un instant donné, toutes attendent la même durée."""
+    started = session.scalar(
+        select(ChaosFault.started_real_at).where(
+            ChaosFault.scenario == ChaosScenario.CONNECTION_SATURATION
+        )
+    )
+    if started is None:
         return
+    # Rien ne reste ouvert pendant l'attente
     session.commit()
-    time.sleep(min(count * SATURATION_STEP_MS, SATURATION_MAX_MS) / 1000)
+    delay = saturation_delay_s(clock.real_now() - started)
+    if delay > 0:
+        time.sleep(delay)

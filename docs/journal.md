@@ -561,3 +561,67 @@ vraie panne (J4.4).
 - Lire les logs plutôt que déduire : `observability.query` filtré sur `run.started`,
   `run.finished` et `loop.paused` donne la preuve directement.
 
+## J6 — Agent Ops et subagents
+
+### J6.1 : serveur MCP Ops en lecture seule (`b0adabf`, puis corrections)
+
+*2026-10-29*
+
+**Fait**
+- `mcp_server/ops/` : serveur MCP séparé de celui de l'agent Support, 5 outils en lecture
+  seule (`search_logs`, `summarize_logs`, `query_metrics`, `list_alerts`, `check_health`).
+  Heure réelle et âges déjà calculés dans chaque réponse ; jamais de chemin, de requête ni
+  d'adresse en paramètre ; jamais `chaos.jsonl`, `/chaos` ni jeton.
+- Lecture des logs depuis la fin du fichier, liens symboliques refusés.
+- Après le premier essai réel : séries sans aucune valeur retirées des métriques ; description
+  de `query_metrics` qui prévient que les percentiles de Prometheus sont estimés par tranches.
+- Panne `connection_saturation` refaite (modification de ShopSim acceptée) : de 0 à 5 s en
+  10 min selon le temps réel écoulé depuis l'activation, plus selon le nombre de requêtes.
+- **Vérifié en conditions réelles** (générateur de trafic à 5 req/s, outils appelés depuis
+  Claude Code) :
+  - état normal : 4 services `ok`, 540 requêtes en 5 min sans 5xx, aucune alerte active ;
+  - `db_errors` : logs (516 5xx sur 1 208 requêtes, toutes sur `/orders/{order_id}` et
+    `/customers/{customer_id}/orders`, `psycopg.OperationalError`), métriques (100 % de 5xx
+    sur ces deux routes, 0 ailleurs), deux alertes `ShopSimHighErrorRate`, résolues 4 min
+    20 s après ; aucune mention du Chaos ;
+  - `connection_saturation` (ancienne version) : toutes les routes métier à 5 s, `/health` et
+    `/clock` intacts, 5 alertes `ShopSimHighLatency` ;
+  - `payment_latency` : seul `/payments/{order_id}` à 4 s, les alertes des autres routes
+    résolues.
+  - `connection_saturation` (nouvelle version, ShopSim reconstruit) : 0,56 s ajoutées à
+    1 min, 2,61 s à 5 min, 5,0 s à 10 min, identiques sur toutes les routes métier (attendu :
+    0,56, 2,60 et 5 s) ; tendance à 10 min sur `/orders/{order_id}` : 0,010 → 0,038 → 2,49 →
+    4,97 s, montée par paliers, `/health` et `/clock` inchangés ; 5 alertes
+    `ShopSimHighLatency` après 5 min. Points espacés de 5 min suffisants : pas d'option à
+    1 min dans la tendance.
+
+**Bugs ou surprises**
+- La saturation atteignait son plafond en une vingtaine de secondes (50 ms de plus par
+  requête, à 5 req/s) : vue par points espacés de 5 minutes, elle ressemblait à un saut, et la
+  tendance prévue pour distinguer une montée progressive ne montrait rien. Panne irréaliste,
+  corrigée dans ShopSim plutôt que de compenser dans l'outil.
+- La tendance listait des routes sans aucun trafic, tous leurs points à `null` : retirées.
+- Les p95 de Prometheus s'écartent des vrais : 0,24 s pour 0,12 s, 7,4 s pour 5,0 s, 4,9 s
+  pour 4,0 s (interpolation dans des tranches larges). Les logs donnent les vraies valeurs.
+- `/health` de ShopSim reste vert pendant `db_errors` (`SELECT 1` seulement).
+- L'alerte `ShopSimHighLatency` sur `/payments/{order_id}` est restée la même occurrence de la
+  saturation à `payment_latency` : la cause a changé sans nouvelle alerte.
+
+- Premier essai de la nouvelle saturation sans effet : ShopSim n'avait pas été reconstruit
+  (l'outil en ligne de commande, local, affichait déjà le nouveau message). Un p95 de 0,6 s à
+  la première minute a d'abord été lu comme une montée progressive, à tort : c'étaient les
+  premières secondes de l'ancienne panne. Prouvé en comparant aux valeurs attendues à 6 min
+  (5 s mesurées au lieu de 3 s), puis par le schéma de la table.
+
+**Leçons**
+- Vérifier une panne simulée contre ce qu'elle doit montrer, pas seulement qu'elle se
+  déclenche : la saturation « marchait », mais ne ressemblait pas à une saturation.
+- Vérifier le déploiement avant le comportement : un message affiché par un outil local ne
+  prouve pas que le service a la nouvelle version. Comparer chaque mesure à une valeur
+  attendue chiffrée, plutôt qu'à une impression (« ça monte »).
+- Une panne qui dépend du nombre de requêtes dépend du débit du générateur : la régler sur le
+  temps écoulé la rend reproductible.
+- Les points d'attention pour l'agent Ops (santé verte pendant une panne de base, signature de
+  la saturation, alerte qui survit à un changement de cause, percentiles estimés) sont notés
+  sous J6.2 dans CLAUDE.md, pour sa consigne et ses évaluations.
+

@@ -40,7 +40,9 @@ def activate_fault(
     # ON CONFLICT : deux activations simultanées ne créent pas d'erreur
     inserted = session.execute(
         insert(ChaosFault)
-        .values(scenario=scenario, activated_at=clock.now(session), request_count=0)
+        .values(
+            scenario=scenario, activated_at=clock.now(session), started_real_at=clock.real_now()
+        )
         .on_conflict_do_nothing()
         .returning(ChaosFault.scenario)
     ).scalar_one_or_none()

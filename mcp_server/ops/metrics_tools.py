@@ -114,8 +114,13 @@ async def query_metrics(metric: Metric, window: Window = "5m") -> dict[str, Any]
     20 series sorted by value (largest first). Most metrics: [{"labels", "value"}].
     "agentpilot_state": [{"labels", <key>: value...}]. "shopsim_latency_trend": [{"route",
     "p95_s": {"15m_ago", "10m_ago", "5m_ago", "now"}, "change_s" (now minus 15 min ago),
-    "ratio" (now / 15 min ago)}]. A null value means no traffic at that time, never zero.
-    Times are real wall-clock time.
+    "ratio" (now / 15 min ago)}]. A null value means no traffic at that time, never zero; a
+    series with no value at all (a route without any traffic) is left out. Times are real
+    wall-clock time.
+
+    Percentiles are estimated by Prometheus inside wide histogram buckets (e.g. between 0.1 and
+    0.25 s): a p95 of 0.24 s may be a true 0.12 s. Use them to compare routes and moments;
+    summarize_logs gives the exact p50/p95 from the logs.
 
     Errors: Prometheus unreachable, too slow or refusing the query (readable message).
     """
@@ -125,6 +130,12 @@ async def query_metrics(metric: Metric, window: Window = "5m") -> dict[str, Any]
         for labels, value in await _vector(query):
             row = rows.setdefault(_key(labels), {"labels": labels})
             row[key] = value
+    # Série sans aucune valeur (route sans trafic : p95 ou taux NaN) : rien à dire, retirée
+    rows = {
+        key: row
+        for key, row in rows.items()
+        if any(value is not None for name, value in row.items() if name != "labels")
+    }
     if metric == "shopsim_latency_trend":
         series = [_trend(row) for row in rows.values()]
         series.sort(key=lambda r: -(r["p95_s"]["now"] or 0))
