@@ -30,6 +30,7 @@ from agentpilot.models import (
     RunStatus,
     RunTrigger,
 )
+from agentpilot.ops_agent import OPS_TOOL_NAMES
 from agentpilot.support_agent import SUPPORT_TOOL_NAMES
 
 if TYPE_CHECKING:
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from agentpilot.sdk_runner import AgentResult
 
 OTHER_TOOL = "other"
-TOOLS = frozenset(short_name(name) for name in SUPPORT_TOOL_NAMES)
+TOOLS = frozenset(short_name(name) for name in SUPPORT_TOOL_NAMES | OPS_TOOL_NAMES)
 # Outils dont l'action peut être mise en attente d'un humain
 HELD_TOOLS = (REFUND, RESEND)
 # Actions décidées par un humain, encore à exécuter (approuvées : à relancer)
@@ -113,7 +114,8 @@ for _tool in HELD_TOOLS:
 
 
 def tool_label(name: str) -> str:
-    """Nom court d'un outil shopsim (`refund_order`), `other` pour tout autre nom."""
+    """Nom court d'un outil des agents (`refund_order`, `search_logs`), `other` pour tout
+    autre nom."""
     short = short_name(name)
     return short if short in TOOLS else OTHER_TOOL
 

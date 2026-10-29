@@ -1,4 +1,7 @@
-"""Lancement de l'agent Support par le Claude Agent SDK.
+"""Lancement des agents par le Claude Agent SDK : Support (tickets) et Ops (alertes).
+
+Chaque agent a son profil (`AgentProfile` : consigne, serveur MCP et outils, plafonds) ; le
+reste, décrit ici pour Support, vaut pour les deux.
 
 Même isolement que `run_support.py` (CLI) :
 - aucun réglage du disque (`setting_sources=[]`), aucune skill ni plugin, aucun CLAUDE.md :
@@ -32,7 +35,7 @@ import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -48,9 +51,12 @@ from claude_agent_sdk import (
 from claude_agent_sdk import query as sdk_query
 from pydantic import BaseModel
 
-from agentpilot import claude_guard, support_agent
-from agentpilot.hooks import SupportHooks
+from agentpilot import claude_guard, ops_agent, support_agent
+from agentpilot.agent_profile import AgentProfile
+from agentpilot.hooks import OpsHooks, SupportHooks, ToolHooks
 from agentpilot.journal import Journal
+from agentpilot.ops_agent import AlertBrief
+from agentpilot.ops_schemas import IncidentReport, OpsContextCheck
 from agentpilot.schemas import ContextCheck, SupportDecision
 from agentpilot.support_agent import (
     CHECK_PROMPT,
@@ -141,18 +147,57 @@ class AgentResult:
     api_status: int | None = None
 
 
+def support_profile(today: date, prompt_version: str, shopsim_url: str) -> AgentProfile:
+    """Agent Support : consigne de la version demandée, serveur MCP shopsim avec les actions
+    (toujours sous hooks), plafonds d'un ticket."""
+    return AgentProfile(
+        mcp_server=MCP_SERVER,
+        # Le serveur MCP reprend la trace de l'exécution et écrit ses logs à côté des nôtres
+        mcp_config=support_agent.mcp_server_config(
+            shopsim_url, actions=True, trace_id=trace.current_trace_id(), log_dir=logs.log_dir()
+        ),
+        tool_names=SUPPORT_TOOL_NAMES,
+        system_prompt=support_agent.build_system_prompt(today, prompt_version),
+        max_turns=MAX_TURNS,
+        max_budget_usd=MAX_BUDGET_USD,
+        timeout_s=TIMEOUT_S,
+    )
+
+
+def ops_profile(launched_at: datetime, environ: Mapping[str, str]) -> AgentProfile:
+    """Agent Ops : consigne et guide de diagnostic, serveur MCP Ops (5 outils de lecture),
+    plafonds d'une enquête."""
+    return AgentProfile(
+        mcp_server=ops_agent.MCP_SERVER,
+        mcp_config=ops_agent.mcp_server_config(
+            environ, trace_id=trace.current_trace_id(), log_dir=logs.log_dir()
+        ),
+        tool_names=ops_agent.OPS_TOOL_NAMES,
+        system_prompt=ops_agent.build_system_prompt(launched_at),
+        max_turns=ops_agent.MAX_TURNS,
+        max_budget_usd=ops_agent.MAX_BUDGET_USD,
+        timeout_s=ops_agent.TIMEOUT_S,
+    )
+
+
 def build_options(
     schema: type[BaseModel],
-    today: date,
+    today: date | None,
     *,
     api_key: str,
     shopsim_url: str,
     workdir: Path,
     model: str,
-    hooks: SupportHooks,
+    hooks: ToolHooks,
     cli: str,
     prompt_version: str = support_agent.DEFAULT_PROMPT,
+    profile: AgentProfile | None = None,
 ) -> ClaudeAgentOptions:
+    """Options du SDK : même isolement pour tous les agents ; `profile` (Support par défaut)
+    donne la consigne, le serveur MCP, les outils et les plafonds."""
+    if profile is None:
+        assert today is not None
+        profile = support_profile(today, prompt_version, shopsim_url)
     cwd = workdir / "cwd"
     config_dir = workdir / "claude-config"
     cwd.mkdir()
@@ -161,30 +206,22 @@ def build_options(
         # Lanceur qui lie la vie de la CLI à celle du service, puis exécute `cli`
         cli_path=claude_guard.write_launcher(workdir),
         # Remplace la consigne de Claude Code : seule la consigne de l'agent est envoyée
-        system_prompt=support_agent.build_system_prompt(today, prompt_version),
+        system_prompt=profile.system_prompt,
         setting_sources=[],
         skills=[],
         plugins=[],
         strict_mcp_config=True,
-        # Le serveur MCP reprend la trace de l'exécution et écrit ses logs à côté des nôtres
-        mcp_servers={
-            MCP_SERVER: support_agent.mcp_server_config(
-                shopsim_url,
-                actions=True,
-                trace_id=trace.current_trace_id(),
-                log_dir=logs.log_dir(),
-            )
-        },
+        mcp_servers={profile.mcp_server: profile.mcp_config},
         tools=[],
-        allowed_tools=sorted(SUPPORT_TOOL_NAMES),
+        allowed_tools=sorted(profile.tool_names),
         disallowed_tools=BUILTIN_TOOLS,
         permission_mode="dontAsk",
         # Avant chaque outil : validation des actions ; après : journal
         hooks=hooks.matchers(),
         output_format={"type": "json_schema", "schema": schema.model_json_schema()},
         model=model,
-        max_turns=MAX_TURNS,
-        max_budget_usd=MAX_BUDGET_USD,
+        max_turns=profile.max_turns,
+        max_budget_usd=profile.max_budget_usd,
         # Dossier vide : `dontAsk` laisse lire les fichiers du dossier de travail
         cwd=str(cwd),
         env={
@@ -226,7 +263,9 @@ def _record_final(result: AgentResult, final: ResultMessage) -> None:
         result.output = final.structured_output
 
 
-async def _collect(messages: AsyncIterator[Any], result: AgentResult) -> None:
+async def _collect(
+    messages: AsyncIterator[Any], result: AgentResult, profile: AgentProfile
+) -> None:
     """Parcourt les messages : contrôle des outils à l'initialisation, résultat final.
     Les appels d'outils sont journalisés par les hooks."""
     finished = False
@@ -236,7 +275,8 @@ async def _collect(messages: AsyncIterator[Any], result: AgentResult) -> None:
             result.available_tools = support_agent.check_tools(
                 message.data.get("tools", []),
                 message.data.get("mcp_servers", []),
-                SUPPORT_TOOL_NAMES,
+                profile.tool_names,
+                server=profile.mcp_server,
             )
         elif isinstance(message, AssistantMessage):
             if message.error is not None:
@@ -255,16 +295,18 @@ async def _collect(messages: AsyncIterator[Any], result: AgentResult) -> None:
 async def run_agent(
     prompt: str,
     schema: type[BaseModel],
-    today: date,
+    today: date | None,
     *,
-    hooks: SupportHooks | None,
+    hooks: ToolHooks | None,
     environ: Mapping[str, str] = os.environ,
     query: QueryFn = sdk_query,
     model: str = DEFAULT_MODEL,
-    timeout_s: float = TIMEOUT_S,
+    timeout_s: float | None = None,
     prompt_version: str = support_agent.DEFAULT_PROMPT,
+    profile: AgentProfile | None = None,
 ) -> AgentResult:
-    """Lance l'agent ; renvoie la sortie structurée brute (non validée) ou l'erreur."""
+    """Lance l'agent (Support par défaut, ou `profile`) ; renvoie la sortie structurée brute
+    (non validée) ou l'erreur. `timeout_s` : celui du profil par défaut."""
     result = AgentResult(simulation_date=today)
     if hooks is None:
         result.error = "Outils d'action sans hooks de validation : lancement refusé"
@@ -282,6 +324,10 @@ async def run_agent(
         return result
     try:
         shopsim_url = environ.get("SHOPSIM_URL", DEFAULT_SHOPSIM_URL)
+        if profile is None:
+            assert today is not None
+            profile = support_profile(today, prompt_version, shopsim_url)
+        timeout_s = profile.timeout_s if timeout_s is None else timeout_s
         with tempfile.TemporaryDirectory(prefix="agentpilot-") as workdir:
             options = build_options(
                 schema,
@@ -293,10 +339,11 @@ async def run_agent(
                 hooks=hooks,
                 cli=cli,
                 prompt_version=prompt_version,
+                profile=profile,
             )
             with anyio.fail_after(timeout_s):
                 async with aclosing(query(prompt=prompt, options=options)) as messages:
-                    await _collect(messages, result)
+                    await _collect(messages, result, profile)
     except AgentRunError as exc:
         result.error = str(exc)
         result.error_type = ErrorType.AGENT_ERROR
@@ -388,5 +435,71 @@ async def check_context(
             result.error = str(exc)
             result.error_type = ErrorType.INVALID_OUTPUT
             # Une exécution en échec n'expose jamais de décision
+            result.output = None
+    return result
+
+
+# --- Agent Ops -----------------------------------------------------------------------------
+
+
+async def investigate_alert(
+    alert: AlertBrief,
+    *,
+    journal: Journal,
+    environ: Mapping[str, str] = os.environ,
+    query: QueryFn = sdk_query,
+    model: str = DEFAULT_MODEL,
+) -> AgentResult:
+    """Enquête de l'agent Ops sur une alerte ; `output` est un IncidentReport validé (schéma,
+    alerte recopiée, preuves tirées d'outils réellement appelés)."""
+    launched_at = ops_agent.now()
+    hooks = OpsHooks(journal, ops_agent.OPS_TOOL_NAMES)
+    result = await run_agent(
+        ops_agent.alert_prompt(alert, launched_at),
+        IncidentReport,
+        None,
+        hooks=hooks,
+        environ=environ,
+        query=query,
+        model=model,
+        profile=ops_profile(launched_at, environ),
+    )
+    if result.error is None:
+        try:
+            report = ops_agent.validate_report(result.output, alert, hooks.called)
+            result.output = report.model_dump(mode="json")
+        except AgentRunError as exc:
+            result.error = str(exc)
+            result.error_type = ErrorType.INVALID_OUTPUT
+            result.output = None
+    return result
+
+
+async def check_ops_context(
+    *,
+    journal: Journal,
+    environ: Mapping[str, str] = os.environ,
+    query: QueryFn = sdk_query,
+    model: str = DEFAULT_MODEL,
+) -> AgentResult:
+    """Preuve d'isolement de l'agent Ops : sa consigne arrive, rien d'autre (questions pièges)."""
+    launched_at = ops_agent.now()
+    result = await run_agent(
+        ops_agent.CHECK_PROMPT,
+        OpsContextCheck,
+        None,
+        hooks=OpsHooks(journal, ops_agent.OPS_TOOL_NAMES),
+        environ=environ,
+        query=query,
+        model=model,
+        profile=ops_profile(launched_at, environ),
+    )
+    if result.error is None:
+        try:
+            answer = ops_agent.validate_context(result.output, launched_at)
+            result.output = answer.model_dump(mode="json")
+        except AgentRunError as exc:
+            result.error = str(exc)
+            result.error_type = ErrorType.INVALID_OUTPUT
             result.output = None
     return result

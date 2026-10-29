@@ -57,6 +57,9 @@ class AgentKind(StrEnum):
     SUPPORT = "support"
     # Vérification de l'isolement de l'agent Support (consigne, politique, outils)
     SUPPORT_CHECK = "support_check"
+    # Enquête de l'agent Ops sur une alerte, et vérification de son isolement (J6.2)
+    OPS = "ops"
+    OPS_CHECK = "ops_check"
 
 
 class CallOutcome(StrEnum):
@@ -97,11 +100,20 @@ class Run(Base):
             unique=True,
             postgresql_where=text("status = 'running' AND agent = 'support'"),
         ),
+        # Une seule enquête en cours par alerte
+        Index(
+            "one_running_run_per_alert",
+            "alert_id",
+            unique=True,
+            postgresql_where=text("status = 'running' AND agent = 'ops'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     agent: Mapped[AgentKind] = mapped_column(_enum(AgentKind, "agent_kind"))
     ticket_id: Mapped[int | None] = mapped_column(index=True)
+    # Alerte de départ d'une enquête de l'agent Ops
+    alert_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey(f"{SCHEMA}.alerts.id"))
     status: Mapped[RunStatus] = mapped_column(_enum(RunStatus, "run_status"), index=True)
     trigger: Mapped[RunTrigger] = mapped_column(
         _enum(RunTrigger, "run_trigger"), default=RunTrigger.MANUAL

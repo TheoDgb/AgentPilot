@@ -72,6 +72,8 @@ class RunRead(BaseModel):
     id: uuid.UUID
     agent: AgentKind
     ticket_id: int | None
+    # Alerte de départ d'une enquête de l'agent Ops
+    alert_id: uuid.UUID | None
     status: RunStatus
     trigger: RunTrigger
     trace_id: str
@@ -79,7 +81,8 @@ class RunRead(BaseModel):
     propose_only: bool
     simulation_date: date | None
     model: str | None
-    # SupportDecision validée (agent Support) ou réponse de vérification (check)
+    # SupportDecision validée (agent Support), IncidentReport validé (agent Ops) ou réponse de
+    # vérification (check)
     output: dict[str, Any] | None
     error: str | None
     total_cost_usd: Decimal | None

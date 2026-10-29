@@ -625,3 +625,53 @@ vraie panne (J4.4).
   la saturation, alerte qui survit à un changement de cause, percentiles estimés) sont notés
   sous J6.2 dans CLAUDE.md, pour sa consigne et ses évaluations.
 
+### J6.2 : agent Ops
+
+*2026-10-29 et 2026-10-30*
+
+**Fait**
+- `agents/ops/` : consigne d'ingénieur d'astreinte et guide de diagnostic par familles de pannes,
+  sans jamais nommer une panne simulée (test de garde-fou).
+- Rapport `IncidentReport` validé par un schéma : cause probable sur liste fermée, hypothèses
+  avec leur statut, preuves qui citent l'outil, ses arguments, le champ et la valeur lue ; le
+  code vérifie aussi l'alerte recopiée et que chaque outil cité a réellement été appelé.
+- Lancement par un profil d'agent (`AgentProfile`) : même isolement que l'agent Support, qui
+  reste inchangé ; `OpsHooks` refuse et journalise tout outil hors des 5 outils Ops.
+- `POST /runs/ops/{alert_id}` et `POST /checks/ops` ; exécutions enregistrées
+  (`runs.alert_id`), plafond de 1 $ par enquête, réserve par agent dans le budget du jour.
+- **Vérifié en conditions réelles** (modèle `claude-sonnet-5-5`, générateur de trafic) :
+  - isolement : consigne restituée (causes, niveaux de confiance, outils, heure), les 5
+    questions pièges à `null` ;
+  - `db_errors` : `database_errors`, confiance élevée, les deux routes touchées ; 5 appels,
+    0,06 $ ; il signale lui-même que la santé verte est un piège connu ;
+  - `connection_saturation` : `resource_saturation`, confiance moyenne ; montée par paliers et
+    même plafond sur toutes les routes métier, `/health` et `/clock` rapides ; il écarte les
+    erreurs de base de la panne précédente (dernière il y a 13 min, taux actuel nul) ; 4 appels,
+    0,06 $ ;
+  - `payment_latency` : `slow_dependency`, confiance moyenne, seule `/payments/{order_id}`
+    touchée ; il resserre de lui-même sa fenêtre de 15 à 3 minutes pour séparer la panne
+    actuelle de la saturation précédente, donne la valeur exacte des logs (4,01 s) plutôt que
+    l'estimation de Prometheus, et recommande de chercher à part la cause de l'ancienne lenteur ;
+    6 appels, 0,07 $.
+  - Toutes les preuves citées (34 au total : 10, 13 et 11) recoupées avec les réponses
+    d'outils gardées au journal : toutes exactes. Aucun appel hors des 5 outils Ops.
+
+**Bugs ou surprises**
+- Sans `LOG_DIR`, le serveur MCP Ops aurait cherché les logs dans son dossier de travail vide,
+  sans erreur : il le reçoit maintenant toujours, en absolu (trouvé par un test).
+- Une valeur ajoutée à une énumération PostgreSQL ne peut pas servir dans la transaction qui
+  l'ajoute : `init_db` valide les ajouts d'énumérations avant de créer l'index qui les utilise.
+- Défauts relevés dans les rapports, à reprendre en J6.3 et dans une révision de la consigne :
+  - la boucle d'AgentPilot en pause manuelle (normal) citée comme point à vérifier ;
+  - preuve faible pour écarter une erreur applicative (nombre d'exceptions au lieu de leur
+    type) ;
+  - résumé de la saturation avec la p95 estimée de Prometheus (6,6 s) au lieu de la valeur
+    exacte des logs (5,0 s), alors que la consigne prévient de ce piège ;
+  - champ `observed` rempli d'horodatages au lieu d'âges.
+
+**Leçons**
+- Recouper chaque preuve d'un rapport avec la réponse d'outil gardée au journal : c'est ce qui
+  permet d'affirmer que les preuves sont exactes, pas seulement plausibles. À automatiser en
+  J6.3.
+- Les pièges notés en vérifiant J6.1 ont servi : l'agent les cite et les évite, sauf un.
+

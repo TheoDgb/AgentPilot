@@ -100,13 +100,15 @@ def no_network_clock(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- Faux Claude Agent SDK -------------------------------------------------------------
 
 
-def init_message(tools: list[str] | None = None, status: str = "connected") -> SystemMessage:
+def init_message(
+    tools: list[str] | None = None, status: str = "connected", server: str = "shopsim"
+) -> SystemMessage:
     return SystemMessage(
         subtype="init",
         data={
             "model": MODEL,
             "tools": INIT_TOOLS if tools is None else tools,
-            "mcp_servers": [{"name": "shopsim", "status": status}],
+            "mcp_servers": [{"name": server, "status": status}],
         },
     )
 
@@ -198,10 +200,13 @@ class HookDrivingQuery:
         *calls: Call,
         output: Any = None,  # noqa: ANN401
         executor: Executor = run_mcp_tool,
+        init: SystemMessage | None = None,
     ) -> None:
         self.calls = calls
         self.output = output
         self.executor = executor
+        # Initialisation simulée (outils et serveur MCP) : celle de l'agent Support par défaut
+        self.init = init
         self.options: ClaudeAgentOptions | None = None
 
     def __call__(self, *, prompt: str, options: ClaudeAgentOptions) -> AsyncIterator[Any]:
@@ -243,7 +248,7 @@ class HookDrivingQuery:
         )
 
     async def _stream(self) -> AsyncIterator[Any]:
-        yield init_message()
+        yield self.init or init_message()
         for step in self.calls:
             await self._run(step)
             yield tool_use(step.id, step.name, **step.arguments)

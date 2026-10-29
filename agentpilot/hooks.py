@@ -1,4 +1,7 @@
-"""Hooks de l'agent Support : validation humaine des actions sensibles et journal des appels.
+"""Hooks des agents : journal des appels (tous), validation humaine des actions (Support).
+
+`JournalHooks` : ce qui est commun, le journal de chaque appel. `SupportHooks` y ajoute la
+validation des actions ; `OpsHooks` ne laisse passer que les outils de lecture de l'agent Ops.
 
 - `PreToolUse` : une action passe, est refusée, ou est mise en attente d'un humain selon
   `agentpilot/approval.py`. Un refus ou une mise en attente renvoie `deny` à l'agent, avec un
@@ -22,7 +25,7 @@ import itertools
 import json
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Protocol
 
 from claude_agent_sdk import HookContext, HookMatcher
 from claude_agent_sdk.types import HookEvent, HookInput, HookJSONOutput
@@ -76,17 +79,31 @@ def clip(response: Any) -> Any:  # noqa: ANN401
     return {"truncated": text[:MAX_RESPONSE_CHARS]}
 
 
-class SupportHooks:
-    """Hooks d'une exécution : ticket traité et journal propres à cette exécution."""
+class ToolHooks(Protocol):
+    def matchers(self) -> dict[HookEvent, list[HookMatcher]]: ...
 
-    def __init__(self, ticket_id: int | None, journal: Journal) -> None:
-        self.ticket_id = ticket_id
+
+class JournalHooks:
+    """Journal des appels d'une exécution : chaque appel exécuté ou refusé y est inscrit.
+
+    `pre_tool_use` est à définir par chaque agent ; `called` garde les outils réellement
+    exécutés (réussis ou en échec), pour vérifier les preuves d'un rapport."""
+
+    def __init__(self, journal: Journal) -> None:
         self.journal = journal
         self._seq = itertools.count(1)
+        self.called: set[str] = set()
+
+    async def pre_tool_use(
+        self, data: HookInput, tool_use_id: str | None, context: HookContext
+    ) -> HookJSONOutput:
+        raise NotImplementedError
 
     async def _record(self, entry_fields: Mapping[str, Any]) -> None:
         # Numéro attribué dans la boucle : l'ordre des appels est gardé
         entry = CallEntry(seq=next(self._seq), **entry_fields)
+        if entry.outcome in (CallOutcome.SUCCEEDED, CallOutcome.FAILED):
+            self.called.add(entry.tool)
         await asyncio.to_thread(self.journal.record_call, entry)
         metrics.tool_called(entry.tool, entry.outcome)
         numbers = {
@@ -118,6 +135,42 @@ class SupportHooks:
             }
         )
         return _deny(message)
+
+    async def post_tool_use(
+        self, data: HookInput, tool_use_id: str | None, context: HookContext
+    ) -> HookJSONOutput:
+        name: str = data["tool_name"]  # type: ignore[typeddict-item]
+        if name == STRUCTURED_OUTPUT_TOOL:
+            return {}
+        failed = data["hook_event_name"] == "PostToolUseFailure"
+        await self._record(
+            {
+                "tool_use_id": tool_use_id or data.get("tool_use_id"),
+                "tool": name,
+                "input": data["tool_input"],  # type: ignore[typeddict-item]
+                "outcome": CallOutcome.FAILED if failed else CallOutcome.SUCCEEDED,
+                "response": None if failed else clip(data.get("tool_response")),
+                "error": data.get("error") if failed else None,
+                "duration_ms": data.get("duration_ms"),
+            }
+        )
+        return {}
+
+    def matchers(self) -> dict[HookEvent, list[HookMatcher]]:
+        """Pour `ClaudeAgentOptions.hooks` : tous les outils passent par ces hooks."""
+        return {
+            "PreToolUse": [HookMatcher(hooks=[self.pre_tool_use], timeout=HOOK_TIMEOUT_S)],
+            "PostToolUse": [HookMatcher(hooks=[self.post_tool_use], timeout=HOOK_TIMEOUT_S)],
+            "PostToolUseFailure": [HookMatcher(hooks=[self.post_tool_use], timeout=HOOK_TIMEOUT_S)],
+        }
+
+
+class SupportHooks(JournalHooks):
+    """Hooks de l'agent Support : ticket traité et journal propres à cette exécution."""
+
+    def __init__(self, ticket_id: int | None, journal: Journal) -> None:
+        super().__init__(journal)
+        self.ticket_id = ticket_id
 
     async def _emergency_stop(self) -> bool:
         try:
@@ -203,30 +256,28 @@ class SupportHooks:
         )
         return _deny(message)
 
-    async def post_tool_use(
+
+class OpsHooks(JournalHooks):
+    """Hooks de l'agent Ops : seuls ses outils de lecture (et la sortie structurée) passent ;
+    tout autre outil est refusé et inscrit au journal. Défense en profondeur : les permissions
+    (`allowed_tools`, `dontAsk`) l'empêchent déjà."""
+
+    def __init__(self, journal: Journal, allowed: frozenset[str]) -> None:
+        super().__init__(journal)
+        self.allowed = allowed
+
+    async def pre_tool_use(
         self, data: HookInput, tool_use_id: str | None, context: HookContext
     ) -> HookJSONOutput:
         name: str = data["tool_name"]  # type: ignore[typeddict-item]
-        if name == STRUCTURED_OUTPUT_TOOL:
+        if name in self.allowed or name == STRUCTURED_OUTPUT_TOOL:
             return {}
-        failed = data["hook_event_name"] == "PostToolUseFailure"
-        await self._record(
-            {
-                "tool_use_id": tool_use_id or data.get("tool_use_id"),
-                "tool": name,
-                "input": data["tool_input"],  # type: ignore[typeddict-item]
-                "outcome": CallOutcome.FAILED if failed else CallOutcome.SUCCEEDED,
-                "response": None if failed else clip(data.get("tool_response")),
-                "error": data.get("error") if failed else None,
-                "duration_ms": data.get("duration_ms"),
-            }
-        )
-        return {}
-
-    def matchers(self) -> dict[HookEvent, list[HookMatcher]]:
-        """Pour `ClaudeAgentOptions.hooks` : tous les outils passent par ces hooks."""
-        return {
-            "PreToolUse": [HookMatcher(hooks=[self.pre_tool_use], timeout=HOOK_TIMEOUT_S)],
-            "PostToolUse": [HookMatcher(hooks=[self.post_tool_use], timeout=HOOK_TIMEOUT_S)],
-            "PostToolUseFailure": [HookMatcher(hooks=[self.post_tool_use], timeout=HOOK_TIMEOUT_S)],
-        }
+        try:
+            return await self._refuse(
+                name,
+                data["tool_input"],  # type: ignore[typeddict-item]
+                tool_use_id or data.get("tool_use_id"),  # type: ignore[arg-type]
+                f"Outil {name} interdit : l'agent Ops ne fait que lire.",
+            )
+        except Exception:  # noqa: BLE001  (journal illisible : on refuse quand même)
+            return _deny(f"Outil {name} interdit.")

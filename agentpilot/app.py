@@ -7,6 +7,9 @@ Lancement (local) : `.venv/bin/uvicorn agentpilot.app:app --port 8001`.
 - `GET /runs/{id}` et `GET /runs` renvoient les exécutions enregistrées, avec leur journal
   d'appels d'outils et leurs actions en attente ;
 - `POST /checks/support` vérifie l'isolement de l'agent (consigne, politique, outils) ;
+- `POST /runs/ops/{alert_id}` lance l'agent Ops sur une alerte enregistrée (202) : enquête
+  en lecture seule, rapport d'incident dans `output` ; `POST /checks/ops` vérifie son
+  isolement ;
 - `/approvals` : pages d'approbation des actions en attente (`agentpilot/web.py`) ;
 - `/control` : page de pilotage (pause de la boucle, arrêt d'urgence, budget) ;
   `GET /control/status` en JSON ;
@@ -46,7 +49,14 @@ from agentpilot.env_file import setting
 from agentpilot.journal import DbJournal
 from agentpilot.models import AgentKind, Run, RunTrigger
 from agentpilot.support_agent import REPO_ROOT
-from agentpilot.worker import AlreadyRunning, OverBudget, Worker, mark_interrupted, new_run
+from agentpilot.worker import (
+    AlertNotFound,
+    AlreadyRunning,
+    OverBudget,
+    Worker,
+    mark_interrupted,
+    new_run,
+)
 from observability.http import RequestLogMiddleware
 from observability.logs import configure, error_type, log_event
 from observability.metrics import CONTENT_TYPE_LATEST, exposition
@@ -146,6 +156,42 @@ async def check_support(request: Request, session: SessionDep) -> Run:
     query = request.app.state.query
     journal = DbJournal(factory, run.id)
     await worker.execute(run, lambda: sdk_runner.check_context(journal=journal, query=query))
+    session.expire_all()
+    return session.get_one(Run, run.id)
+
+
+@app.post("/runs/ops/{alert_id}", status_code=202, response_model=RunCreated)
+async def start_ops_run(
+    alert_id: uuid.UUID, request: Request, background: BackgroundTasks
+) -> RunCreated:
+    """Lance l'agent Ops sur une alerte enregistrée : 404 si elle n'existe pas, 409 si une
+    enquête est déjà en cours sur elle, 429 si le budget du jour est atteint. Le rapport se lit
+    ensuite par `GET /runs/{id}` (`output`)."""
+    worker: Worker = request.app.state.worker
+    try:
+        run, launch = await worker.start_alert(alert_id, RunTrigger.MANUAL)
+    except AlertNotFound:
+        raise HTTPException(status_code=404, detail="Alert not found") from None
+    except AlreadyRunning:
+        raise HTTPException(status_code=409, detail="Alert already being investigated") from None
+    except OverBudget:
+        raise HTTPException(status_code=429, detail="Daily budget reached") from None
+    background.add_task(worker.execute, run, launch)
+    return RunCreated(id=run.id, status=run.status, trace_id=run.trace_id)
+
+
+@app.post("/checks/ops", response_model=RunRead)
+async def check_ops(request: Request, session: SessionDep) -> Run:
+    """Vérification d'isolement de l'agent Ops, exécutée tout de suite (courte) et
+    enregistrée : sa consigne arrive, rien d'autre (questions pièges)."""
+    worker: Worker = request.app.state.worker
+    factory = request.app.state.session_factory
+    run = await asyncio.to_thread(
+        new_run, factory, AgentKind.OPS_CHECK, None, RunTrigger.MANUAL, check_budget=False
+    )
+    query = request.app.state.query
+    journal = DbJournal(factory, run.id)
+    await worker.execute(run, lambda: sdk_runner.check_ops_context(journal=journal, query=query))
     session.expire_all()
     return session.get_one(Run, run.id)
 

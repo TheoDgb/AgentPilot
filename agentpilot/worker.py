@@ -58,6 +58,7 @@ from agentpilot.env_file import setting
 from agentpilot.journal import DbJournal
 from agentpilot.models import (
     AgentKind,
+    Alert,
     CallOutcome,
     PauseReason,
     PendingAction,
@@ -66,6 +67,7 @@ from agentpilot.models import (
     RunTrigger,
     ToolCall,
 )
+from agentpilot.ops_agent import AlertBrief
 from agentpilot.sdk_runner import INFRA_ERRORS, AgentResult, ErrorType
 from agentpilot.support_agent import ACTION_TOOL_NAMES, DEFAULT_PROMPT
 from mcp_server.shopsim_client import ShopSimUnavailable, get_json
@@ -104,6 +106,10 @@ class OverBudget(Exception):
     """Le budget du jour ne permet pas une exécution de plus."""
 
 
+class AlertNotFound(Exception):
+    """Aucune alerte enregistrée avec cet identifiant."""
+
+
 def interval_s() -> float:
     """Délai entre deux tours : environnement, sinon `.env` (relu à chaque tour)."""
     return float(setting(INTERVAL_ENV) or DEFAULT_INTERVAL_S)
@@ -139,16 +145,19 @@ def new_run(
     trigger: RunTrigger,
     *,
     check_budget: bool,
+    alert_id: uuid.UUID | None = None,
 ) -> Run:
-    """Crée l'exécution `running`. Lève `OverBudget` ou `AlreadyRunning` (index unique)."""
+    """Crée l'exécution `running` (`alert_id` : alerte d'une enquête Ops). Lève `OverBudget`
+    ou `AlreadyRunning` (index unique : un ticket ou une alerte à la fois)."""
     with factory() as session:
         if check_budget:
             session.execute(select(func.pg_advisory_xact_lock(BUDGET_LOCK)))
-            if not control.budget_allows(session):
+            if not control.budget_allows(session, agent=agent):
                 raise OverBudget
         run = Run(
             agent=agent,
             ticket_id=ticket_id,
+            alert_id=alert_id,
             status=RunStatus.RUNNING,
             trigger=trigger,
             created_at=_now(),
@@ -298,6 +307,24 @@ def abandoned(factory: sessionmaker[Session]) -> list[int]:
                 )
                 .order_by(Run.ticket_id)
             )
+        )
+
+
+def load_alert(factory: sessionmaker[Session], alert_id: uuid.UUID) -> AlertBrief | None:
+    """L'alerte de départ d'une enquête, lue par la plateforme (jamais par l'agent)."""
+    with factory() as session:
+        alert = session.get(Alert, alert_id)
+        if alert is None:
+            return None
+        return AlertBrief(
+            id=alert.id,
+            alertname=alert.alertname,
+            route=alert.route,
+            status=alert.status.value,
+            severity=alert.severity,
+            summary=alert.summary,
+            starts_at=alert.starts_at,
+            ends_at=alert.ends_at,
         )
 
 
@@ -486,6 +513,21 @@ class Worker:
             self._backoff("ShopSim injoignable pendant une exécution.")
         elif trigger is RunTrigger.LOOP:
             self._count(result)
+
+    async def start_alert(self, alert_id: uuid.UUID, trigger: RunTrigger) -> tuple[Run, Launch]:
+        """Crée l'enquête de l'agent Ops sur une alerte (budget et unicité vérifiés) et prépare
+        son lancement. Lève `AlertNotFound`, `OverBudget` ou `AlreadyRunning`."""
+        alert = await self._db(load_alert, alert_id)
+        if alert is None:
+            raise AlertNotFound
+        run = await self._db(
+            new_run, AgentKind.OPS, None, trigger, check_budget=True, alert_id=alert.id
+        )
+        journal = DbJournal(self.factory, run.id)
+        query, model = self.state.query, self.model
+        return run, lambda: sdk_runner.investigate_alert(
+            alert, journal=journal, query=query, model=model
+        )
 
     def _count(self, result: AgentResult) -> None:
         if result.error is None:

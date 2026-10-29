@@ -46,27 +46,52 @@ engine = create_engine(DATABASE_URL, hide_parameters=True)
 SessionLocal = make_session_factory(engine)
 
 
+# Valeurs ajoutées aux énumérations après leur création (pas de migrations)
+ENUM_ADDITIONS = (
+    ("run_trigger", "eval"),
+    ("pause_reason", "infra"),
+    ("agent_kind", "ops"),
+    ("agent_kind", "ops_check"),
+)
+# Colonnes ajoutées aux tables après leur création
+COLUMN_ADDITIONS = (
+    ("runs", "error_type", "VARCHAR(32)"),
+    ("control", "pause_detail", "VARCHAR(32)"),
+    ("runs", "alert_id", f"UUID REFERENCES {SCHEMA}.alerts(id)"),
+)
+
+
 def init_db(bind: Engine) -> None:
     """Crée le schéma, les tables manquantes (pas d'Alembic pour l'instant) et la ligne des
-    interrupteurs de pilotage si elle manque (boucle en pause, pas d'arrêt d'urgence)."""
+    interrupteurs de pilotage si elle manque (boucle en pause, pas d'arrêt d'urgence), puis met
+    à niveau une base existante (valeurs d'énumérations, colonnes, index)."""
     from agentpilot import models
 
     with bind.begin() as connection:
         connection.execute(CreateSchema(SCHEMA, if_not_exists=True))
         Base.metadata.create_all(connection)
-        # Ajouts après la création des tables ou des énumérations : pas de migrations
-        connection.execute(text(f"ALTER TYPE {SCHEMA}.run_trigger ADD VALUE IF NOT EXISTS 'eval'"))
-        connection.execute(
-            text(f"ALTER TYPE {SCHEMA}.pause_reason ADD VALUE IF NOT EXISTS 'infra'")
-        )
-        for table, column in (("runs", "error_type"), ("control", "pause_detail")):
-            connection.execute(
-                text(f"ALTER TABLE {SCHEMA}.{table} ADD COLUMN IF NOT EXISTS {column} VARCHAR(32)")
-            )
         connection.execute(
             insert(models.Control)
             .values(id=models.CONTROL_ID, loop_paused=True, emergency_stop=False)
             .on_conflict_do_nothing(index_elements=["id"])
+        )
+    # Une valeur d'énumération ajoutée ne peut pas servir dans sa propre transaction (l'index
+    # partiel des enquêtes l'utilise) : chacune est validée tout de suite
+    with bind.execution_options(isolation_level="AUTOCOMMIT").connect() as connection:
+        for enum, value in ENUM_ADDITIONS:
+            connection.execute(
+                text(f"ALTER TYPE {SCHEMA}.{enum} ADD VALUE IF NOT EXISTS '{value}'")
+            )
+    with bind.begin() as connection:
+        for table, column, kind in COLUMN_ADDITIONS:
+            connection.execute(
+                text(f"ALTER TABLE {SCHEMA}.{table} ADD COLUMN IF NOT EXISTS {column} {kind}")
+            )
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS one_running_run_per_alert "
+                f"ON {SCHEMA}.runs (alert_id) WHERE status = 'running' AND agent = 'ops'"
+            )
         )
 
 

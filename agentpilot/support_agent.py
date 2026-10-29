@@ -194,21 +194,23 @@ def check_tools(
     tools: Iterable[str],
     mcp_servers: Iterable[Mapping[str, Any]],
     expected: frozenset[str] = READ_TOOL_NAMES,
+    *,
+    server: str = MCP_SERVER,
 ) -> list[str]:
-    """L'agent a exactement les outils shopsim attendus (et la sortie structurée), et le
-    serveur MCP est connecté. À appliquer à l'événement d'initialisation, avant toute
+    """L'agent a exactement les outils attendus de son serveur MCP (et la sortie structurée),
+    et ce serveur est connecté. À appliquer à l'événement d'initialisation, avant toute
     décision."""
     tools = [str(tool) for tool in tools]
     forbidden = [t for t in tools if t not in expected and t != STRUCTURED_OUTPUT_TOOL]
     if forbidden:
         raise AgentRunError(f"L'agent a accès à des outils interdits : {', '.join(forbidden)}")
     servers = {s.get("name"): s.get("status") for s in mcp_servers}
-    if servers.get(MCP_SERVER) != "connected":
-        status = servers.get(MCP_SERVER, "absent")
-        raise AgentRunError(f"Serveur MCP {MCP_SERVER} non connecté ({status})")
+    if servers.get(server) != "connected":
+        status = servers.get(server, "absent")
+        raise AgentRunError(f"Serveur MCP {server} non connecté ({status})")
     missing = sorted(expected - set(tools))
     if missing:
-        raise AgentRunError(f"Outils shopsim manquants : {', '.join(missing)}")
+        raise AgentRunError(f"Outils {server} manquants : {', '.join(missing)}")
     return tools
 
 
