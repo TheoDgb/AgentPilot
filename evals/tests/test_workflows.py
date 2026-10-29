@@ -129,16 +129,18 @@ def test_inputs_match_the_repository() -> None:
     }
     defaults = {int(t) for t in inputs["tickets"]["default"].split(",")}
     assert defaults <= truth
+    # Défauts corrigés en J5.3 : pièges de montant (44, 45) et transporteurs (47)
+    assert {44, 45, 47} <= defaults
     assert set(inputs["prompt"]["options"]) == set(PROMPTS)
     assert inputs["prompt"]["default"] == DEFAULT_PROMPT
 
 
 def test_default_budget_keeps_two_runs_in_parallel_up_to_the_last_pass() -> None:
     """Plafond par défaut : la réserve de 2 exécutions en parallèle tient encore au dernier
-    passage, à 0,30 $ par passage (11 tickets et isolement : 0,26 à 0,29 $ dans la série v2)."""
+    passage, à 0,40 $ par passage (14 tickets et isolement : 0,32 à 0,35 $ dans la série v2)."""
     inputs = triggers(load(EVALUATION))["workflow_dispatch"]["inputs"]
     passes = max(int(p) for p in inputs["passes"]["options"])
-    spent_before_last = Decimal("0.30") * passes
+    spent_before_last = Decimal("0.40") * passes
     assert (
         Decimal(inputs["max_budget_usd"]["default"])
         >= spent_before_last + RUN_RESERVE_USD * MAX_CONCURRENT_RUNS

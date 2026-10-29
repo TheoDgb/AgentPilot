@@ -18,10 +18,10 @@ on:
   workflow_dispatch:
     inputs:
       tickets:
-        description: "Tickets (ex. 1-5,19) : un par catégorie, actions en attente, refus et pièges par défaut"
+        description: "Tickets (ex. 1-5,19) : un par catégorie, actions en attente, refus, pièges et défauts corrigés par défaut"
         type: string
         required: true
-        default: "1,6,13,16,19,21,24,32,33,38,42"
+        default: "1,6,13,16,19,21,24,32,33,38,42,44,45,47"
       passes:
         description: "Nombre de passages (remise à zéro entre deux)"
         type: choice
@@ -33,12 +33,12 @@ on:
         options: ["v2", "v1"]
         default: "v2"
       max_budget_usd:
-        # Plafond, pas dépense (environ 0,29 $ par passage) : 2 $ laissent 2 exécutions en
+        # Plafond, pas dépense (environ 0,35 $ par passage) : 2,50 $ laissent 2 exécutions en
         # parallèle (réserve de 0,50 $ chacune) jusqu'à 3 passages
         description: "Plafond de toute l'évaluation, en dollars"
         type: string
         required: true
-        default: "2"
+        default: "2.5"
 
 permissions:
   contents: read
