@@ -1,12 +1,14 @@
 """Commande `python -m evals.grade` et rapport Markdown, sur des résultats inventés."""
 
+import re
 from pathlib import Path
 
 import pytest
 
 from agentpilot.tests.conftest import FakeQuery, result_message
 from evals import grade, grading
-from evals.results import EvalReport, TicketResult
+from evals import report as report_module
+from evals.results import EvalReport, NotRunReason, TicketResult, TicketStatus
 from evals.tests.builders import (
     DELAY,
     LARGE_REFUND,
@@ -95,6 +97,34 @@ def test_results_without_recorded_reads_are_flagged(tmp_path: Path) -> None:
     assert "Lectures d'outils non enregistrées (old.json, d'avant J5.2)" in text
 
 
+def test_tickets_never_launched_do_not_flag_unrecorded_reads(tmp_path: Path) -> None:
+    """Premier lancement en CI : tickets `not_run` (budget), sans lecture par construction ;
+    les tickets lancés ont leurs lectures, le fichier n'est pas d'avant J5.2."""
+    skipped = TicketResult(
+        ticket_id=DELAY.ticket_id, status=TicketStatus.NOT_RUN, not_run_reason=NotRunReason.BUDGET
+    )
+    assert skipped.reads is None
+    path = save(tmp_path / "ci.json", report([skipped, good(SMALL_REFUND)]))
+    assert run_grade(tmp_path, path) == 0
+    text = next((tmp_path / "docs").glob("*.md")).read_text(encoding="utf-8")
+    assert "Lectures d'outils non enregistrées" not in text
+
+
+def test_dollars_are_escaped_for_github_math(tmp_path: Path) -> None:
+    """GitHub lit le texte entre deux « $ » d'une ligne comme une formule (« l e p l u s
+    c h e r ») : chaque « $ » du rapport est échappé, y compris dans un texte de tableau."""
+    path = save(tmp_path / "r.json", report([good(DELAY), good(SMALL_REFUND)]))
+    assert run_grade(tmp_path, path) == 0
+    text = next((tmp_path / "docs").glob("*.md")).read_text(encoding="utf-8")
+    assert "le plus cher ticket" in text
+    assert "0,0300 \\$" in text
+    unescaped = [line for line in text.splitlines() if re.search(r"(?<!\\)\$", line)]
+    assert unescaped == []
+    assert report_module.cell("10 $ | 5 $") == "10 \\$ \\| 5 \\$"
+    # L'écran garde le « $ » tel quel
+    assert report_module.usd(0.03) == "0,0300 $"
+
+
 def test_regrading_the_same_results_writes_the_same_report(tmp_path: Path) -> None:
     path = save(tmp_path / "r.json", report([good(DELAY)]))
     assert run_grade(tmp_path, path) == 0
@@ -174,7 +204,7 @@ def test_judge_section_with_cost_and_low_scores(
     text = next((tmp_path / "docs").glob("*.md")).read_text(encoding="utf-8")
     assert "## Juge IA : ton et clarté (facultatif)" in text
     assert "jamais compté dans le score global" in text
-    assert "coût 0,0040 $" in text
+    assert "coût 0,0040 \\$" in text
     assert "Moyennes sur 5 : ton 3,0, clarté 4,0" in text
     assert "| 1 | p1 | 3 | 4 | Un peu sec. |" in text
     assert "Juge IA : 0,0040 $ (2 réponse(s) jugée(s))" in capsys.readouterr().out

@@ -161,7 +161,7 @@ def test_judge_both_series_in_the_same_run(
     assert query.calls == 6
     text = next((tmp_path / "docs").glob("*.md")).read_text(encoding="utf-8")
     assert "## Juge IA : ton et clarté (facultatif)" in text
-    assert "Juge IA (les deux séries) : 0,0120 $." in text
+    assert "Juge IA (les deux séries) : 0,0120 \\$." in text
     assert "| Ton | 2,7 | 3,3 | +0,7 | non significatif (1 ↑ / 0 ↓, p = 1,000) |" in text
     # Ticket 33 : réponse fautive de A, escalade de B
     assert "| 33 | 2,0 → 4,0 | 4,0 → 4,0 |" in text

@@ -437,9 +437,10 @@ def test_budget_cap_stops_launching(
     agent = Agent({t.id: ([], decision(t, **REPLY_DECISION)) for t in tickets})
     results = tmp_path / "results"
 
-    # Vérification (0,01 $) + un ticket réservé à 0,50 $ : le deuxième dépasserait 0,60 $
+    # Vérification (0,01 $) + un ticket réservé à 0,50 $ : 0,51 $. Une fois le premier fini
+    # (0,0317 $ dépensés), plus rien en cours et la réserve ne tient plus sous 0,52 $
     code = evaluate(
-        agentpilot_engine, truth(tmp_path, *tickets), results, agent, "--max-budget-usd", "0.6"
+        agentpilot_engine, truth(tmp_path, *tickets), results, agent, "--max-budget-usd", "0.52"
     )
 
     assert code == 2
@@ -447,8 +448,35 @@ def test_budget_cap_stops_launching(
     assert result.summary.status == "budget_exhausted"
     statuses = [(t.status.value, t.not_run_reason) for t in result.tickets]
     assert statuses == [("succeeded", None), ("not_run", "budget"), ("not_run", "budget")]
-    assert result.summary.total_cost_usd <= 0.6
+    assert result.summary.total_cost_usd <= 0.52
     assert agent.ticket_prompts() == [tickets[0].id]
+
+
+def test_ticket_waits_for_the_running_ones_when_the_reserve_does_not_fit(
+    ready: None,
+    shop: Shop,
+    agentpilot_engine: Engine,
+    tmp_path: Path,
+) -> None:
+    """Premier lancement en CI : plafond 1 $, 2 exécutions en parallèle au plus. Le deuxième
+    ticket ne tient pas à côté du premier (0,01 $ + 2 × 0,50 $ > 1 $) : il attend la fin du
+    premier au lieu d'arrêter le passage, puis chacun part seul."""
+    tickets = [shop.ticket(shop.payment(1_000 + n)) for n in range(4)]
+    agent = Agent({t.id: ([], decision(t, **REPLY_DECISION)) for t in tickets})
+    results = tmp_path / "results"
+
+    code = evaluate(
+        agentpilot_engine, truth(tmp_path, *tickets), results, agent, "--max-budget-usd", "1"
+    )
+
+    assert code == 0
+    result = report(results)
+    assert result.summary.status == "completed"
+    assert [t.status.value for t in result.tickets] == ["succeeded"] * 4
+    assert agent.ticket_prompts() == sorted(t.id for t in tickets)
+    # Réserve toujours respectée : jamais deux exécutions ensemble sous ce plafond
+    assert agent.max_running == 1
+    assert result.summary.total_cost_usd <= 1
 
 
 def test_ctrl_c_interrupts_the_runs(

@@ -13,7 +13,7 @@ from statistics import mean
 from evals import grading
 from evals.grading import Criterion, Score, TicketGrade, Verdict
 from evals.judge import JudgeSummary
-from evals.results import EvalReport
+from evals.results import EvalReport, TicketStatus
 from evals.thresholds import Outcome
 
 CRITERIA_LABELS = {
@@ -62,11 +62,22 @@ def percent(score: Score) -> str:
 
 
 def cell(text: object) -> str:
-    return str(text).replace("|", "\\|").replace("\n", " ")
+    return dollars(str(text).replace("|", "\\|").replace("\n", " "))
 
 
 def usd(amount: float | None) -> str:
+    """Montant pour l'écran ; dans un rapport Markdown, `money`."""
     return "inconnu" if amount is None else f"{amount:.4f} $".replace(".", ",")
+
+
+def dollars(text: str) -> str:
+    """GitHub lit deux « $ » d'une même ligne comme une formule mathématique : échappés."""
+    return text.replace("$", "\\$")
+
+
+def money(amount: float | None) -> str:
+    """Montant dans un rapport Markdown."""
+    return dollars(usd(amount))
 
 
 def label(index: int, passes: int) -> str:
@@ -131,7 +142,12 @@ def _header(passes: Sequence[Pass], graded_at: datetime, versions: Versions) -> 
         for i, p in enumerate(passes, start=1)
     )
     files = ", ".join(f"`{p.path.name}`" for p in passes)
-    unread = [p.path.name for p in passes if any(t.reads is None for t in p.report.tickets)]
+    # Un ticket jamais lancé (budget, arrêt) n'a pas de lecture : seuls les tickets lancés comptent
+    unread = [
+        p.path.name
+        for p in passes
+        if any(t.reads is None and t.status is not TicketStatus.NOT_RUN for t in p.report.tickets)
+    ]
     return [
         f"- Configuration : `{summary.name}`, modèle demandé `{summary.model_requested}`, "
         f"modèles utilisés {', '.join(f'`{m}`' for m in models) or 'inconnus'}",
@@ -263,16 +279,16 @@ def _costs(passes: Sequence[Pass], judge: JudgeSummary | None) -> list[str]:
     lines = [
         "## Coût et durée",
         "",
-        f"- Coût total de l'évaluation : {usd(total)} (vérifications d'isolement comprises ; "
-        f"plafond {usd(passes[0].report.summary.max_budget_usd)})",
+        f"- Coût total de l'évaluation : {money(total)} (vérifications d'isolement comprises ; "
+        f"plafond {money(passes[0].report.summary.max_budget_usd)})",
     ]
     if costs:
         i, dearest = max(costs, key=lambda x: x[1].cost_usd or 0)
         average = mean(g.cost_usd or 0 for _, g in costs)
         where = f" {label(i, count)}" if count > 1 else ""
         lines.append(
-            f"- Par ticket : moyenne {usd(average)}, le plus cher ticket {dearest.ticket_id}"
-            f"{where} ({usd(dearest.cost_usd)})"
+            f"- Par ticket : moyenne {money(average)}, le plus cher ticket {dearest.ticket_id}"
+            f"{where} ({money(dearest.cost_usd)})"
         )
     if durations:
         i, slowest = max(durations, key=lambda x: x[1].duration_ms or 0)
@@ -285,7 +301,7 @@ def _costs(passes: Sequence[Pass], judge: JudgeSummary | None) -> list[str]:
             )
         )
     if judge is not None:
-        lines.append(f"- Juge IA : {usd(judge.cost_usd)} (plafond {usd(judge.max_usd)})")
+        lines.append(f"- Juge IA : {money(judge.cost_usd)} (plafond {money(judge.max_usd)})")
     return [*lines, ""]
 
 
@@ -367,7 +383,7 @@ def _judge(judge: JudgeSummary) -> list[str]:
         "> Noté par un modèle, non déterministe : jamais compté dans le score global.",
         "",
         f"- Modèle `{judge.model}`, grille `evals/judge_rubric.md` "
-        f"(empreinte `{judge.rubric_sha256[:12]}`), coût {usd(judge.cost_usd)}",
+        f"(empreinte `{judge.rubric_sha256[:12]}`), coût {money(judge.cost_usd)}",
         f"- Réponses jugées : {len(scored)} ; en erreur : {len(judge.items) - len(scored)} ; "
         f"non jugées (plafond atteint) : {judge.skipped}",
     ]

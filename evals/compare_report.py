@@ -20,7 +20,7 @@ from evals.comparison import (
     ticket_changes,
 )
 from evals.grading import PassOutcome, TicketGrade
-from evals.report import CRITERIA_LABELS, Pass, Versions, cell, percent, usd
+from evals.report import CRITERIA_LABELS, Pass, Versions, cell, money, percent
 
 Grades = list[list[TicketGrade]]
 
@@ -238,15 +238,15 @@ def _costs(a: Sequence[Pass], b: Sequence[Pass], judge: JudgeComparison | None) 
         "",
         "| | A | B | Écart |",
         "|---|---|---|---|",
-        f"| Coût total (vérifications d'isolement comprises) | {usd(total_a)} | {usd(total_b)} | "
-        f"{change(total_a, total_b)} |",
-        f"| Coût moyen par ticket | {usd(cost_a)} | {usd(cost_b)} | {change(cost_a, cost_b)} |",
+        f"| Coût total (vérifications d'isolement comprises) | {money(total_a)} | "
+        f"{money(total_b)} | {change(total_a, total_b)} |",
+        f"| Coût moyen par ticket | {money(cost_a)} | {money(cost_b)} | {change(cost_a, cost_b)} |",
         f"| Durée moyenne par ticket | {seconds(time_a)} | {seconds(time_b)} | "
         f"{change(time_a, time_b)} |",
         "",
     ]
     if judge is not None:
-        lines += [f"Juge IA (les deux séries) : {usd(judge.cost_usd)}.", ""]
+        lines += [f"Juge IA (les deux séries) : {money(judge.cost_usd)}.", ""]
     return lines
 
 

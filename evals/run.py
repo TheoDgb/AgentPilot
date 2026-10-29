@@ -41,8 +41,10 @@ puis refait les vérifications. Un fichier par passage (`<date>-<nom>-p1.json`�
 Un passage arrêté avant la fin (budget, Ctrl+C, abandon) arrête la série.
 
 Budget : un ticket n'est lancé que si la dépense (de toute la série), plus le plafond d'une
-exécution pour chacune en cours et pour celle-ci, reste sous `--max-budget-usd`. Le budget du
-jour du service ne s'applique pas, mais ces exécutions comptent dans sa dépense (en base).
+exécution pour chacune en cours et pour celle-ci, reste sous `--max-budget-usd`. Sinon, il
+attend la fin des exécutions en cours ; le passage ne s'arrête (`budget_exhausted`) que si plus
+rien n'est en cours et que la réserve ne tient toujours pas. Le budget du jour du service ne
+s'applique pas, mais ces exécutions comptent dans sa dépense (en base).
 """
 
 import argparse
@@ -641,10 +643,20 @@ class Evaluation:
         budget_exhausted = self.over_budget(1)
         if not budget_exhausted and await self.isolation():
             for ticket_id in ticket_ids:
-                while len(self.running()) >= MAX_CONCURRENT_RUNS and self.halted is None:
+                # Place libre et réserve qui tient ; sinon, attendre la fin d'une exécution en
+                # cours (sa dépense réelle remplace sa réserve)
+                while (
+                    self.halted is None
+                    and self.running()
+                    and (
+                        len(self.running()) >= MAX_CONCURRENT_RUNS
+                        or self.over_budget(len(self.running()) + 1)
+                    )
+                ):
                     await asyncio.wait(self.running(), return_when=asyncio.FIRST_COMPLETED)
                 if self.halted is not None:
                     break
+                # Plus rien en cours et la réserve ne tient toujours pas : plafond atteint
                 if self.over_budget(len(self.running()) + 1):
                     budget_exhausted = True
                     break

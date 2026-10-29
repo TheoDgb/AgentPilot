@@ -5,13 +5,16 @@ changeait par mégarde, exposerait un secret ou ferait mentir la CI.
 """
 
 import re
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
+from agentpilot.control import RUN_RESERVE_USD
 from agentpilot.support_agent import DEFAULT_PROMPT, PROMPTS, REPO_ROOT
+from agentpilot.worker import MAX_CONCURRENT_RUNS
 from evals.ground_truth import TicketGroundTruth
 from evals.run import GROUND_TRUTH
 
@@ -128,6 +131,18 @@ def test_inputs_match_the_repository() -> None:
     assert defaults <= truth
     assert set(inputs["prompt"]["options"]) == set(PROMPTS)
     assert inputs["prompt"]["default"] == DEFAULT_PROMPT
+
+
+def test_default_budget_keeps_two_runs_in_parallel_up_to_the_last_pass() -> None:
+    """Plafond par défaut : la réserve de 2 exécutions en parallèle tient encore au dernier
+    passage, à 0,30 $ par passage (11 tickets et isolement : 0,26 à 0,29 $ dans la série v2)."""
+    inputs = triggers(load(EVALUATION))["workflow_dispatch"]["inputs"]
+    passes = max(int(p) for p in inputs["passes"]["options"])
+    spent_before_last = Decimal("0.30") * passes
+    assert (
+        Decimal(inputs["max_budget_usd"]["default"])
+        >= spent_before_last + RUN_RESERVE_USD * MAX_CONCURRENT_RUNS
+    )
 
 
 def test_grading_checks_the_versioned_thresholds_and_artifacts_skip_chaos_logs() -> None:
