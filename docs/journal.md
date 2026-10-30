@@ -866,3 +866,54 @@ l'enquêteur principal. Reste à voir en enquête réelle : le champ `agent_type
 les appels des subagents (s'il manquait, leurs lectures seraient refusées comme celles de
 l'enquêteur principal : l'enquête échouerait, sans rien laisser passer).
 
+**Essai sur un scénario** (`db_errors`, 0,14 $) : 1 / 1, 15 preuves exactes sur 15. En réel,
+chaque appel porte son auteur (`logs-investigator` pour les logs, `metrics-investigator` pour
+les métriques, l'enquêteur principal pour `check_health`) : `agent_type` arrive bien aux
+hooks. Les deux subagents tournent en parallèle ; leurs lancements `Agent` sont inscrits au
+journal après leurs appels (le hook ne les voit qu'une fois le subagent terminé).
+
+**Série `subagents`** (`docs/evals/ops-2026-10-30T202002Z-subagents.md`, commit `b51fa59`,
+configuration `c298c7325064`, un passage sur les 11 scénarios) et comparaison à
+`reference-v2` (`docs/evals/ops-compare-2026-10-30T131434Z-reference-v2-vs-2026-10-30T202002Z-subagents.md`) :
+
+| | Agent seul (`reference-v2`) | Subagents | Écart |
+|---|---|---|---|
+| Enquêtes réussies | 12 / 12 | 11 / 12 | 1 régression |
+| Fautes graves | 0 | 0 | |
+| Coût | 0,78 $ | 1,75 $ | +125 % |
+| Durée des enquêtes | 201 s | 387 s | +93 % |
+| Tours de l'agent principal | 88 | 64 | −27 % |
+| Appels aux outils de lecture | 64 | 97 | +52 % |
+
+- Plus cher et plus lent sur **chacune** des 12 enquêtes (2 à 2,8 fois le coût). Moins de
+  tours pour l'enquêteur principal, mais plus de travail au total : 33 appels de
+  `logs-investigator`, 49 de `metrics-investigator`, 15 du principal.
+- **Régression sur `saturation_then_payments`** : `resource_saturation` (confiance `medium`)
+  au lieu de `slow_dependency`, et les 4 routes de la saturation citées en trop. C'est le
+  piège nommé par la consigne (« une alerte peut survivre à un changement de cause ») :
+  l'agent écrit lui-même que seule `/payments` reste lente maintenant (4,875 s), mais
+  l'attribue à « la fin de cet épisode » et laisse `slow_dependency` non tranchée.
+- Preuves : aucune introuvable, la recopie d'un agent à l'autre ne les déforme pas ; mais
+  13 seulement retrouvées ailleurs dans la réponse et 5 invérifiables (agent seul : 142
+  exactes sur 142).
+
+**Décision : essayé, pas retenu** (verdict de la règle fixée avant l'essai, validé). Le
+surcoût suffit à lui seul : sans la régression, la règle aurait aussi donné « pas retenu ».
+Le code reste, `solo` par défaut ; le mode `subagents` reste disponible pour un autre essai
+(par exemple des subagents sur un modèle plus petit), et `evals.ops_compare` resservira.
+
+**Hypothèse sur la régression, non prouvée (un seul passage)** : une perte de contexte à la
+délégation. Les subagents résument une tendance (« montée par paliers sur toutes les
+routes ») sans connaître les pièges de la consigne ni le guide de diagnostic ; l'enquêteur
+principal raisonne sur ces résumés plutôt que sur les valeurs, et ne voit plus la
+différence entre « pendant » et « maintenant ». L'agent seul avait les valeurs brutes et les
+pièges dans le même contexte.
+
+**Leçons**
+- Déléguer la lecture coûte deux fois : le contexte de chaque subagent, puis la synthèse.
+  Sur des enquêtes courtes (15 à 20 s, 6 à 10 tours), il n'y a rien à paralléliser qui
+  paie ce coût.
+- Un subagent qui résume perd ce qui distingue deux causes proches : ici, le moment.
+- La CLI a trois comportements invisibles au faux SDK (alias `Task`, nom annoncé à
+  l'initialisation, lancement en arrière-plan) : seule une vérification réelle les montre.
+
