@@ -777,3 +777,33 @@ vraie panne (J4.4).
 - 15 % d'erreurs plutôt que 10 % pour `db_intermittent` : l'alerte (5xx > 5 % sur 2 min)
   doit se déclencher sûrement, sinon le scénario finit `no_alert`, non noté.
 
+**Nouvelle référence : `reference-v2`** (`docs/evals/ops-2026-10-30T131434Z-reference-v2.md`,
+commit `3d95980`, consigne `9704eed2dc32`, notation `11a2215b0643`, vérité terrain
+`1d0c1c3e153b`)
+- Contrôle préalable de `db_errors_intermittent` avec le générateur : 5xx sur les deux routes
+  des commandes seulement (11 à 14 % mesurés, petits échantillons), toutes en
+  `psycopg.OperationalError`, durées normales.
+- **12 / 12 enquêtes réussies**, aucune faute grave, **142 preuves exactes sur 142**. 0,78 $
+  (0,044 à 0,082 $ par enquête), 13 à 20 s et 6 à 10 tours par enquête, 3 h 02 pour la série.
+  Confiance `high` sur 5 enquêtes, `medium` sur 7.
+- Les pièges des nouveaux scénarios sont vus : chaque alerte de `db_and_payments` reçoit sa
+  cause, l'autre panne signalée « distincte » sans ses routes ; `KeyError` sur `/refunds`
+  malgré l'incident de base ; panne partielle ni écartée ni prise pour `no_incident` ;
+  erreurs « qui semblent avoir cessé il y a ~1 min 35 s » sans conclure `no_incident`.
+- Les scénarios plus difficiles ne départagent toujours rien : l'agent seul est à 100 %.
+
+**Limites et défaut non noté**
+- **Scénarios non indépendants** : l'agent lit des fenêtres de 15 min ou plus et voit les
+  restes des scénarios précédents (« une ancienne panne /refunds », « une lenteur
+  antérieure »). Sans effet ici, mais un résultat peut dépendre de l'ordre des scénarios.
+- **Un seul passage** : 12 / 12 ne dit rien de la stabilité.
+- **Inexactitude du résumé, non notée** : sur `saturation_then_bad_deploy`, le résumé dit
+  qu'une lenteur « touche » encore les autres routes, alors que la saturation avait cessé
+  3 min plus tôt. La cause, les routes et les preuves sont justes ; la notation ne lit pas
+  le résumé, donc ce défaut n'est pas compté.
+
+**Suite décidée** : J6.4 en expérience courte, un enquêteur logs et un enquêteur métriques,
+un passage sur les 11 scénarios, comparé à `reference-v2` sur le coût, la durée, les tours et
+les régressions. Le score ne peut pas progresser ; sans gain sur le reste, les subagents ne
+seront pas retenus, avec les chiffres à l'appui.
+
