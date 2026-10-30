@@ -74,6 +74,9 @@ FIELDS = frozenset(
         "since_minutes",
         "metric",
         "window",
+        # Évaluation de l'agent Ops : étape en cours (nom de scénario ou de panne), seulement dans
+        # `ops_eval.jsonl`, que l'agent ne lit jamais
+        "phase",
         # Générateur de trafic (compte rendu périodique) : requêtes par « méthode gabarit code »
         "requests",
         "dropped",

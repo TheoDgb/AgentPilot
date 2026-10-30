@@ -675,3 +675,48 @@ vraie panne (J4.4).
   J6.3.
 - Les pièges notés en vérifiant J6.1 ont servi : l'agent les cite et les évite, sauf un.
 
+### J6.3 : évaluation de l'agent Ops
+
+*2026-10-30*
+
+**Fait**
+- Vérité terrain des incidents (`evals/incidents.jsonl`) : 6 scénarios (les 4 pannes, dont
+  `bad_deploy` avec des remboursements envoyés par l'évaluation ; saturation puis paiements
+  lents sur la même alerte ; fausse alerte), jamais à portée de l'agent (tests).
+- Lanceur autonome (`python -m evals.ops_run`), gardien et charge de remboursements dans leurs
+  propres processus ; notation par du code (`python -m evals.ops_grade`), version des règles
+  `a10b81ce62bc`, preuves recoupées avec les vraies réponses d'outils du journal.
+- **Vérification réelle** sur `db_errors` et `false_alert` (0,13 $,
+  `docs/evals/ops-2026-10-30T003842Z-verif.md`) : le lanceur a déroulé seul les deux scénarios
+  (panne activée, alerte trouvée 2 min 20 s plus tard, enquête, panne arrêtée) ; deux causes
+  justes (`database_errors` avec une confiance élevée, `no_incident` sur la fausse alerte) ;
+  19 preuves exactes, 2 retrouvées, **2 introuvables** sur `db_errors`, d'où 1 / 2 scénarios
+  réussis.
+- **Arrêt en cours de scénario vérifié** : Ctrl+C pendant `db_errors` (panne active depuis
+  1 min 30 s) ; panne désactivée, scénario et passage `interrupted`, résultats enregistrés,
+  plus aucun processus (lanceur, AgentPilot, générateur, gardien) ; seul ShopSim reste, dans
+  Docker.
+
+**Bugs ou surprises**
+- Les 2 preuves introuvables n'étaient pas inventées, mais mal citées : deux champs réunis en
+  une preuve (`warnings[http.exception].error_type / count` = « psycopg.OperationalError /
+  463 », deux valeurs justes) ; et un mauvais index avec un texte coupé (`lines[0].error` au
+  lieu de `lines[1].error`, message tronqué à sa première ligne). La notation a raison de
+  refuser une preuve qu'on ne peut pas retrouver, mais le mot « fausse » exagérait.
+- En codant : un argument omis par une preuve (`limit`) faisait refuser une preuve juste ; un
+  Ctrl+C pendant le lancement de la charge pouvait l'oublier ; le gardien prenait un processus
+  « zombie » pour vivant. Corrigés, chacun avec son test.
+
+**Décisions**
+- **Consigne de l'agent Ops modifiée** (2026-10-30), après la vérification : une section
+  « Preuves » exige un champ et une valeur par preuve, la valeur recopiée en entier, le chemin
+  et l'index tels que la réponse les donne, et les arguments de l'appel. Empreinte de la
+  consigne (`agents/ops/`) : **`0f55381777a7` → `bf42e5b6656d`**. Les prochaines évaluations
+  sont à comparer à cette version, pas à la vérification ci-dessus (`0f55381777a7`).
+- Le rapport dit « introuvable » au lieu de « fausse » (même règle : le critère échoue). La
+  notation n'est pas desserrée : pas de préfixe accepté, pas de champs réunis découpés.
+
+**Leçons**
+- Une preuve vérifiable par du code doit être atomique : un champ, une valeur entière. C'est à
+  la consigne de l'exiger, pas à la notation de deviner.
+

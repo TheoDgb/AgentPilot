@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 
 # Réponse d'outil gardée au journal (au-delà : texte tronqué)
 MAX_RESPONSE_CHARS = 4_000
+# Agent Ops : réponses gardées en entier (jusqu'à 50 lignes de logs), pour recouper chaque
+# preuve de son rapport avec la vraie réponse (`evals.ops_evidence`)
+OPS_MAX_RESPONSE_CHARS = 20_000
 # Délai des hooks : les lectures dans ShopSim peuvent subir une panne de latence
 HOOK_TIMEOUT_S = 60
 EMERGENCY_MESSAGE = (
@@ -61,7 +64,7 @@ def _deny(message: str) -> HookJSONOutput:
     }
 
 
-def clip(response: Any) -> Any:  # noqa: ANN401
+def clip(response: Any, limit: int = MAX_RESPONSE_CHARS) -> Any:  # noqa: ANN401
     """Réponse sérialisable en JSON, tronquée si elle est longue.
 
     Claude Code transmet la réponse d'un outil MCP sous forme de texte JSON : on la décode
@@ -74,9 +77,9 @@ def clip(response: Any) -> Any:  # noqa: ANN401
         except json.JSONDecodeError:
             pass
     text = json.dumps(response, ensure_ascii=False, default=str)
-    if len(text) <= MAX_RESPONSE_CHARS:
+    if len(text) <= limit:
         return json.loads(text)
-    return {"truncated": text[:MAX_RESPONSE_CHARS]}
+    return {"truncated": text[:limit]}
 
 
 class ToolHooks(Protocol):
@@ -93,6 +96,7 @@ class JournalHooks:
         self.journal = journal
         self._seq = itertools.count(1)
         self.called: set[str] = set()
+        self.max_response_chars = MAX_RESPONSE_CHARS
 
     async def pre_tool_use(
         self, data: HookInput, tool_use_id: str | None, context: HookContext
@@ -149,7 +153,9 @@ class JournalHooks:
                 "tool": name,
                 "input": data["tool_input"],  # type: ignore[typeddict-item]
                 "outcome": CallOutcome.FAILED if failed else CallOutcome.SUCCEEDED,
-                "response": None if failed else clip(data.get("tool_response")),
+                "response": (
+                    None if failed else clip(data.get("tool_response"), self.max_response_chars)
+                ),
                 "error": data.get("error") if failed else None,
                 "duration_ms": data.get("duration_ms"),
             }
@@ -265,6 +271,7 @@ class OpsHooks(JournalHooks):
     def __init__(self, journal: Journal, allowed: frozenset[str]) -> None:
         super().__init__(journal)
         self.allowed = allowed
+        self.max_response_chars = OPS_MAX_RESPONSE_CHARS
 
     async def pre_tool_use(
         self, data: HookInput, tool_use_id: str | None, context: HookContext

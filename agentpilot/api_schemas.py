@@ -85,6 +85,8 @@ class RunRead(BaseModel):
     # vérification (check)
     output: dict[str, Any] | None
     error: str | None
+    # Catégorie de l'échec (`sdk_runner.ErrorType`) : distingue une erreur d'infrastructure
+    error_type: str | None = None
     total_cost_usd: Decimal | None
     duration_ms: int | None
     num_turns: int | None
