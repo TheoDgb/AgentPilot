@@ -343,9 +343,14 @@ class OpsHooks(JournalHooks):
 
     async def _record(self, entry_fields: Mapping[str, Any]) -> None:
         await super()._record(entry_fields)
+        response = entry_fields.get("response")
+        # Un lancement en arrière-plan (`async_launched`) ne prouve pas que le subagent a
+        # répondu : seul un lancement terminé compte
+        launched_only = isinstance(response, dict) and response.get("status") == "async_launched"
         if (
             entry_fields["tool"] in self.delegation_tools
             and entry_fields["outcome"] is CallOutcome.SUCCEEDED
             and entry_fields.get("agent") is None
+            and not launched_only
         ):
             self.delegated[str(entry_fields["input"].get("subagent_type"))] += 1

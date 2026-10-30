@@ -96,6 +96,29 @@ BUILTIN_TOOLS = [
 ]
 
 
+# Anciens noms d'outils intégrés : la CLI compare un nom d'outil à son nom **et** à ses alias,
+# donc interdire `Task` interdit aussi `Agent` (vu avec Claude Code 2.1.310)
+BUILTIN_ALIASES = {"Agent": ("Task",)}
+BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+
+
+def permitted_builtins(profile: AgentProfile) -> set[str]:
+    """Outils intégrés du profil et leurs alias : à retirer de la liste des interdits."""
+    return {
+        name for tool in profile.builtin_tools for name in (tool, *BUILTIN_ALIASES.get(tool, ()))
+    }
+
+
+def canonical_tools(tools: Sequence[str], profile: AgentProfile) -> list[str]:
+    """Outils annoncés à l'initialisation, l'alias d'un outil intégré permis ramené à son nom
+    (la CLI annonce `Agent` sous son ancien nom `Task`) ; tout autre nom reste tel quel, et un
+    alias reste interdit si son outil ne l'est pas."""
+    names = {
+        alias: tool for tool in profile.builtin_tools for alias in BUILTIN_ALIASES.get(tool, ())
+    }
+    return sorted({names.get(str(t), str(t)) for t in tools})
+
+
 class ErrorType(StrEnum):
     """Catégorie d'un échec, seule écrite dans les logs : le message (`error`), qui peut citer la
     sortie de l'agent, reste en base."""
@@ -238,7 +261,7 @@ def build_options(
         # Aucun outil intégré, sauf `Agent` pour l'agent Ops à subagents
         tools=list(profile.builtin_tools),
         allowed_tools=sorted(profile.tool_names),
-        disallowed_tools=[t for t in BUILTIN_TOOLS if t not in profile.builtin_tools],
+        disallowed_tools=[t for t in BUILTIN_TOOLS if t not in permitted_builtins(profile)],
         agents=profile.agents or None,
         permission_mode="dontAsk",
         # Avant chaque outil : validation des actions ; après : journal
@@ -254,6 +277,9 @@ def build_options(
             # Ni ~/.claude.json ni la mémoire automatique de l'utilisateur
             "CLAUDE_CONFIG_DIR": str(config_dir),
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+            # Subagents au premier plan : par défaut la CLI les lance en arrière-plan
+            # (`async_launched`), et l'agent principal rendrait son rapport sans leurs réponses
+            **({BACKGROUND_TASKS_ENV: "1"} if profile.agents else {}),
             claude_guard.CLI_ENV: cli,
             claude_guard.SERVICE_PID_ENV: str(os.getpid()),
         },
@@ -298,7 +324,7 @@ async def _collect(
         if isinstance(message, SystemMessage) and message.subtype == "init":
             result.model = message.data.get("model")
             result.available_tools = support_agent.check_tools(
-                message.data.get("tools", []),
+                canonical_tools(message.data.get("tools", []), profile),
                 message.data.get("mcp_servers", []),
                 profile.tool_names,
                 server=profile.mcp_server,

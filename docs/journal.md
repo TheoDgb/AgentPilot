@@ -844,3 +844,25 @@ humaine.
 celle qu'il déclare. La garantie vient de sa définition (`AgentDefinition.tools`, testée) et
 des hooks, qui refusent tout le reste (testés, et prouvés à chaque enquête par le journal).
 
+**Vérification d'isolement réelle (`POST /checks/ops`, mode `subagents`)** : réussie à la
+quatrième tentative (0,06 $ ; 0,08 $ pour la troisième). Les trois premières ont montré trois
+comportements de la CLI (Claude Code 2.1.310) que le faux SDK des tests ne pouvait pas voir :
+1. **`Task` est un alias de `Agent`**, et la CLI compare les outils interdits au nom **et** aux
+   alias : interdire `Task` retirait `Agent` (« outils manquants : Agent »). Les deux noms
+   sont retirés des interdits en mode `subagents` seulement (`BUILTIN_ALIASES`).
+2. **À l'initialisation, l'outil est annoncé sous son ancien nom `Task`** : ramené à `Agent`
+   avant le contrôle (`canonical_tools`) ; en mode `solo`, `Agent` comme `Task` restent
+   refusés.
+3. **Les subagents partent par défaut en arrière-plan** (`async_launched`) : l'enquêteur
+   principal a fini en 2 tours, sans leurs réponses ni sortie structurée.
+   `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` les garde au premier plan (`background=False`
+   dans la définition ne suffit pas). Un lancement en arrière-plan ne compte plus comme
+   preuve dans la vérification.
+
+Résultat : outils annoncés `Agent`, les 5 outils Ops et la sortie structurée, rien d'autre ;
+les deux subagents lancés au premier plan (`completed`, aucun appel d'outil), chacun avec
+ses seuls outils, ni fichier ni shell, les cinq questions pièges à `null`, de même pour
+l'enquêteur principal. Reste à voir en enquête réelle : le champ `agent_type` des hooks pour
+les appels des subagents (s'il manquait, leurs lectures seraient refusées comme celles de
+l'enquêteur principal : l'enquête échouerait, sans rien laisser passer).
+

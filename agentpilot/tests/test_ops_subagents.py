@@ -125,6 +125,8 @@ async def options(environ: dict[str, str]) -> Any:  # noqa: ANN401
 async def test_solo_options_are_unchanged() -> None:
     found = await options(ENVIRON)
 
+    assert "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" not in found.env
+
     assert found.tools == [] and found.disallowed_tools == BUILTIN_TOOLS
     assert found.agents is None
     assert sorted(found.allowed_tools) == sorted(OPS_TOOL_NAMES)
@@ -135,9 +137,14 @@ async def test_subagents_options() -> None:
     found = await options(SUBAGENTS)
 
     assert found.tools == ["Agent"]
-    assert "Agent" not in found.disallowed_tools
-    assert {"Task", "Bash", "Read", "Write", "Edit", "Glob", "Grep"} <= set(found.disallowed_tools)
+    # `Task` est un alias de `Agent` pour la CLI : l'interdire retirerait aussi `Agent`. Les
+    # hooks bornent les deux noms aux deux subagents prévus
+    assert not {"Agent", "Task"} & set(found.disallowed_tools)
+    assert {"Bash", "Read", "Write", "Edit", "Glob", "Grep"} <= set(found.disallowed_tools)
     assert sorted(found.allowed_tools) == sorted({*OPS_TOOL_NAMES, "Agent"})
+    # Subagents au premier plan : sinon la CLI les lance en arrière-plan, sans attendre leur
+    # réponse (vu en vérification réelle)
+    assert found.env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
     assert "Enquêteurs délégués" in found.system_prompt
     assert set(found.agents) == {LOGS, METRICS}
     for name, definition in found.agents.items():
@@ -147,6 +154,32 @@ async def test_subagents_options() -> None:
         assert definition.description and "## Réponse" in definition.prompt
         # Les subagents ne reçoivent pas le guide de diagnostic : ils ne concluent pas
         assert "Guide de diagnostic" not in definition.prompt
+
+
+@pytest.mark.parametrize("announced", ["Agent", "Task"])
+async def test_delegation_tool_is_accepted_under_either_name(announced: str) -> None:
+    """La CLI annonce `Agent` sous son ancien nom `Task` (Claude Code 2.1.310)."""
+    fake = FakeQuery(ops_init([*OPS_INIT_TOOLS, announced]), result_message(report()))
+
+    result = await sdk_runner.investigate_alert(
+        ALERT, journal=MemoryJournal(), environ=SUBAGENTS, query=fake
+    )
+
+    # Initialisation acceptée, l'outil enregistré sous son nom actuel (la suite échoue plus
+    # loin : ce faux SDK n'appelle aucun outil)
+    assert result.available_tools is not None and "Agent" in result.available_tools
+    assert "Task" not in result.available_tools
+
+
+@pytest.mark.parametrize("announced", ["Agent", "Task"])
+async def test_delegation_tool_is_refused_for_the_solo_agent(announced: str) -> None:
+    fake = FakeQuery(ops_init([*OPS_INIT_TOOLS, announced]), result_message(report()))
+
+    result = await sdk_runner.investigate_alert(
+        ALERT, journal=MemoryJournal(), environ=ENVIRON, query=fake
+    )
+
+    assert result.error is not None and f"outils interdits : {announced}" in result.error
 
 
 def test_lead_and_subagent_tools_split_the_five_ops_tools() -> None:
@@ -358,6 +391,30 @@ async def test_subagents_isolation_check_requires_both_launches(
 
     assert result.error is not None and "jamais lancés" in result.error
     assert METRICS in result.error
+
+
+async def test_a_background_launch_is_not_proof_of_an_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lancement en arrière-plan (`async_launched`) : le subagent n'a encore rien répondu, des
+    réponses recopiées ne prouvent rien."""
+    monkeypatch.setattr(ops_agent, "now", lambda: NOW)
+
+    async def background(name: str, arguments: dict[str, Any]) -> Any:  # noqa: ANN401
+        return {"status": "async_launched", "agentId": "a1", "isAsync": True}
+
+    fake = HookDrivingQuery(
+        delegate(LOGS),
+        delegate(METRICS),
+        output=subagents_context(),
+        executor=background,
+        init=lead_init(),
+    )
+    result = await sdk_runner.check_ops_context(
+        journal=MemoryJournal(), environ=SUBAGENTS, query=fake
+    )
+
+    assert result.error is not None and "jamais lancés" in result.error
 
 
 async def test_a_general_agent_launched_in_the_check_is_refused(
