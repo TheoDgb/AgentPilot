@@ -3,7 +3,7 @@
 import os
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import Connection, Engine, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 DATABASE_URL = os.environ.get(
@@ -25,13 +25,25 @@ def get_session() -> Iterator[Session]:
         yield session
 
 
-def init_db() -> None:
-    """Crée les tables manquantes (pas d'Alembic pour l'instant), et met à niveau une base
-    existante : `chaos_faults.started_real_at` remplace `request_count`. Le seed recrée tout."""
-    from shopsim.app import models  # noqa: F401  (enregistre les modèles)
+def add_enum_values(connection: Connection, type_name: str, values: list[str]) -> None:
+    """Ajoute à un type énuméré PostgreSQL les valeurs qui lui manquent (connexion en
+    autocommit : une valeur ajoutée dans une transaction n'est utilisable qu'après elle)."""
+    for value in values:
+        # Noms et valeurs du code, jamais d'une requête : pas de paramètre possible en DDL
+        connection.execute(text(f"ALTER TYPE {type_name} ADD VALUE IF NOT EXISTS '{value}'"))
 
-    Base.metadata.create_all(engine)
-    with engine.begin() as connection:
+
+def init_db(bind: Engine | None = None) -> None:
+    """Crée les tables manquantes (pas d'Alembic pour l'instant), et met à niveau une base
+    existante : `chaos_faults.started_real_at` remplace `request_count`, nouvelles pannes
+    ajoutées au type `chaos_scenario`. Le seed recrée tout."""
+    from shopsim.app import models
+
+    bind = bind or engine
+    Base.metadata.create_all(bind)
+    with bind.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        add_enum_values(connection, "chaos_scenario", [s.value for s in models.ChaosScenario])
+    with bind.begin() as connection:
         # Une panne d'avant cette colonne n'a pas d'heure réelle : supprimée, à réactiver
         connection.execute(
             text(

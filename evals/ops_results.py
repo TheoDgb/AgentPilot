@@ -41,7 +41,12 @@ class FaultWindow(BaseModel):
 
 
 class ScenarioResult(BaseModel):
+    """Une enquête : une ligne par alerte confiée à l'agent (plusieurs pour un scénario à
+    plusieurs enquêtes, fenêtres des pannes recopiées sur chacune)."""
+
     scenario_id: str
+    # Nom de l'enquête dans le scénario ; None s'il n'y en a qu'une (et fichiers d'avant J6.4)
+    investigation: str | None = None
     status: ScenarioStatus
     reason: str | None = None
     started_at: datetime | None = None
@@ -88,3 +93,8 @@ class OpsEvalSummary(BaseModel):
 class OpsEvalReport(BaseModel):
     summary: OpsEvalSummary
     scenarios: list[ScenarioResult] = Field(default_factory=list)
+
+
+def unit_label(scenario_id: str, investigation: str | None) -> str:
+    """Nom affiché d'une enquête : « scénario » ou « scénario · enquête »."""
+    return scenario_id if investigation is None else f"{scenario_id} · {investigation}"

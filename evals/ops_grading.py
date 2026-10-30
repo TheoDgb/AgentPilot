@@ -1,9 +1,12 @@
 """Notation des enquêtes de l'agent Ops contre la vérité terrain des incidents (J6.3), sans IA.
 
-Critères d'un scénario noté (`completed` ou `failed`) :
+Une note par enquête (J6.4 : un scénario à plusieurs pannes peut confier plusieurs alertes à
+l'agent, chacune notée contre ses propres attentes). Critères d'une enquête notée (`completed`
+ou `failed`) :
 - `report` : l'enquête a rendu un rapport valide (sinon les autres critères sont sans objet) ;
 - `cause` : cause probable = cause attendue ;
-- `routes` : routes attendues ⊆ routes citées ⊆ routes attendues ∪ routes admises ;
+- `routes` : routes attendues ⊆ routes citées ⊆ routes attendues ∪ routes admises (une route
+  d'une autre panne du scénario n'est ni l'une ni l'autre : en trop, signalée comme telle) ;
 - `evidence` : aucune preuve `fabricated` (`evals.ops_evidence`) ;
 - `ruled_out` : au moins une hypothèse écartée, et jamais la cause attendue ;
 - `confidence` : jamais une confiance `high` sur une mauvaise cause, faute grave comptée à part.
@@ -25,7 +28,7 @@ from typing import Any
 from agentpilot.ops_schemas import Confidence, HypothesisStatus
 from evals.incident_truth import IncidentScenario
 from evals.ops_evidence import EvidenceCheck, EvidenceVerdict, check, report_evidence
-from evals.ops_results import ScenarioResult, ScenarioStatus
+from evals.ops_results import ScenarioResult, ScenarioStatus, unit_label
 
 RULES_FILES = ("ops_grading.py", "ops_evidence.py")
 GRADED = (ScenarioStatus.COMPLETED, ScenarioStatus.FAILED)
@@ -65,6 +68,7 @@ class CriterionResult:
 class ScenarioGrade:
     scenario_id: str
     status: ScenarioStatus
+    investigation: str | None = None
     criteria: list[CriterionResult] = field(default_factory=list)
     evidence: list[EvidenceCheck] = field(default_factory=list)
     # Confiance « high » sur une mauvaise cause
@@ -77,6 +81,10 @@ class ScenarioGrade:
     reason: str | None = None
     cost_usd: float | None = None
     duration_ms: int | None = None
+
+    @property
+    def label(self) -> str:
+        return unit_label(self.scenario_id, self.investigation)
 
     @property
     def graded(self) -> bool:
@@ -100,10 +108,13 @@ def _na(*criteria: Criterion) -> list[CriterionResult]:
 
 
 def grade(result: ScenarioResult, scenario: IncidentScenario) -> ScenarioGrade:
+    """Note l'enquête `result.investigation` du scénario."""
+    expected = scenario.investigation(result.investigation)
     found = ScenarioGrade(
         scenario_id=result.scenario_id,
         status=result.status,
-        expected_cause=scenario.expected_cause.value,
+        investigation=result.investigation,
+        expected_cause=expected.expected_cause.value,
         reason=result.reason or result.error,
         cost_usd=result.cost_usd,
         duration_ms=result.duration_ms,
@@ -122,22 +133,24 @@ def grade(result: ScenarioResult, scenario: IncidentScenario) -> ScenarioGrade:
     cause = report.get("probable_cause")
     confidence = report.get("confidence")
     found.found_cause, found.confidence = cause, confidence
-    right = cause == scenario.expected_cause.value
+    right = cause == expected.expected_cause.value
     criteria = [CriterionResult(Criterion.REPORT, Verdict.PASS)]
     criteria.append(
         CriterionResult(Criterion.CAUSE, Verdict.PASS)
         if right
         else CriterionResult(
-            Criterion.CAUSE, Verdict.FAIL, f"{cause} au lieu de {scenario.expected_cause.value}"
+            Criterion.CAUSE, Verdict.FAIL, f"{cause} au lieu de {expected.expected_cause.value}"
         )
     )
 
     cited = set(report.get("affected_routes") or [])
-    required, allowed = set(scenario.expected_routes), set(scenario.allowed_routes)
+    required, allowed = set(expected.expected_routes), set(expected.allowed_routes)
     missing, extra = sorted(required - cited), sorted(cited - required - allowed)
     if missing or extra:
+        others = scenario.fault_routes()
+        shown = [f"{r} (autre panne)" if r in others else r for r in extra]
         parts = [f"manquantes : {', '.join(missing)}"] if missing else []
-        parts += [f"en trop : {', '.join(extra)}"] if extra else []
+        parts += [f"en trop : {', '.join(shown)}"] if extra else []
         criteria.append(CriterionResult(Criterion.ROUTES, Verdict.FAIL, " ; ".join(parts)))
     else:
         criteria.append(CriterionResult(Criterion.ROUTES, Verdict.PASS))
@@ -158,7 +171,7 @@ def grade(result: ScenarioResult, scenario: IncidentScenario) -> ScenarioGrade:
     ]
     if not ruled_out:
         criteria.append(CriterionResult(Criterion.RULED_OUT, Verdict.FAIL, "aucune écartée"))
-    elif scenario.expected_cause.value in ruled_out:
+    elif expected.expected_cause.value in ruled_out:
         criteria.append(
             CriterionResult(Criterion.RULED_OUT, Verdict.FAIL, "la cause attendue a été écartée")
         )

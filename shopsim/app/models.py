@@ -53,6 +53,7 @@ class ChaosScenario(StrEnum):
     DB_ERRORS = "db_errors"
     CONNECTION_SATURATION = "connection_saturation"
     BAD_DEPLOY = "bad_deploy"
+    DB_ERRORS_INTERMITTENT = "db_errors_intermittent"
 
 
 class Customer(Base):

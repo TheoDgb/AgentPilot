@@ -18,7 +18,7 @@ from pydantic import ValidationError
 from evals.incident_truth import INCIDENTS_PATH, load_scenarios, truth_sha256
 from evals.ops_grading import grade, rules_sha256
 from evals.ops_report import OpsPass, OpsVersions, render
-from evals.ops_results import OpsEvalReport
+from evals.ops_results import OpsEvalReport, unit_label
 from evals.run import REPO_ROOT
 
 REPORTS_DIR = REPO_ROOT / "docs" / "evals"
@@ -50,9 +50,14 @@ def load(paths: Sequence[Path], truth_path: Path) -> list[OpsPass]:
             )
             if not same:
                 raise Refused(f"{path.name} n'est pas un passage de la même série")
-        unknown = [r.scenario_id for r in report.scenarios if r.scenario_id not in scenarios]
+        unknown = [
+            unit_label(r.scenario_id, r.investigation)
+            for r in report.scenarios
+            if r.scenario_id not in scenarios
+            or r.investigation not in {i.name for i in scenarios[r.scenario_id].investigations}
+        ]
         if unknown:
-            raise Refused(f"{path.name} : scénario inconnu ({', '.join(unknown)})")
+            raise Refused(f"{path.name} : enquête inconnue ({', '.join(unknown)})")
         grades = [grade(r, scenarios[r.scenario_id]) for r in report.scenarios]
         passes.append(OpsPass(path, report, grades))
     return sorted(passes, key=lambda p: p.report.summary.pass_index)
@@ -81,13 +86,11 @@ def main(
     graded = [g for p in passes for g in p.grades if g.graded]
     passed = sum(1 for g in graded if g.passed)
     grave = sum(1 for g in graded if g.grave_fault)
-    print(f"Score : {passed} / {len(graded)} scénarios réussis ; fautes graves : {grave}")
+    print(f"Score : {passed} / {len(graded)} enquêtes réussies ; fautes graves : {grave}")
     for p in passes:
         for g in p.grades:
             state = "non noté" if g.passed is None else ("réussi" if g.passed else "échec")
-            print(
-                f"  p{p.report.summary.pass_index} {g.scenario_id:<26} {state} ({g.status.value})"
-            )
+            print(f"  p{p.report.summary.pass_index} {g.label:<36} {state} ({g.status.value})")
     print(f"Version de la notation : {versions.rules_sha256[:12]}")
     print(f"Rapport : {out}")
     return 0

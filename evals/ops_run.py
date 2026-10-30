@@ -62,6 +62,7 @@ from evals.incident_truth import (
     AlertTarget,
     IncidentScenario,
     InjectedAlert,
+    Investigation,
     load_scenarios,
     truth_sha256,
 )
@@ -72,6 +73,7 @@ from evals.ops_results import (
     RunStatus,
     ScenarioResult,
     ScenarioStatus,
+    unit_label,
 )
 from evals.run import REPO_ROOT, RESULTS_DIR, code_version, config_name
 from mcp_server.ops.metrics_tools import promql
@@ -221,6 +223,17 @@ class Running:
     window: FaultWindow
 
 
+@dataclass
+class Pending:
+    """Une enquête du scénario en cours, pas encore terminée."""
+
+    investigation: Investigation
+    result: ScenarioResult
+    alert: Mapping[str, Any] | None = None
+    run_id: str | None = None
+    run_started: datetime | None = None
+
+
 class OpsEvaluation:
     def __init__(
         self,
@@ -246,7 +259,10 @@ class OpsEvaluation:
         self.spent_before = spent_before
         self.spent = Decimal(0)
         self.load: LoadHandle | None = None
-        self.load_result: ScenarioResult | None = None
+        # Enquêtes du scénario dont la charge est en cours (envois comptés sur chacune)
+        self.load_results: list[ScenarioResult] = []
+        # Enquêtes du scénario en cours
+        self.current: list[ScenarioResult] = []
         self.fake_alert: dict[str, Any] | None = None
         self.running: list[Running] = []
         # Étapes déjà activées dans le scénario en cours
@@ -259,9 +275,9 @@ class OpsEvaluation:
         Sans effet si rien n'est en cours ; appelé à chaque fin de scénario et à l'arrêt."""
         if self.load is not None:
             sent = await asyncio.to_thread(self.load.stop)
-            if self.load_result is not None:
-                self.load_result.refunds_sent += sent
-            self.load, self.load_result = None, None
+            for result in self.load_results:
+                result.refunds_sent += sent
+            self.load, self.load_results = None, []
             self.notify({"load": None})
         if self.running:
             await self.stack.turn_off_all()
@@ -310,16 +326,18 @@ class OpsEvaluation:
         return (self.clock.now() - started).total_seconds() / 60
 
     async def _steps(
-        self, scenario: IncidentScenario, started: datetime, result: ScenarioResult
+        self, scenario: IncidentScenario, started: datetime, results: list[ScenarioResult]
     ) -> None:
-        """Active et arrête les pannes aux minutes prévues ; la charge suit son étape."""
+        """Active et arrête les pannes aux minutes prévues ; la charge suit son étape. Chaque
+        fenêtre de panne est la même pour toutes les enquêtes du scénario."""
         elapsed = self._minutes(started)
         for index, step in enumerate(scenario.steps):
             running = next((r for r in self.running if r.index == index), None)
             if index not in self.started_steps and elapsed >= step.start_min:
                 await self.stack.turn_on(step.fault.value)
                 window = FaultWindow(fault=step.fault.value, started_at=self.clock.now())
-                result.faults.append(window)
+                for result in results:
+                    result.faults.append(window)
                 self.running.append(Running(index, window))
                 self.started_steps.add(index)
                 log_event(logger, "ops_eval.fault_on", phase=step.fault.value)
@@ -328,14 +346,16 @@ class OpsEvaluation:
                     # Lancement direct (un `Popen`, immédiat) : une interruption ne peut pas
                     # tomber entre le lancement et l'enregistrement, ce qui oublierait la charge
                     self.load = self.start_load(load.per_minute)
-                    self.load_result = result
+                    self.load_results = results
                     self.notify({"load": self.load.pid})
             elif running is not None and step.stop_min is not None and elapsed >= step.stop_min:
                 load = scenario.load
                 if load is not None and load.during_step == index and self.load is not None:
                     # La charge d'abord : aucun remboursement après la panne
-                    result.refunds_sent += await asyncio.to_thread(self.load.stop)
-                    self.load, self.load_result = None, None
+                    sent = await asyncio.to_thread(self.load.stop)
+                    for result in results:
+                        result.refunds_sent += sent
+                    self.load, self.load_results = None, []
                     self.notify({"load": None})
                 await self.stack.turn_off(step.fault.value)
                 running.window.stopped_at = self.clock.now()
@@ -345,22 +365,34 @@ class OpsEvaluation:
     def _budget_allows(self) -> bool:
         return self.spent_before + self.spent + RESERVE_USD <= self.max_budget
 
-    async def scenario(self, scenario: IncidentScenario) -> ScenarioResult:
-        result = ScenarioResult(scenario_id=scenario.scenario_id, status=ScenarioStatus.INTERRUPTED)
-        self.report.scenarios.append(result)
+    async def scenario(self, scenario: IncidentScenario) -> list[ScenarioResult]:
+        results = [
+            ScenarioResult(
+                scenario_id=scenario.scenario_id,
+                investigation=investigation.name,
+                status=ScenarioStatus.INTERRUPTED,
+            )
+            for investigation in scenario.investigations
+        ]
+        self.current = results
+        self.report.scenarios.extend(results)
         try:
             await self.wait_clean(scenario)
-            await self._play(scenario, result)
+            await self._play(scenario, results)
         finally:
             await self.wind_down()
-            result.finished_at = self.clock.now()
+            for result in results:
+                result.finished_at = self.clock.now()
             self.save()
-        return result
+        return results
 
-    async def _play(self, scenario: IncidentScenario, result: ScenarioResult) -> None:
+    async def _play(self, scenario: IncidentScenario, results: list[ScenarioResult]) -> None:
+        """Les enquêtes du scénario, l'une après l'autre : chacune attend son alerte, puis son
+        heure. Une alerte trouvée reste celle de l'enquête, même résolue entre-temps."""
         started = self.clock.now()
         self.started_steps = set()
-        result.started_at = started
+        for result in results:
+            result.started_at = started
         if scenario.inject_alert is not None:
             fingerprint = secrets.token_hex(8)
             await self.stack.post_alert(
@@ -370,43 +402,67 @@ class OpsEvaluation:
                 scenario.inject_alert, started, fingerprint, resolved=True
             )
             self.notify({"fake_alert": self.fake_alert})
-        alert: Mapping[str, Any] | None = None
-        run_id: str | None = None
-        run_started: datetime | None = None
+        pending = [
+            Pending(investigation, result)
+            for investigation, result in zip(scenario.investigations, results, strict=True)
+        ]
         while True:
-            await self._steps(scenario, started, result)
+            await self._steps(scenario, started, results)
             await self._check_loop()
             elapsed = self._minutes(started)
-            if alert is None:
-                alert = pick_alert(
-                    await self.stack.firing_alerts(), scenario.alert, scenario, started
-                )
-                if alert is not None:
-                    result.alert_id = uuid.UUID(str(alert["id"]))
-                    result.alert_started_at = _when(alert["starts_at"])
-                elif elapsed >= scenario.alert_timeout_min:
-                    result.status = ScenarioStatus.NO_ALERT
-                    result.reason = (
+            waiting = [i for i in pending if i.alert is None]
+            firing = await self.stack.firing_alerts() if waiting else []
+            for item in waiting:
+                item.alert = pick_alert(firing, item.investigation.alert, scenario, started)
+                if item.alert is not None:
+                    item.result.alert_id = uuid.UUID(str(item.alert["id"]))
+                    item.result.alert_started_at = _when(item.alert["starts_at"])
+            for item in pending:
+                if item.alert is None and elapsed >= scenario.alert_timeout_min:
+                    item.result.status = ScenarioStatus.NO_ALERT
+                    item.result.reason = (
                         f"alerte attendue absente après {scenario.alert_timeout_min:g} min"
                     )
-                    return
-            if alert is not None and run_id is None and elapsed >= scenario.investigate_after_min:
-                if not self._budget_allows():
-                    result.status = ScenarioStatus.NOT_RUN
-                    result.reason = "budget"
-                    raise BudgetExhausted
-                created = await self.stack.start_run(str(alert["id"]))
-                run_id, run_started = str(created["id"]), self.clock.now()
-                result.run_id, result.trace_id = uuid.UUID(run_id), created.get("trace_id")
-                log_event(logger, "ops_eval.investigation", phase=scenario.scenario_id)
-            if run_id is not None and run_started is not None:
-                run = await self.stack.get_run(run_id)
+            pending = [i for i in pending if i.result.status is not ScenarioStatus.NO_ALERT]
+            running = next((i for i in pending if i.run_id is not None), None)
+            if running is None:
+                ready = next(
+                    (
+                        i
+                        for i in pending
+                        if i.alert is not None and elapsed >= i.investigation.investigate_after_min
+                    ),
+                    None,
+                )
+                if ready is not None:
+                    if not self._budget_allows():
+                        for item in pending:
+                            item.result.status = ScenarioStatus.NOT_RUN
+                            item.result.reason = "budget"
+                        raise BudgetExhausted
+                    assert ready.alert is not None
+                    created = await self.stack.start_run(str(ready.alert["id"]))
+                    ready.run_id, ready.run_started = str(created["id"]), self.clock.now()
+                    ready.result.run_id = uuid.UUID(ready.run_id)
+                    ready.result.trace_id = created.get("trace_id")
+                    log_event(
+                        logger,
+                        "ops_eval.investigation",
+                        phase=unit_label(scenario.scenario_id, ready.investigation.name),
+                    )
+                    running = ready
+            if running is not None and running.run_id is not None:
+                run = await self.stack.get_run(running.run_id)
                 if run["status"] != "running":
-                    self._record_run(result, run)
-                    return
-                if self.clock.now() - run_started > RUN_TIMEOUT:
-                    result.status = ScenarioStatus.INTERRUPTED
+                    self._record_run(running.result, run)
+                    pending.remove(running)
+                elif (
+                    running.run_started is not None
+                    and self.clock.now() - running.run_started > RUN_TIMEOUT
+                ):
                     raise Aborted("enquête sans fin au-delà de 12 min")
+            if not pending:
+                return
             await self.clock.sleep(POLL_S)
 
     def _record_run(self, result: ScenarioResult, run: Mapping[str, Any]) -> None:
@@ -455,9 +511,9 @@ class OpsEvaluation:
         except (Aborted, InfraStop, httpx.HTTPError) as exc:
             status = RunStatus.ABORTED
             self.report.summary.stop_reason = str(exc)
-            current = self.report.scenarios[-1] if self.report.scenarios else None
-            if current is not None and current.reason is None:
-                current.reason = str(exc)
+            for current in self.current:
+                if current.status is ScenarioStatus.INTERRUPTED and current.reason is None:
+                    current.reason = str(exc)
         except asyncio.CancelledError:
             self.report.summary.stop_reason = "interrompue"
             raise
@@ -469,12 +525,14 @@ class OpsEvaluation:
         done = {r.scenario_id for r in self.report.scenarios}
         for scenario in scenarios:
             if scenario.scenario_id not in done:
-                self.report.scenarios.append(
+                self.report.scenarios.extend(
                     ScenarioResult(
                         scenario_id=scenario.scenario_id,
+                        investigation=investigation.name,
                         status=ScenarioStatus.NOT_RUN,
                         reason=status.value,
                     )
+                    for investigation in scenario.investigations
                 )
         self.report.summary.status = status
         self.report.summary.finished_at = self.clock.now()
@@ -657,8 +715,8 @@ def select(spec: str | None, scenarios: Sequence[IncidentScenario]) -> list[Inci
 
 
 def estimate_minutes(scenarios: Sequence[IncidentScenario]) -> float:
-    """Durée prévue d'un passage : historique, pannes et enquête (environ 1 min)."""
-    return sum(s.history_min + s.end_min() + 2 for s in scenarios)
+    """Durée prévue d'un passage : historique, pannes et enquêtes (environ 1 min chacune)."""
+    return sum(s.history_min + s.end_min() + 1 + len(s.investigations) for s in scenarios)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -817,7 +875,8 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
             spent += evaluation.spent
             last_fault_end = evaluation.last_fault_end
             for result in report.scenarios:
-                print(f"  {result.scenario_id:<26} {result.status.value} {result.reason or ''}")
+                label = unit_label(result.scenario_id, result.investigation)
+                print(f"  {label:<36} {result.status.value} {result.reason or ''}")
             if status is not RunStatus.COMPLETED:
                 break
     except Refused as exc:

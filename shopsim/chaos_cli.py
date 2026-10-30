@@ -38,6 +38,7 @@ DESCRIPTIONS = {
     ChaosScenario.DB_ERRORS: "les lectures des commandes renvoient 500",
     ChaosScenario.CONNECTION_SATURATION: "les requêtes ralentissent (0 à 5 s en 10 min)",
     ChaosScenario.BAD_DEPLOY: "seuls les remboursements échouent (500)",
+    ChaosScenario.DB_ERRORS_INTERMITTENT: "une partie des lectures des commandes renvoie 500",
 }
 
 # Envoie une requête à ShopSim : (méthode, chemin, jeton) → (code HTTP, corps JSON ou None)

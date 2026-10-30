@@ -11,6 +11,7 @@ mention de la panne : seul `GET /chaos` dit quelle panne est active. Même évé
 
 import logging
 import os
+import random
 import secrets
 import time
 from datetime import timedelta
@@ -33,6 +34,10 @@ CHAOS_PAYMENT_LATENCY_MS = 4_000
 # Selon le temps écoulé, pas le nombre de requêtes : la montée ne dépend pas du débit
 SATURATION_MAX_MS = 5_000
 SATURATION_RAMP = timedelta(minutes=10)
+# db_errors_intermittent : part des lectures des commandes qui échouent
+CHAOS_INTERMITTENT_SHARE = 0.15
+# Tirage d'une requête dans [0, 1) ; remplacé par une valeur fixe dans les tests
+_draw = random.random
 
 
 def is_active(session: Session, scenario: ChaosScenario) -> bool:
@@ -61,9 +66,19 @@ def _internal_error() -> HTTPException:
     return HTTPException(status_code=500, detail="Internal Server Error")
 
 
-def raise_if_db_errors(session: Session) -> None:
-    """db_errors : les lectures des commandes échouent comme sur une base indisponible."""
+def _db_errors_now(session: Session) -> bool:
     if is_active(session, ChaosScenario.DB_ERRORS):
+        return True
+    return (
+        is_active(session, ChaosScenario.DB_ERRORS_INTERMITTENT)
+        and _draw() < CHAOS_INTERMITTENT_SHARE
+    )
+
+
+def raise_if_db_errors(session: Session) -> None:
+    """db_errors : les lectures des commandes échouent comme sur une base indisponible ;
+    db_errors_intermittent : une partie seulement, avec la même erreur."""
+    if _db_errors_now(session):
         _log_error(
             "psycopg.OperationalError",
             "server closed the connection unexpectedly\n"

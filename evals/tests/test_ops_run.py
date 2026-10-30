@@ -25,7 +25,6 @@ pytestmark = pytest.mark.anyio
 
 T0 = datetime(2026, 10, 30, 9, 0, tzinfo=UTC)
 SCENARIOS = {s.scenario_id: s for s in load_scenarios()}
-RUN_ID = "651f924c-94f8-4b91-8118-0217f8790a10"
 REPORT_OK = {"probable_cause": "database_errors", "confidence": "high"}
 
 
@@ -156,7 +155,7 @@ class FakeStack:
 
     async def start_run(self, alert_id: str) -> dict[str, Any]:
         self.events.append(("run", alert_id))
-        return {"id": RUN_ID, "trace_id": "a" * 32, "status": "running"}
+        return {"id": str(uuid.uuid4()), "trace_id": "a" * 32, "status": "running"}
 
     async def get_run(self, run_id: str) -> dict[str, Any]:
         self._polls += 1
@@ -324,9 +323,10 @@ def test_pick_alert_rejects_an_occurrence_born_after_the_change_of_cause() -> No
     early = late | {"id": "early", "starts_at": (T0 + timedelta(minutes=5)).isoformat()}
     old = late | {"id": "old", "starts_at": (T0 - timedelta(minutes=30)).isoformat()}
 
-    assert pick_alert([late], scenario.alert, scenario, T0) is None
-    assert pick_alert([old], scenario.alert, scenario, T0) is None
-    assert pick_alert([late, early], scenario.alert, scenario, T0)["id"] == "early"  # type: ignore[index]
+    target = scenario.investigations[0].alert
+    assert pick_alert([late], target, scenario, T0) is None
+    assert pick_alert([old], target, scenario, T0) is None
+    assert pick_alert([late, early], target, scenario, T0)["id"] == "early"  # type: ignore[index]
 
 
 async def test_missing_alert_is_no_alert_and_the_series_goes_on(tmp_path: Path) -> None:
@@ -425,6 +425,105 @@ async def test_support_loop_running_aborts(tmp_path: Path) -> None:
     assert "boucle de l'agent Support" in (run.report.summary.stop_reason or "")
 
 
+# --- Plusieurs enquêtes dans un scénario (J6.4) ---------------------------------------------
+
+
+def payments_rule() -> Rule:
+    return Rule({"payment_latency"}, "ShopSimHighLatency", "/payments/{order_id}", 4)
+
+
+async def test_two_investigations_run_one_after_the_other(tmp_path: Path) -> None:
+    clock = FakeClock()
+    stack = FakeStack(clock, [db_rule(), payments_rule()])
+    run = evaluation(stack, tmp_path)
+
+    status = await run.run([SCENARIOS["db_and_payments"]])
+
+    assert status is RunStatus.COMPLETED
+    orders, payments = run.report.scenarios
+    assert (orders.investigation, payments.investigation) == ("orders", "payments")
+    assert {orders.status, payments.status} == {ScenarioStatus.COMPLETED}
+    by_route = {o["route"]: o["id"] for o in stack.occurrences}
+    assert str(orders.alert_id) == by_route["/orders/{order_id}"]
+    assert str(payments.alert_id) == by_route["/payments/{order_id}"]
+    # L'une après l'autre, dans l'ordre de la vérité terrain
+    runs = [e[1] for e in stack.events if e[0] == "run"]
+    assert runs == [str(orders.alert_id), str(payments.alert_id)]
+    assert orders.run_id != payments.run_id
+    # Mêmes fenêtres de panne sur les deux lignes, arrêtées une fois
+    assert orders.faults == payments.faults
+    assert [f.fault for f in orders.faults] == ["db_errors", "payment_latency"]
+    assert all(f.stopped_at for f in orders.faults)
+    assert stack.events.count(("off_all",)) == 1
+    assert run.spent == Decimal("0.12")
+
+
+async def test_one_alert_missing_the_other_investigation_still_runs(tmp_path: Path) -> None:
+    clock = FakeClock()
+    stack = FakeStack(clock, [db_rule()])
+    run = evaluation(stack, tmp_path)
+
+    status = await run.run([SCENARIOS["db_and_payments"]])
+
+    assert status is RunStatus.COMPLETED
+    orders, payments = run.report.scenarios
+    assert orders.status is ScenarioStatus.COMPLETED
+    assert payments.status is ScenarioStatus.NO_ALERT and "absente" in (payments.reason or "")
+
+
+async def test_alert_resolved_before_its_investigation_is_still_investigated(
+    tmp_path: Path,
+) -> None:
+    """Erreurs déjà finies : l'alerte trouvée à 2,5 min se résout à l'arrêt de la panne
+    (3,5 min) ; l'enquête part quand même sur elle, à 5 min."""
+    clock = FakeClock()
+    stack = FakeStack(clock, [db_rule()])
+    run = evaluation(stack, tmp_path)
+
+    status = await run.run([SCENARIOS["db_errors_ended"]])
+
+    assert status is RunStatus.COMPLETED
+    [found] = run.report.scenarios
+    [occurrence] = stack.occurrences
+    assert found.status is ScenarioStatus.COMPLETED and str(found.alert_id) == occurrence["id"]
+    # Panne arrêtée (l'alerte se résout) avant l'enquête
+    off, investigated = order_of(stack.events, "off", "run")
+    assert off < investigated
+
+
+async def test_budget_runs_out_between_two_investigations(tmp_path: Path) -> None:
+    """Plafond 1,03 $ : la première enquête tient (0 + 1 $ de réserve), pas la seconde
+    (0,06 + 1)."""
+    clock = FakeClock()
+    stack = FakeStack(clock, [db_rule(), payments_rule()])
+    run = evaluation(stack, tmp_path, max_budget="1.03")
+
+    status = await run.run([SCENARIOS["db_and_payments"], SCENARIOS["false_alert"]])
+
+    assert status is RunStatus.BUDGET_EXHAUSTED
+    assert [(r.scenario_id, r.investigation, r.status, r.reason) for r in run.report.scenarios] == [
+        ("db_and_payments", "orders", ScenarioStatus.COMPLETED, None),
+        ("db_and_payments", "payments", ScenarioStatus.NOT_RUN, "budget"),
+        ("false_alert", None, ScenarioStatus.NOT_RUN, "budget_exhausted"),
+    ]
+    assert stack.active == {}
+
+
+async def test_not_run_scenarios_list_every_investigation(tmp_path: Path) -> None:
+    clock = FakeClock()
+    stack = FakeStack(clock, [db_rule()], loop=False)
+    run = evaluation(stack, tmp_path)
+
+    status = await run.run([SCENARIOS["db_errors"], SCENARIOS["db_and_payments"]])
+
+    assert status is RunStatus.ABORTED
+    assert [(r.investigation, r.status) for r in run.report.scenarios] == [
+        (None, ScenarioStatus.INTERRUPTED),
+        ("orders", ScenarioStatus.NOT_RUN),
+        ("payments", ScenarioStatus.NOT_RUN),
+    ]
+
+
 # --- Charge de remboursements : toujours arrêtée avant la panne ----------------------------
 
 
@@ -447,10 +546,7 @@ async def test_load_is_stopped_before_the_fault_at_the_end(tmp_path: Path) -> No
 
 async def test_load_is_stopped_before_its_fault_when_the_step_ends(tmp_path: Path) -> None:
     scenario = SCENARIOS["bad_deploy"].model_copy(
-        update={
-            "steps": [SCENARIOS["bad_deploy"].steps[0].model_copy(update={"stop_min": 2.0})],
-            "investigate_after_min": 3.5,
-        }
+        update={"steps": [SCENARIOS["bad_deploy"].steps[0].model_copy(update={"stop_min": 2.0})]}
     )
     clock = FakeClock()
     stack = FakeStack(clock, [Rule({"bad_deploy"}, "ShopSimHighErrorRate", "/refunds", 1)])
@@ -493,6 +589,26 @@ async def test_load_is_stopped_before_the_fault_on_ctrl_c(tmp_path: Path) -> Non
     assert stopped < off
     assert run.report.summary.status is RunStatus.INTERRUPTED
     assert run.report.scenarios[0].status is ScenarioStatus.INTERRUPTED
+
+
+async def test_load_of_the_second_step_is_stopped_before_the_faults(tmp_path: Path) -> None:
+    """Saturation (0 à 10 min) puis erreur applicative (dès 8 min) : la charge part avec la
+    seconde étape, et s'arrête avant la désactivation des pannes."""
+    clock = FakeClock()
+    stack = FakeStack(clock, [Rule({"bad_deploy"}, "ShopSimHighErrorRate", "/refunds", 2.5)])
+    run = evaluation(stack, tmp_path)
+
+    status = await run.run([SCENARIOS["saturation_then_bad_deploy"]])
+
+    assert status is RunStatus.COMPLETED
+    on_bad_deploy = stack.events.index(("on", "bad_deploy"))
+    assert stack.events[on_bad_deploy + 1] == ("load_start", 12)
+    assert ("on", "connection_saturation") in stack.events[:on_bad_deploy]
+    sat_off = stack.events.index(("off", "connection_saturation"))
+    stopped, off = order_of(stack.events, "load_stop", "off_all")
+    assert on_bad_deploy < sat_off < stopped < off
+    [found] = run.report.scenarios
+    assert found.refunds_sent == 7 and found.status is ScenarioStatus.COMPLETED
 
 
 # --- Gardien ------------------------------------------------------------------------------

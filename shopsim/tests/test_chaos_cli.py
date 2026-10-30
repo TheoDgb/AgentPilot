@@ -115,3 +115,11 @@ def test_unreachable_shopsim(env_file: Path, capsys: pytest.CaptureFixture[str])
 
     assert run(send, env_file, "status") == 1
     assert "ShopSim injoignable à http://127.0.0.1:1" in capsys.readouterr().err
+
+
+def test_intermittent_fault_is_known(
+    send: Send, env_file: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(send, env_file, "on", "db_errors_intermittent") == 0
+    assert "une partie des lectures des commandes renvoie 500" in capsys.readouterr().out
+    assert run(send, env_file, "off", "all") == 0

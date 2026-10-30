@@ -90,5 +90,7 @@ Rends ton rapport au format demandé :
 - la cause probable prend une des valeurs du guide de diagnostic : `database_errors`,
   `resource_saturation`, `slow_dependency`, `application_error`, `service_unreachable`,
   `agent_platform`, `no_incident` ou `undetermined` ;
-- les routes touchées (aucune s'il n'y a pas de panne) ;
+- les routes touchées par l'incident de l'alerte de départ (aucune s'il n'y a pas de panne) ;
+  si un autre incident est visible en même temps, signale-le dans le résumé ou dans une
+  hypothèse, sans mêler ses routes à celles de l'alerte ;
 - le correctif proposé, et ce qu'il faudrait encore vérifier si un doute reste.

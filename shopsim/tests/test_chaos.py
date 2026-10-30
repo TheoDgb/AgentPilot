@@ -1,5 +1,6 @@
 """Endpoint Chaos : jeton, cycle de vie des pannes et symptôme de chacune."""
 
+import random
 import time
 from collections.abc import Iterator
 from datetime import timedelta
@@ -7,13 +8,14 @@ from datetime import timedelta
 import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
-from sqlalchemy import func, select
+from sqlalchemy import Engine, func, select, text
 from sqlalchemy.orm import Session
 
+from shopsim.app import chaos
 from shopsim.app.clock import SIMULATION_NOW
-from shopsim.app.db import Base
+from shopsim.app.db import Base, add_enum_values, init_db
 from shopsim.app.models import ChaosFault, ChaosScenario, Refund
-from shopsim.tests.conftest import MakeOrder, MakePayment, MakeTicket, SimClock
+from shopsim.tests.conftest import JsonLogs, MakeOrder, MakePayment, MakeTicket, SimClock
 
 TOKEN = "test-chaos-token"
 AUTH = {"X-Chaos-Token": TOKEN}
@@ -162,6 +164,101 @@ def test_db_errors(client: TestClient, make_payment: MakePayment, make_ticket: M
 
     assert client.get(f"/orders/{order.id}").status_code == 200
     assert client.get(f"/customers/{order.customer_id}/orders").status_code == 200
+
+
+# --- db_errors_intermittent ------------------------------------------------------------
+
+
+def draw(monkeypatch: pytest.MonkeyPatch, value: float) -> None:
+    monkeypatch.setattr(chaos, "_draw", lambda: value)
+
+
+def test_db_errors_intermittent_fails_on_a_low_draw_only(
+    client: TestClient,
+    make_payment: MakePayment,
+    json_logs: JsonLogs,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order = make_payment().order
+    activate(client, "db_errors_intermittent")
+
+    draw(monkeypatch, 0.149)
+    assert client.get(f"/orders/{order.id}").status_code == 500
+    assert client.get(f"/customers/{order.customer_id}/orders").status_code == 500
+    draw(monkeypatch, 0.15)
+    assert client.get(f"/orders/{order.id}").status_code == 200
+    assert client.get(f"/customers/{order.customer_id}/orders").status_code == 200
+
+    # Même erreur, mot pour mot, que db_errors
+    errors = [line for line in json_logs.read("shopsim") if line["event"] == "http.exception"]
+    assert [e["error_type"] for e in errors] == ["psycopg.OperationalError"] * 2
+    assert "server closed the connection unexpectedly" in errors[0]["error"]
+
+
+def test_db_errors_intermittent_touches_order_reads_only(
+    client: TestClient, make_payment: MakePayment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payment = make_payment()
+    activate(client, "db_errors_intermittent")
+    draw(monkeypatch, 0.0)
+
+    assert client.get(f"/payments/{payment.order_id}").status_code == 200
+    assert client.get(f"/customers/{payment.order.customer_id}").status_code == 200
+    assert post_refund(client, payment.id, "chaos-intermittent").status_code == 201
+
+
+def test_db_errors_intermittent_share(
+    client: TestClient, make_payment: MakePayment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tirage réel, graine fixe : une part proche de 15 %, jamais tout ni rien."""
+    order = make_payment().order
+    monkeypatch.setattr(chaos, "_draw", random.Random(7).random)
+    activate(client, "db_errors_intermittent")
+
+    codes = [client.get(f"/orders/{order.id}").status_code for _ in range(200)]
+
+    assert 0.08 < codes.count(500) / len(codes) < 0.22
+    assert set(codes) == {200, 500}
+
+
+def test_no_intermittent_error_when_inactive(
+    client: TestClient, make_payment: MakePayment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order = make_payment().order
+    draw(monkeypatch, 0.0)
+
+    assert client.get(f"/orders/{order.id}").status_code == 200
+    activate(client, "db_errors_intermittent")
+    stop(client, "db_errors_intermittent")
+    assert client.get(f"/orders/{order.id}").status_code == 200
+
+
+def test_new_fault_values_are_added_to_an_existing_database(db_engine: Engine) -> None:
+    """Type d'avant la panne : la valeur manquante est ajoutée, deux fois sans erreur."""
+    with db_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        connection.execute(text("DROP TYPE IF EXISTS chaos_upgrade_test"))
+        connection.execute(text("CREATE TYPE chaos_upgrade_test AS ENUM ('db_errors')"))
+        try:
+            for _ in range(2):
+                add_enum_values(connection, "chaos_upgrade_test", ["db_errors", "intermittent"])
+            labels = connection.scalars(
+                text("SELECT unnest(enum_range(NULL::chaos_upgrade_test))::text")
+            ).all()
+        finally:
+            connection.execute(text("DROP TYPE chaos_upgrade_test"))
+
+    assert labels == ["db_errors", "intermittent"]
+
+
+def test_init_db_twice_keeps_every_fault(db_engine: Engine) -> None:
+    init_db(db_engine)
+    init_db(db_engine)
+
+    with db_engine.connect() as connection:
+        labels = connection.scalars(
+            text("SELECT unnest(enum_range(NULL::chaos_scenario))::text")
+        ).all()
+    assert labels == [s.value for s in ChaosScenario]
 
 
 # --- connection_saturation -------------------------------------------------------------

@@ -731,3 +731,49 @@ vraie panne (J4.4).
   comparer aussi le coût, la durée, les tours et la stabilité sur plusieurs passages, ou
   ajouter des scénarios plus difficiles (nouvelle version de la vérité terrain).
 
+### J6.4 (première partie) : scénarios Ops plus difficiles
+
+*2026-10-30*
+
+**Pourquoi**
+- La référence de J6.3 est à 6 / 6, avec 60 preuves exactes : l'évaluation ne départageait
+  plus rien, et ne pourrait pas montrer ce qu'apportent des subagents.
+
+**Fait**
+- 5 nouveaux scénarios, chacun pour une compétence de raisonnement (les 6 de J6.3 restent,
+  même contenu) :
+
+  | Scénario | Compétence | Cause attendue |
+  |---|---|---|
+  | `db_and_payments` (2 enquêtes) | attribuer à chaque alerte sa cause quand deux pannes de natures différentes coexistent | `database_errors` et `slow_dependency` |
+  | `db_and_bad_deploy` | attribuer des 5xx par le type d'erreur, alors que la base produit le plus d'erreurs | `application_error` |
+  | `db_intermittent` | ne pas écarter une panne partielle (15 % d'erreurs, p50 normale, santé verte) | `database_errors` |
+  | `saturation_then_bad_deploy` | une panne qui commence pendant qu'une autre se résout, au milieu des alertes de latence | `application_error` |
+  | `db_errors_ended` | une alerte encore active, mais des erreurs déjà finies : regarder toute la période | `database_errors` |
+
+- Nouvelle panne `db_errors_intermittent` (accord pour modifier ShopSim) : même erreur que
+  `db_errors` sur 15 % des lectures des commandes, et ajout de la valeur au type
+  `chaos_scenario` d'une base existante (`init_db`).
+- Plusieurs enquêtes par scénario : la vérité terrain donne une liste d'enquêtes, chacune avec
+  son alerte, sa cause et ses routes ; le lanceur les fait l'une après l'autre, et la notation
+  note chaque enquête (« scénario · enquête ») contre ses propres attentes.
+
+**Décisions**
+- **Routes de l'autre panne interdites** (ni attendues ni admises) et signalées
+  « autre panne » dans le motif. Un test vérifie, pour chaque scénario à deux pannes, que ces
+  routes ne sont jamais attendues ni admises.
+- **Consigne de l'agent Ops précisée** : « les routes touchées par l'incident de l'alerte de
+  départ » ; un autre incident visible se signale dans le résumé ou une hypothèse, sans mêler
+  ses routes. Empreinte de la consigne : **`bf42e5b6656d` → `9704eed2dc32`**.
+- **Nouvelle référence sur les 11 scénarios** avec cette consigne, pour une seule référence
+  cohérente ; la série de J6.3 (`bf42e5b6656d`) n'est plus la référence.
+- **Versions** : vérité terrain `a05ce017d47d` (J6.3, 6 scénarios) → **`1d0c1c3e153b`**
+  (11 scénarios), désormais figée par un test (`FROZEN_TRUTH_SHA256`) ; notation
+  `a10b81ce62bc` → **`11a2215b0643`** (mêmes critères, attentes par enquête, motif
+  « autre panne »). Deux rapports de versions différentes ne se comparent pas.
+- **Écarté** : une fausse alerte pendant une vraie panne ailleurs. Le guide réserve
+  `no_incident` au cas où tout est normal « sur la route de l'alerte et ailleurs » : la bonne
+  réponse serait ambiguë, donc le scénario injuste.
+- 15 % d'erreurs plutôt que 10 % pour `db_intermittent` : l'alerte (5xx > 5 % sur 2 min)
+  doit se déclencher sûrement, sinon le scénario finit `no_alert`, non noté.
+
