@@ -696,6 +696,14 @@ vraie panne (J4.4).
   1 min 30 s) ; panne désactivée, scénario et passage `interrupted`, résultats enregistrés,
   plus aucun processus (lanceur, AgentPilot, générateur, gardien) ; seul ShopSim reste, dans
   Docker.
+- **Série de référence** avec la nouvelle consigne (`bf42e5b6656d`), les 6 scénarios, un
+  passage (`docs/evals/ops-2026-10-30T012850Z-reference.md`, commit `b5d7ab2`) : **6 / 6**,
+  aucune faute grave, **60 preuves exactes sur 60** (aucune introuvable : la section
+  « Preuves » a supprimé les citations fautives, sur ce passage du moins). Confiance `high`
+  sur `db_errors` et `bad_deploy`, `medium` ailleurs. 0,38 $, 13 à 19 s et 6 à 10 tours par
+  enquête ; 1 h 46 pour la série. Aucune perturbation : trafic continu (~300 requêtes par
+  minute, aucune minute vide dans les logs de ShopSim) et écarts du journal du lanceur
+  conformes à la vérité terrain.
 
 **Bugs ou surprises**
 - Les 2 preuves introuvables n'étaient pas inventées, mais mal citées : deux champs réunis en
@@ -719,4 +727,7 @@ vraie panne (J4.4).
 **Leçons**
 - Une preuve vérifiable par du code doit être atomique : un champ, une valeur entière. C'est à
   la consigne de l'exiger, pas à la notation de deviner.
+- Une référence à 100 % ne laisse qu'un sens possible au score : J6.4 (subagents) devra
+  comparer aussi le coût, la durée, les tours et la stabilité sur plusieurs passages, ou
+  ajouter des scénarios plus difficiles (nouvelle version de la vérité terrain).
 
