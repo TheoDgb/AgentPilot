@@ -38,6 +38,8 @@ class CallEntry:
     error: str | None = None
     duration_ms: int | None = None
     pending_action_id: uuid.UUID | None = None
+    # Subagent auteur de l'appel (agent Ops, architecture `subagents`) ; None : agent principal
+    agent: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,7 @@ class DbJournal:
                     error=entry.error,
                     duration_ms=entry.duration_ms,
                     pending_action_id=entry.pending_action_id,
+                    agent=entry.agent,
                     created_at=datetime.now(UTC),
                 )
             )

@@ -221,6 +221,8 @@ def agent_sources() -> list[Path]:
         REPO / "agentpilot" / "ops_agent.py",
         REPO / "agentpilot" / "ops_schemas.py",
         *sorted((REPO / "agents" / "ops").rglob("*.*")),
+        # J6.4 : consignes de l'enquêteur principal et des subagents
+        *sorted((REPO / "agents" / "ops-subagents").rglob("*.*")),
     ]
 
 

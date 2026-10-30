@@ -807,3 +807,40 @@ un passage sur les 11 scénarios, comparé à `reference-v2` sur le coût, la du
 les régressions. Le score ne peut pas progresser ; sans gain sur le reste, les subagents ne
 seront pas retenus, avec les chiffres à l'appui.
 
+### J6.4 (seconde partie) : l'agent Ops avec subagents, en expérience courte
+
+*2026-10-30*
+
+**Règle de décision, écrite avant l'essai** : les subagents sont retenus seulement s'ils sont
+**sans régression** (aucune enquête réussie par `reference-v2` et ratée, aucune faute grave ni
+preuve introuvable de plus) **et** moins chers ou plus rapides. Sinon : « essayé, pas
+retenu », chiffres à l'appui. `evals.ops_compare` calcule ce verdict ; la décision reste
+humaine.
+
+**Fait**
+- Architecture `subagents` (réglage `AGENTPILOT_OPS_ARCHITECTURE`, `solo` par défaut, le
+  service inchangé sans lui) :
+  - l'enquêteur principal garde `list_alerts` et `check_health` et délègue par l'outil
+    `Agent` ;
+  - `logs-investigator` lit les logs (`search_logs`, `summarize_logs`) ;
+  - `metrics-investigator` lit les métriques (`query_metrics`).
+  - Même modèle partout. Consignes dans `agents/ops-subagents/` : `agents/ops/` ne change pas,
+    l'empreinte de l'agent seul reste `9704eed2dc32`.
+- Isolement, demandé en plus du plan :
+  - **l'outil `Agent` ne lance que les deux subagents prévus** : tout autre type (agent
+    généraliste avec fichiers ou shell, type absent ou inconnu) est refusé par les hooks et
+    journalisé ;
+  - chaque agent est borné à ses outils (champ `agent_type` des hooks) : un subagent n'a ni
+    fichiers, ni shell, ni délégation, ni les outils de l'autre.
+  - `POST /checks/ops` exige que les deux subagents soient réellement lancés (comptés par les
+    hooks), qu'ils restituent leurs seuls outils, ni fichier ni shell, et aucune réponse
+    piège.
+- Auteur de chaque appel au journal (`tool_calls.agent`), recopié dans les résultats de
+  l'évaluation.
+- `evals.ops_run --architecture`, et `evals.ops_compare` (régressions, coût, durée, tours,
+  appels par agent, verdict).
+
+**Limite connue** : la liste des outils d'un subagent, dans la vérification d'isolement, est
+celle qu'il déclare. La garantie vient de sa définition (`AgentDefinition.tools`, testée) et
+des hooks, qui refusent tout le reste (testés, et prouvés à chaque enquête par le journal).
+

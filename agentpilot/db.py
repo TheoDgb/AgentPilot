@@ -58,6 +58,8 @@ COLUMN_ADDITIONS = (
     ("runs", "error_type", "VARCHAR(32)"),
     ("control", "pause_detail", "VARCHAR(32)"),
     ("runs", "alert_id", f"UUID REFERENCES {SCHEMA}.alerts(id)"),
+    # J6.4 : subagent auteur d'un appel de l'agent Ops
+    ("tool_calls", "agent", "VARCHAR(64)"),
 )
 
 

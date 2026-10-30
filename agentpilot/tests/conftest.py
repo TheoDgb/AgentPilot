@@ -184,6 +184,8 @@ class Call:
     denied: str | None = None
     response: Any = None
     error: str | None = None
+    # Type du subagent qui fait l'appel (champ `agent_type` des hooks) ; None : agent principal
+    agent: str | None = None
 
 
 def call(name: str, **arguments: Any) -> Call:  # noqa: ANN401
@@ -223,6 +225,8 @@ class HookDrivingQuery:
 
     async def _run(self, step: Call) -> None:
         base = {"tool_name": step.name, "tool_input": step.arguments, "tool_use_id": step.id}
+        if step.agent is not None:
+            base |= {"agent_type": step.agent, "agent_id": f"agent-{step.agent}"}
         for output in await self._hooks(
             "PreToolUse", base | {"hook_event_name": "PreToolUse"}, step.id
         ):

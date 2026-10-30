@@ -15,11 +15,20 @@ from typing import Any
 
 import pytest
 
+from agentpilot import ops_agent
 from evals import ops_guard, ops_run
 from evals.incident_truth import load_scenarios
 from evals.ops_load import Load
 from evals.ops_results import OpsEvalReport, OpsEvalSummary, RunStatus, ScenarioStatus
-from evals.ops_run import OpsEvaluation, Refused, check_ready, pick_alert, select
+from evals.ops_run import (
+    OpsEvaluation,
+    Refused,
+    check_ready,
+    parser,
+    pick_alert,
+    select,
+    service_env,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -236,6 +245,7 @@ async def test_db_errors_scenario_end_to_end(tmp_path: Path) -> None:
             "outcome": "succeeded",
             "response": {},
             "error": None,
+            "agent": None,
         }
     ]
     assert str(found.alert_id) == stack.occurrences[0]["id"]
@@ -761,3 +771,56 @@ def test_launcher_never_writes_where_the_agent_reads(tmp_path: Path) -> None:
 
     assert [p.name for p in tmp_path.iterdir()] == ["ops_eval.jsonl"]
     assert "db_errors" in (tmp_path / "ops_eval.jsonl").read_text()
+
+
+# --- Architecture de l'agent Ops (J6.4) -------------------------------------------------------
+
+
+def test_architecture_option_reaches_the_service() -> None:
+    args = parser().parse_args(["--architecture", "subagents"])
+    env = service_env({"PATH": "/bin"}, Decimal("5"), args.architecture)
+
+    assert env["AGENTPILOT_OPS_ARCHITECTURE"] == "subagents"
+    assert env["AGENTPILOT_DAILY_BUDGET_USD"] == "5" and env["PATH"] == "/bin"
+    # Par défaut l'agent seul, toujours écrit : `.env` ne le change pas
+    default = parser().parse_args([]).architecture
+    assert service_env({}, Decimal("5"), default)["AGENTPILOT_OPS_ARCHITECTURE"] == "solo"
+    with pytest.raises(SystemExit):
+        parser().parse_args(["--architecture", "swarm"])
+
+
+def test_results_record_the_architecture_and_its_fingerprint() -> None:
+    old = OpsEvalSummary.model_validate(
+        {
+            "name": "x",
+            "series": "s",
+            "model_requested": "sonnet",
+            "prompt_sha256": "p",
+            "truth_sha256": "t",
+            "scenarios_requested": [],
+            "max_budget_usd": 5,
+            "started_at": T0.isoformat(),
+        }
+    )
+    assert old.architecture == "solo"
+    assert ops_agent.prompt_sha256(ops_agent.Architecture.SUBAGENTS) != ops_agent.prompt_sha256()
+
+
+async def test_the_author_of_each_call_is_kept_in_the_results(tmp_path: Path) -> None:
+    clock = FakeClock()
+    stack = FakeStack(clock, [db_rule()])
+    stack.run["tool_calls"] = [
+        {"tool": "Agent", "input": {}, "outcome": "succeeded", "response": "x", "agent": None},
+        {
+            "tool": "mcp__ops__summarize_logs",
+            "input": {},
+            "outcome": "succeeded",
+            "response": {},
+            "agent": "logs-investigator",
+        },
+    ]
+    run = evaluation(stack, tmp_path)
+
+    await run.run([SCENARIOS["db_errors"]])
+
+    assert [c["agent"] for c in run.report.scenarios[0].tool_calls] == [None, "logs-investigator"]

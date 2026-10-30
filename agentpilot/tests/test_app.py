@@ -84,6 +84,8 @@ def test_support_run_is_recorded(client: TestClient) -> None:
             "error": None,
             "duration_ms": 5,
             "pending_action_id": None,
+            # Auteur de l'appel (J6.4) : None, l'agent principal (Support n'a pas de subagent)
+            "agent": None,
         }
     ]
     assert run["pending_actions"] == []

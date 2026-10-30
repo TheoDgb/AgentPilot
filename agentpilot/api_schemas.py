@@ -38,6 +38,8 @@ class ToolCallRead(BaseModel):
     error: str | None
     duration_ms: int | None
     pending_action_id: uuid.UUID | None
+    # Subagent auteur de l'appel (agent Ops, architecture `subagents`) ; None : agent principal
+    agent: str | None = None
 
 
 class PendingActionRead(BaseModel):

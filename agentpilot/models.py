@@ -214,6 +214,8 @@ class ToolCall(Base):
     pending_action_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey(f"{SCHEMA}.pending_actions.id")
     )
+    # Subagent auteur de l'appel (agent Ops en architecture `subagents`) ; NULL : agent principal
+    agent: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 

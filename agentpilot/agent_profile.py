@@ -4,8 +4,10 @@ L'isolement est le même pour tous (`sdk_runner.build_options`) ; le profil donn
 le serveur MCP et ses outils, et les plafonds d'une exécution.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+
+from claude_agent_sdk import AgentDefinition
 
 
 @dataclass(frozen=True)
@@ -19,3 +21,7 @@ class AgentProfile:
     max_turns: int
     max_budget_usd: float
     timeout_s: float
+    # Subagents (agent Ops, architecture `subagents`) et outils intégrés permis pour les lancer
+    # (`Agent`) ; aucun par défaut
+    agents: dict[str, AgentDefinition] = field(default_factory=dict)
+    builtin_tools: tuple[str, ...] = ()

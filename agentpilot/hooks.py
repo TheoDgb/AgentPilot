@@ -1,7 +1,9 @@
 """Hooks des agents : journal des appels (tous), validation humaine des actions (Support).
 
 `JournalHooks` : ce qui est commun, le journal de chaque appel. `SupportHooks` y ajoute la
-validation des actions ; `OpsHooks` ne laisse passer que les outils de lecture de l'agent Ops.
+validation des actions ; `OpsHooks` ne laisse passer que les outils de lecture de l'agent Ops
+(en architecture `subagents`, les outils de chaque agent, et l'outil `Agent` pour les deux seuls
+types de subagents prévus).
 
 - `PreToolUse` : une action passe, est refusée, ou est mise en attente d'un humain selon
   `agentpilot/approval.py`. Un refus ou une mise en attente renvoie `deny` à l'agent, avec un
@@ -24,6 +26,7 @@ import contextlib
 import itertools
 import json
 import logging
+from collections import Counter
 from collections.abc import Mapping
 from typing import Any, Protocol
 
@@ -127,7 +130,12 @@ class JournalHooks:
         )
 
     async def _refuse(
-        self, name: str, tool_input: dict[str, Any], tool_use_id: str | None, message: str
+        self,
+        name: str,
+        tool_input: dict[str, Any],
+        tool_use_id: str | None,
+        message: str,
+        agent: str | None = None,
     ) -> HookJSONOutput:
         await self._record(
             {
@@ -136,6 +144,7 @@ class JournalHooks:
                 "input": tool_input,
                 "outcome": CallOutcome.DENIED,
                 "error": message,
+                "agent": agent,
             }
         )
         return _deny(message)
@@ -158,6 +167,8 @@ class JournalHooks:
                 ),
                 "error": data.get("error") if failed else None,
                 "duration_ms": data.get("duration_ms"),
+                # Type du subagent auteur de l'appel ; absent pour l'agent principal
+                "agent": data.get("agent_type"),
             }
         )
         return {}
@@ -266,25 +277,75 @@ class SupportHooks(JournalHooks):
 class OpsHooks(JournalHooks):
     """Hooks de l'agent Ops : seuls ses outils de lecture (et la sortie structurée) passent ;
     tout autre outil est refusé et inscrit au journal. Défense en profondeur : les permissions
-    (`allowed_tools`, `dontAsk`) l'empêchent déjà."""
+    (`allowed_tools`, `dontAsk`) l'empêchent déjà.
 
-    def __init__(self, journal: Journal, allowed: frozenset[str]) -> None:
+    Architecture `subagents` (`subagents` : outils de chaque type de subagent) : `allowed` sont
+    les outils de l'enquêteur principal ; un appel fait dans un subagent (`agent_type` du hook)
+    n'a droit qu'aux outils de ce type ; l'outil `Agent` ne lance qu'un type prévu, tout autre
+    (agent généraliste, avec fichiers ou shell) est refusé. `delegated` compte les lancements
+    réussis par type."""
+
+    def __init__(
+        self,
+        journal: Journal,
+        allowed: frozenset[str],
+        subagents: Mapping[str, frozenset[str]] | None = None,
+        delegation_tools: frozenset[str] = frozenset(),
+    ) -> None:
         super().__init__(journal)
         self.allowed = allowed
+        self.subagents = dict(subagents or {})
+        self.delegation_tools = delegation_tools
+        self.delegated: Counter[str] = Counter()
         self.max_response_chars = OPS_MAX_RESPONSE_CHARS
 
     async def pre_tool_use(
         self, data: HookInput, tool_use_id: str | None, context: HookContext
     ) -> HookJSONOutput:
         name: str = data["tool_name"]  # type: ignore[typeddict-item]
-        if name in self.allowed or name == STRUCTURED_OUTPUT_TOOL:
-            return {}
+        agent: str | None = data.get("agent_type")  # type: ignore[assignment]
         try:
+            message = self._refusal(name, data.get("tool_input") or {}, agent)  # type: ignore[arg-type]
+            if message is None:
+                return {}
             return await self._refuse(
                 name,
                 data["tool_input"],  # type: ignore[typeddict-item]
                 tool_use_id or data.get("tool_use_id"),  # type: ignore[arg-type]
-                f"Outil {name} interdit : l'agent Ops ne fait que lire.",
+                message,
+                agent,
             )
         except Exception:  # noqa: BLE001  (journal illisible : on refuse quand même)
             return _deny(f"Outil {name} interdit.")
+
+    def _refusal(self, name: str, tool_input: Mapping[str, Any], agent: str | None) -> str | None:
+        """None : l'appel passe ; sinon, le motif du refus."""
+        if agent is not None:
+            tools = self.subagents.get(agent)
+            if tools is None:
+                return f"Agent {agent} inconnu : aucun outil ne lui est permis."
+            if name in tools:
+                return None
+            return f"Outil {name} interdit à {agent} : il ne lit que {', '.join(sorted(tools))}."
+        if name == STRUCTURED_OUTPUT_TOOL:
+            return None
+        if name in self.delegation_tools and self.subagents:
+            kind = tool_input.get("subagent_type")
+            if kind in self.subagents:
+                return None
+            return (
+                f"Type d'agent {kind!r} interdit : seuls {', '.join(sorted(self.subagents))} "
+                "peuvent être lancés."
+            )
+        if name in self.allowed:
+            return None
+        return f"Outil {name} interdit : l'agent Ops ne fait que lire."
+
+    async def _record(self, entry_fields: Mapping[str, Any]) -> None:
+        await super()._record(entry_fields)
+        if (
+            entry_fields["tool"] in self.delegation_tools
+            and entry_fields["outcome"] is CallOutcome.SUCCEEDED
+            and entry_fields.get("agent") is None
+        ):
+            self.delegated[str(entry_fields["input"].get("subagent_type"))] += 1

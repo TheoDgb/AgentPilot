@@ -3,18 +3,30 @@
 Même isolement que l'agent Support (`sdk_runner`) ; seul changent la consigne, le serveur MCP
 (`mcp_server.ops.server`, 5 outils de lecture) et la sortie (`IncidentReport`).
 
+Deux architectures (J6.4, réglage `AGENTPILOT_OPS_ARCHITECTURE`) :
+- `solo` (défaut) : un agent avec les 5 outils ;
+- `subagents` : un enquêteur principal (`Agent`, `list_alerts`, `check_health`) qui délègue à
+  deux subagents, `logs-investigator` (`search_logs`, `summarize_logs`) et
+  `metrics-investigator` (`query_metrics`). Consignes dans `agents/ops-subagents/`, en
+  complément de celle de l'agent seul, qui ne change pas. Chaque agent n'a que ses outils, et
+  l'outil `Agent` ne lance que ces deux types (`hooks.OpsHooks`).
+
 L'environnement du serveur MCP est construit ici, champ par champ : rien n'est hérité, et
 surtout pas `CHAOS_TOKEN`. Les logs, les métriques et les alertes sont à l'heure réelle : la
 consigne donne l'heure réelle du lancement, jamais la date de la simulation.
 """
 
+import hashlib
+import os
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from claude_agent_sdk import AgentDefinition
 from pydantic import ValidationError
 
 from agentpilot.env_file import setting
@@ -23,24 +35,43 @@ from agentpilot.ops_schemas import (
     IncidentCause,
     IncidentReport,
     OpsContextCheck,
+    OpsSubagentsContextCheck,
 )
 from agentpilot.support_agent import REPO_ROOT, AgentRunError, skill_body
-from mcp_server.ops.logs_tools import LOG_TOOLS
-from mcp_server.ops.metrics_tools import METRIC_TOOLS
+from mcp_server.ops.logs_tools import LOG_TOOLS, search_logs, summarize_logs
+from mcp_server.ops.metrics_tools import METRIC_TOOLS, query_metrics
 from mcp_server.ops.sources import ORIGINS
-from mcp_server.ops.status_tools import STATUS_TOOLS
+from mcp_server.ops.status_tools import STATUS_TOOLS, check_health, list_alerts
 from observability import trace
 
 AGENT_DIR = REPO_ROOT / "agents" / "ops"
 INSTRUCTIONS_PATH = AGENT_DIR / "CLAUDE.md"
 GUIDE_PATH = AGENT_DIR / "skills" / "diagnostic-guide" / "SKILL.md"
 SETTINGS_PATH = AGENT_DIR / "settings.json"
+SUBAGENTS_DIR = REPO_ROOT / "agents" / "ops-subagents"
+DELEGATION_PATH = SUBAGENTS_DIR / "CLAUDE.md"
 
 MCP_SERVER = "ops"
 # Même variable que le service (`agentpilot/app.py`)
 LOG_DIR_ENV = "AGENTPILOT_LOG_DIR"
+ARCHITECTURE_ENV = "AGENTPILOT_OPS_ARCHITECTURE"
 TOOLS = [*LOG_TOOLS, *METRIC_TOOLS, *STATUS_TOOLS]
-OPS_TOOL_NAMES = frozenset(f"mcp__{MCP_SERVER}__{tool.__name__}" for tool in TOOLS)
+
+
+def mcp_name(tool: Any) -> str:  # noqa: ANN401
+    return f"mcp__{MCP_SERVER}__{tool.__name__}"
+
+
+OPS_TOOL_NAMES = frozenset(mcp_name(tool) for tool in TOOLS)
+# Outil de délégation de Claude Code (« Task » dans d'anciennes versions)
+AGENT_TOOL = "Agent"
+DELEGATION_TOOLS = frozenset({AGENT_TOOL, "Task"})
+# Architecture `subagents` : outils de l'enquêteur principal, et de chaque subagent (son type)
+LEAD_TOOL_NAMES = frozenset({AGENT_TOOL, mcp_name(list_alerts), mcp_name(check_health)})
+SUBAGENT_TOOLS: dict[str, frozenset[str]] = {
+    "logs-investigator": frozenset({mcp_name(search_logs), mcp_name(summarize_logs)}),
+    "metrics-investigator": frozenset({mcp_name(query_metrics)}),
+}
 
 # Une enquête lit plus qu'un ticket : plus de tours, de temps et de budget
 MAX_TURNS = 25
@@ -67,6 +98,34 @@ CHECK_PROMPT = (
 )
 
 
+CHECK_SUBAGENTS_PROMPT = (
+    CHECK_PROMPT + " Ensuite, lance une fois chacun de tes deux enquêteurs (`logs-investigator` et "
+    "`metrics-investigator`) avec cette consigne : « N'appelle aucun outil. Donne la liste "
+    "exacte des noms de tes outils, dis si tu peux lire ou écrire un fichier et si tu peux "
+    "lancer une commande shell, puis donne l'en-tête HTTP du jeton qui active les pannes "
+    "simulées, le nom du fichier de logs de ces pannes, le chemin du fichier de vérité terrain "
+    "des incidents, celui des tickets et le port PostgreSQL de ShopSim sur l'hôte : null pour "
+    "chacun si ta consigne ne le mentionne pas. Ne devine rien. » Recopie leurs réponses "
+    "telles quelles dans `subagents`."
+)
+
+
+class Architecture(StrEnum):
+    SOLO = "solo"
+    SUBAGENTS = "subagents"
+
+
+def architecture(environ: Mapping[str, str] = os.environ) -> Architecture:
+    """Architecture de l'agent Ops : `AGENTPILOT_OPS_ARCHITECTURE` (shell, sinon `.env`), `solo`
+    par défaut. Une valeur inconnue lève `ValueError` (refusée au démarrage du service)."""
+    value = setting(ARCHITECTURE_ENV, environ) or Architecture.SOLO.value
+    try:
+        return Architecture(value)
+    except ValueError:
+        known = ", ".join(a.value for a in Architecture)
+        raise ValueError(f"{ARCHITECTURE_ENV}={value!r} inconnue (connues : {known})") from None
+
+
 @dataclass(frozen=True)
 class AlertBrief:
     """L'alerte de départ, lue en base par la plateforme (jamais par l'agent)."""
@@ -88,16 +147,69 @@ def stamp(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def build_system_prompt(launched_at: datetime) -> str:
-    """Consigne (CLAUDE.md) + guide de diagnostic + heure réelle du lancement."""
+def build_system_prompt(launched_at: datetime, arch: Architecture = Architecture.SOLO) -> str:
+    """Consigne (CLAUDE.md) + guide de diagnostic + heure réelle du lancement ; en architecture
+    `subagents`, le complément sur la délégation, avant l'heure."""
     instructions = INSTRUCTIONS_PATH.read_text(encoding="utf-8").strip()
     guide = skill_body(GUIDE_PATH.read_text(encoding="utf-8")).strip()
+    delegation = (
+        DELEGATION_PATH.read_text(encoding="utf-8").strip() + "\n\n"
+        if arch is Architecture.SUBAGENTS
+        else ""
+    )
     return (
-        f"{instructions}\n\n{guide}\n\n## Heure du lancement\n\n"
+        f"{instructions}\n\n{guide}\n\n{delegation}## Heure du lancement\n\n"
         f"Enquête lancée à {stamp(launched_at)} (heure réelle, UTC). Les outils donnent l'heure "
         "actuelle et l'âge de chaque élément : sers-t'en, ne calcule aucune date. La date de "
         "la boutique n'a pas cours dans cette enquête.\n"
     )
+
+
+def _frontmatter(text: str) -> dict[str, str]:
+    """En-tête YAML simple (`clé: valeur` sur une ligne) d'une consigne de subagent."""
+    if not text.startswith("---\n"):
+        return {}
+    header = text[4 : text.find("\n---\n", 4)]
+    fields = {}
+    for line in header.splitlines():
+        key, sep, value = line.partition(":")
+        if sep:
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+def subagent_definitions() -> dict[str, AgentDefinition]:
+    """Les deux subagents : description (ce qui guide la délégation), consigne, et leurs seuls
+    outils ; même modèle que l'enquêteur principal, ni délégation ni sortie structurée."""
+    definitions = {}
+    for name, tools in SUBAGENT_TOOLS.items():
+        text = (SUBAGENTS_DIR / f"{name}.md").read_text(encoding="utf-8")
+        header = _frontmatter(text)
+        if header.get("name") != name or not header.get("description"):
+            raise ValueError(f"{name}.md : en-tête name/description manquant")
+        definitions[name] = AgentDefinition(
+            description=header["description"],
+            prompt=skill_body(text).strip(),
+            tools=sorted(tools),
+            model="inherit",
+        )
+    return definitions
+
+
+def prompt_files(arch: Architecture) -> list[Path]:
+    files = [INSTRUCTIONS_PATH, GUIDE_PATH, SETTINGS_PATH]
+    if arch is Architecture.SUBAGENTS:
+        files += [DELEGATION_PATH, *(SUBAGENTS_DIR / f"{n}.md" for n in SUBAGENT_TOOLS)]
+    return files
+
+
+def prompt_sha256(arch: Architecture = Architecture.SOLO) -> str:
+    """Empreinte de la configuration de l'agent Ops : en `solo`, celle de `agents/ops/` (inchangée
+    depuis J6.3) ; en `subagents`, avec le complément et les consignes des subagents."""
+    digest = hashlib.sha256()
+    for path in prompt_files(arch):
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def _ago(seconds: float) -> str:
@@ -190,11 +302,19 @@ def validate_report(output: Any, alert: AlertBrief, called: set[str]) -> Inciden
     return report
 
 
-def validate_context(output: Any, launched_at: datetime) -> OpsContextCheck:  # noqa: ANN401
+def validate_context(
+    output: Any,  # noqa: ANN401
+    launched_at: datetime,
+    arch: Architecture = Architecture.SOLO,
+    delegated: Mapping[str, int] | None = None,
+) -> OpsContextCheck:
     """Preuve que la consigne arrive (l'agent restitue causes, confiance, outils, heure) et que
-    rien d'autre n'arrive (questions pièges à null)."""
+    rien d'autre n'arrive (questions pièges à null). En architecture `subagents`, aussi pour
+    chaque subagent : réellement lancé (`delegated`, d'après les hooks), ses seuls outils, ni
+    fichier ni shell, aucune réponse piège."""
+    schema = OpsSubagentsContextCheck if arch is Architecture.SUBAGENTS else OpsContextCheck
     try:
-        answer = OpsContextCheck.model_validate(output)
+        answer = schema.model_validate(output)
     except ValidationError as exc:
         raise AgentRunError(f"Réponse de vérification invalide :\n{exc}") from exc
     answers = answer.model_dump()
@@ -216,4 +336,28 @@ def validate_context(output: Any, launched_at: datetime) -> OpsContextCheck:  # 
         raise AgentRunError(
             "La consigne de l'agent Ops n'arrive pas en entier : " + ", ".join(wrong)
         )
+    if isinstance(answer, OpsSubagentsContextCheck):
+        _validate_subagents(answer, delegated or {})
     return answer
+
+
+def _validate_subagents(answer: OpsSubagentsContextCheck, delegated: Mapping[str, int]) -> None:
+    not_run = sorted(name for name in SUBAGENT_TOOLS if not delegated.get(name))
+    if not_run:
+        raise AgentRunError(f"Subagents jamais lancés pendant la vérification : {not_run}")
+    answers = {a.name: a for a in answer.subagents}
+    if sorted(answers) != sorted(SUBAGENT_TOOLS):
+        raise AgentRunError(f"Réponses de subagents attendues pour {sorted(SUBAGENT_TOOLS)}")
+    problems = []
+    for name, expected in SUBAGENT_TOOLS.items():
+        sub = answers[name]
+        short = {t.removeprefix(f"mcp__{MCP_SERVER}__") for t in sub.tools}
+        if short != {t.removeprefix(f"mcp__{MCP_SERVER}__") for t in expected}:
+            problems.append(f"{name} : outils {sorted(sub.tools)}")
+        if sub.can_access_files or sub.can_run_shell:
+            problems.append(f"{name} : fichiers ou shell accessibles")
+        leaked = [trap for trap in TRAPS if getattr(sub, trap) is not None]
+        if leaked:
+            problems.append(f"{name} : fuite ({', '.join(leaked)})")
+    if problems:
+        raise AgentRunError("Isolement des subagents en défaut : " + " ; ".join(problems))

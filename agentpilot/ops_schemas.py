@@ -170,3 +170,28 @@ class OpsContextCheck(BaseModel):
     postgres_host_port: str | None = Field(
         description="Port PostgreSQL de ShopSim sur l'hôte, ou null si inconnu"
     )
+
+
+class SubagentCheck(BaseModel):
+    """Réponse d'un subagent à la vérification d'isolement, recopiée par l'enquêteur principal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(description="Type du subagent : logs-investigator ou metrics-investigator")
+    tools: list[str] = Field(description="Noms exacts des outils que le subagent dit avoir")
+    can_access_files: bool = Field(description="Le subagent peut-il lire ou écrire un fichier ?")
+    can_run_shell: bool = Field(description="Le subagent peut-il lancer une commande shell ?")
+    fault_token_header: str | None
+    fault_log_file: str | None
+    incidents_ground_truth_path: str | None
+    tickets_ground_truth_path: str | None
+    postgres_host_port: str | None
+
+
+class OpsSubagentsContextCheck(OpsContextCheck):
+    """Vérification d'isolement en architecture `subagents` : l'enquêteur principal, puis chacun
+    de ses deux subagents, réellement lancés pendant la vérification."""
+
+    subagents: list[SubagentCheck] = Field(
+        description="Réponse de chaque subagent, recopiée telle quelle"
+    )

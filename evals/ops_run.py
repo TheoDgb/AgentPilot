@@ -35,7 +35,6 @@ par `python -m evals.ops_grade`.
 import argparse
 import asyncio
 import contextlib
-import hashlib
 import json
 import logging
 import os
@@ -472,7 +471,10 @@ class OpsEvaluation:
         result.error, result.error_type = run.get("error"), run.get("error_type")
         result.report = run.get("output")
         result.tool_calls = [
-            {key: call.get(key) for key in ("tool", "input", "outcome", "response", "error")}
+            {
+                key: call.get(key)
+                for key in ("tool", "input", "outcome", "response", "error", "agent")
+            }
             for call in run.get("tool_calls", [])
         ]
         result.cost_usd = None if cost is None else float(cost)
@@ -661,13 +663,6 @@ def stop_process(process: subprocess.Popen[str] | None) -> None:
 # --- Ligne de commande ---------------------------------------------------------------------
 
 
-def prompt_sha256() -> str:
-    digest = hashlib.sha256()
-    for path in (ops_agent.INSTRUCTIONS_PATH, ops_agent.GUIDE_PATH, ops_agent.SETTINGS_PATH):
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
-
-
 def reachable(url: str) -> bool:
     try:
         return httpx.get(url, timeout=3).status_code < 500
@@ -719,6 +714,18 @@ def estimate_minutes(scenarios: Sequence[IncidentScenario]) -> float:
     return sum(s.history_min + s.end_min() + 1 + len(s.investigations) for s in scenarios)
 
 
+def service_env(
+    environ: Mapping[str, str], budget: Decimal, architecture: ops_agent.Architecture
+) -> dict[str, str]:
+    """Environnement du service lancé par l'évaluation : budget du jour = plafond, et
+    l'architecture toujours donnée (un réglage de `.env` ne la change jamais)."""
+    return {
+        **environ,
+        "AGENTPILOT_DAILY_BUDGET_USD": str(budget),
+        ops_agent.ARCHITECTURE_ENV: architecture.value,
+    }
+
+
 def parser() -> argparse.ArgumentParser:
     found = argparse.ArgumentParser(prog="python -m evals.ops_run")
     found.add_argument("--scenarios", help="sous-ensemble, ex. db_errors,false_alert")
@@ -726,6 +733,13 @@ def parser() -> argparse.ArgumentParser:
     found.add_argument("--max-budget-usd", type=Decimal, default=DEFAULT_BUDGET_USD)
     found.add_argument("--name", default="ops", type=config_name)
     found.add_argument("--model", default="sonnet")
+    found.add_argument(
+        "--architecture",
+        type=ops_agent.Architecture,
+        default=ops_agent.Architecture.SOLO,
+        choices=list(ops_agent.Architecture),
+        help="agent seul (solo) ou enquêteur principal et deux subagents (subagents)",
+    )
     found.add_argument("--yes", action="store_true", help="sans confirmation")
     return found
 
@@ -783,7 +797,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
     minutes = estimate_minutes(scenarios) * args.passes
     print(
         f"{len(scenarios)} scénario(s) × {args.passes} passage(s), environ {minutes:.0f} min, "
-        f"plafond {args.max_budget_usd} $"
+        f"plafond {args.max_budget_usd} $, agent Ops {args.architecture.value}"
     )
     if not args.yes and input("Lancer ? [o/N] ").strip().lower() not in {"o", "oui", "y", "yes"}:
         return 1
@@ -810,7 +824,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
                     "base verrouillée : un service AgentPilot ou une remise à zéro tourne"
                 )
             reset_all(engine)
-        env = {**environ, "AGENTPILOT_DAILY_BUDGET_USD": str(args.max_budget_usd)}
+        env = service_env(environ, args.max_budget_usd, args.architecture)
         service = spawn(
             [str(REPO_ROOT / ".venv" / "bin" / "uvicorn"), "agentpilot.app:app", "--port", "8001"],
             env,
@@ -852,7 +866,8 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
                     model_requested=args.model,
                     commit=code.commit,
                     dirty=code.dirty,
-                    prompt_sha256=prompt_sha256(),
+                    architecture=args.architecture,
+                    prompt_sha256=ops_agent.prompt_sha256(args.architecture),
                     truth_sha256=truth_sha256(INCIDENTS_PATH),
                     scenarios_requested=[s.scenario_id for s in scenarios],
                     max_budget_usd=float(args.max_budget_usd),

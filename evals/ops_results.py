@@ -76,6 +76,8 @@ class OpsEvalSummary(BaseModel):
     passes: int = 1
     model_requested: str
     models_used: list[str] = Field(default_factory=list)
+    # Architecture de l'agent Ops (J6.4) : `solo` pour les fichiers d'avant
+    architecture: str = "solo"
     commit: str | None = None
     dirty: bool = False
     # Empreintes de la consigne de l'agent Ops (`agents/ops/`) et de la vérité terrain

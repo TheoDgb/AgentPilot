@@ -56,7 +56,7 @@ from agentpilot.agent_profile import AgentProfile
 from agentpilot.hooks import OpsHooks, SupportHooks, ToolHooks
 from agentpilot.journal import Journal
 from agentpilot.ops_agent import AlertBrief
-from agentpilot.ops_schemas import IncidentReport, OpsContextCheck
+from agentpilot.ops_schemas import IncidentReport, OpsContextCheck, OpsSubagentsContextCheck
 from agentpilot.schemas import ContextCheck, SupportDecision
 from agentpilot.support_agent import (
     CHECK_PROMPT,
@@ -164,20 +164,43 @@ def support_profile(today: date, prompt_version: str, shopsim_url: str) -> Agent
     )
 
 
-def ops_profile(launched_at: datetime, environ: Mapping[str, str]) -> AgentProfile:
+def ops_profile(
+    launched_at: datetime,
+    environ: Mapping[str, str],
+    arch: ops_agent.Architecture = ops_agent.Architecture.SOLO,
+) -> AgentProfile:
     """Agent Ops : consigne et guide de diagnostic, serveur MCP Ops (5 outils de lecture),
-    plafonds d'une enquête."""
+    plafonds d'une enquête. Architecture `subagents` : en plus l'outil `Agent` et les deux
+    subagents ; les outils MCP restent ceux de la session (permis pour les subagents), les
+    hooks bornent chaque agent aux siens."""
+    subagents = arch is ops_agent.Architecture.SUBAGENTS
     return AgentProfile(
         mcp_server=ops_agent.MCP_SERVER,
         mcp_config=ops_agent.mcp_server_config(
             environ, trace_id=trace.current_trace_id(), log_dir=logs.log_dir()
         ),
-        tool_names=ops_agent.OPS_TOOL_NAMES,
-        system_prompt=ops_agent.build_system_prompt(launched_at),
+        tool_names=ops_agent.OPS_TOOL_NAMES
+        | (frozenset({ops_agent.AGENT_TOOL}) if subagents else frozenset()),
+        system_prompt=ops_agent.build_system_prompt(launched_at, arch),
         max_turns=ops_agent.MAX_TURNS,
         max_budget_usd=ops_agent.MAX_BUDGET_USD,
         timeout_s=ops_agent.TIMEOUT_S,
+        agents=ops_agent.subagent_definitions() if subagents else {},
+        builtin_tools=(ops_agent.AGENT_TOOL,) if subagents else (),
     )
+
+
+def ops_hooks(journal: Journal, arch: ops_agent.Architecture) -> OpsHooks:
+    """Hooks de l'agent Ops selon l'architecture : en `subagents`, chaque agent borné à ses
+    outils et l'outil `Agent` aux deux types prévus."""
+    if arch is ops_agent.Architecture.SUBAGENTS:
+        return OpsHooks(
+            journal,
+            ops_agent.LEAD_TOOL_NAMES,
+            subagents=ops_agent.SUBAGENT_TOOLS,
+            delegation_tools=ops_agent.DELEGATION_TOOLS,
+        )
+    return OpsHooks(journal, ops_agent.OPS_TOOL_NAMES)
 
 
 def build_options(
@@ -212,9 +235,11 @@ def build_options(
         plugins=[],
         strict_mcp_config=True,
         mcp_servers={profile.mcp_server: profile.mcp_config},
-        tools=[],
+        # Aucun outil intégré, sauf `Agent` pour l'agent Ops à subagents
+        tools=list(profile.builtin_tools),
         allowed_tools=sorted(profile.tool_names),
-        disallowed_tools=BUILTIN_TOOLS,
+        disallowed_tools=[t for t in BUILTIN_TOOLS if t not in profile.builtin_tools],
+        agents=profile.agents or None,
         permission_mode="dontAsk",
         # Avant chaque outil : validation des actions ; après : journal
         hooks=hooks.matchers(),
@@ -453,7 +478,11 @@ async def investigate_alert(
     """Enquête de l'agent Ops sur une alerte ; `output` est un IncidentReport validé (schéma,
     alerte recopiée, preuves tirées d'outils réellement appelés)."""
     launched_at = ops_agent.now()
-    hooks = OpsHooks(journal, ops_agent.OPS_TOOL_NAMES)
+    try:
+        arch = ops_agent.architecture(environ)
+    except ValueError as exc:
+        return AgentResult(error=str(exc), error_type=ErrorType.CONFIG)
+    hooks = ops_hooks(journal, arch)
     result = await run_agent(
         ops_agent.alert_prompt(alert, launched_at),
         IncidentReport,
@@ -462,7 +491,7 @@ async def investigate_alert(
         environ=environ,
         query=query,
         model=model,
-        profile=ops_profile(launched_at, environ),
+        profile=ops_profile(launched_at, environ, arch),
     )
     if result.error is None:
         try:
@@ -482,21 +511,31 @@ async def check_ops_context(
     query: QueryFn = sdk_query,
     model: str = DEFAULT_MODEL,
 ) -> AgentResult:
-    """Preuve d'isolement de l'agent Ops : sa consigne arrive, rien d'autre (questions pièges)."""
+    """Preuve d'isolement de l'agent Ops : sa consigne arrive, rien d'autre (questions pièges).
+    Architecture `subagents` : chaque subagent est lancé et répond aussi (ses seuls outils, ni
+    fichier ni shell, aucune réponse piège)."""
     launched_at = ops_agent.now()
+    try:
+        arch = ops_agent.architecture(environ)
+    except ValueError as exc:
+        return AgentResult(error=str(exc), error_type=ErrorType.CONFIG)
+    subagents = arch is ops_agent.Architecture.SUBAGENTS
+    hooks = ops_hooks(journal, arch)
     result = await run_agent(
-        ops_agent.CHECK_PROMPT,
-        OpsContextCheck,
+        ops_agent.CHECK_SUBAGENTS_PROMPT if subagents else ops_agent.CHECK_PROMPT,
+        OpsSubagentsContextCheck if subagents else OpsContextCheck,
         None,
-        hooks=OpsHooks(journal, ops_agent.OPS_TOOL_NAMES),
+        hooks=hooks,
         environ=environ,
         query=query,
         model=model,
-        profile=ops_profile(launched_at, environ),
+        profile=ops_profile(launched_at, environ, arch),
     )
     if result.error is None:
         try:
-            answer = ops_agent.validate_context(result.output, launched_at)
+            answer = ops_agent.validate_context(
+                result.output, launched_at, arch, delegated=hooks.delegated
+            )
             result.output = answer.model_dump(mode="json")
         except AgentRunError as exc:
             result.error = str(exc)

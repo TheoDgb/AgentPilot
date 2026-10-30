@@ -224,6 +224,60 @@ def test_init_db_upgrades_an_existing_database_for_ops(agentpilot_engine: Engine
     assert {"ops", "ops_check"} <= kinds
 
 
+def test_subagent_investigation_records_the_author_of_each_call(
+    client: TestClient, alert: uuid.UUID, ops_sources: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Architecture `subagents` (J6.4) : l'auteur de chaque appel est gardé en base et rendu par
+    `GET /runs/{id}` ; un agent généraliste est refusé et journalisé."""
+    from agentpilot.tests.test_ops_subagents import by, delegate, lead_init, run_tool
+
+    monkeypatch.setenv(ops_agent.ARCHITECTURE_ENV, "subagents")
+    app.state.query = HookDrivingQuery(
+        delegate("general-purpose"),
+        delegate("logs-investigator"),
+        by("logs-investigator", "summarize_logs", service="shopsim", since_minutes=5),
+        delegate("metrics-investigator"),
+        by("metrics-investigator", "query_metrics", metric="shopsim_error_rate", window="1m"),
+        output=report(),
+        executor=run_tool,
+        init=lead_init(),
+    )
+
+    created = client.post(f"/runs/ops/{alert}")
+
+    run = client.get(f"/runs/{created.json()['id']}").json()
+    assert run["status"] == "succeeded", run["error"]
+    assert [(c["tool"], c["agent"], c["outcome"]) for c in run["tool_calls"]] == [
+        ("Agent", None, "denied"),
+        ("Agent", None, "succeeded"),
+        ("mcp__ops__summarize_logs", "logs-investigator", "succeeded"),
+        ("Agent", None, "succeeded"),
+        ("mcp__ops__query_metrics", "metrics-investigator", "succeeded"),
+    ]
+    assert run["tool_calls"][0]["input"]["subagent_type"] == "general-purpose"
+
+
+def test_init_db_adds_the_author_of_each_call(agentpilot_engine: Engine) -> None:
+    """Base d'avant J6.4 : colonne `tool_calls.agent` ajoutée ; `init_db` deux fois."""
+    with agentpilot_engine.begin() as connection:
+        connection.execute(text(f"ALTER TABLE {SCHEMA}.tool_calls DROP COLUMN agent"))
+
+    init_db(agentpilot_engine)
+    init_db(agentpilot_engine)
+
+    with agentpilot_engine.connect() as connection:
+        columns = set(
+            connection.scalars(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = 'tool_calls'"
+                ),
+                {"schema": SCHEMA},
+            )
+        )
+    assert "agent" in columns
+
+
 def test_interrupted_investigations_are_never_counted_as_abandoned_tickets(
     alert: uuid.UUID, session_factory: sessionmaker[Session]
 ) -> None:
