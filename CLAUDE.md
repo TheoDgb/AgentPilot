@@ -116,24 +116,20 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
 
 ## Avancement
 
-Jalon en cours : **J6 — Agent Ops + subagents** (terminé ; suite : J7)
+Jalon en cours : **J7 — Livraison et formation**
 
 - [x] J0 : dépôt, Python 3.12 (uv), pyproject, commande /test
 - [x] J1 : ShopSim terminé (vérité terrain dans `evals/tickets.jsonl`). Ses API ne changent plus sans accord. Ajouts validés depuis : `GET /customers/{id}/refunds`, `POST /orders/{id}/resend`, `GET /clock` et `SHOPSIM_FREEZE_CLOCK`, `author` sur `POST /tickets/{id}/reply`, `GET /metrics`, `POST /tickets` (jamais exposé aux agents).
 - [x] J2 : serveur MCP (8 outils de lecture) et agent Support en headless (isolement prouvé par `--check`)
 - [x] J3 : agent Support dans le service AgentPilot, actions sous hooks avec validation humaine (`/approvals`), traitement continu, arrêt d'urgence et budget (`/control`)
 - [x] J4 : logs JSON avec `trace_id`, métriques Prometheus et Grafana, générateur de trafic, alertes enregistrées par AgentPilot (`/alerts`)
-- [x] J5 : évaluation (`evals.run`, `evals.grade`, `evals.compare`), consigne v2 adoptée (81 → 87/96, puis 91/96 avec la notation `8e959d276b3f` ; non significatif), CI GitHub Actions avec seuils (`evals/thresholds.toml`). Détails et leçons : `docs/journal.md`.
-- [x] J6.1 : serveur MCP Ops en lecture seule (logs par liste fixe, métriques Prometheus par requêtes prédéfinies, alertes enregistrées, santé des services ; jamais d'outil d'écriture, jamais le Chaos). Vérifié en conditions réelles sur les 3 pannes (`db_errors`, `connection_saturation` refaite pour monter en 10 min, `payment_latency`) ; détail dans `docs/journal.md`
-- [x] J6.2 : agent Ops : part d'une alerte, enquête et rend un rapport d'incident structuré (symptômes, hypothèses, preuves citées, cause probable, correctif proposé), sans aucune action ; isolement prouvé. Vérifié en conditions réelles : isolement (`/checks/ops`) réussi, et 3 enquêtes justes (`db_errors` → `database_errors`, `connection_saturation` → `resource_saturation`, `payment_latency` → `slow_dependency`), toutes les preuves exactes, 0,19 $ ; détail et défauts relevés dans `docs/journal.md`. À savoir, vu en vérifiant J6.1 (à mettre dans sa consigne ou ses évaluations) :
-  - `/health` de ShopSim reste vert pendant `db_errors` (il ne fait qu'un `SELECT 1`) : une santé verte n'écarte pas une panne de base, seuls les 5xx et les `http.exception` la montrent ;
-  - signature d'une saturation : toutes les routes métier au même plafond, `/health` et `/clock` rapides ; une lenteur propre à un service ne touche qu'une route ;
-  - une alerte peut survivre à un changement de cause : `ShopSimHighLatency` sur `/payments/{order_id}` est restée la même occurrence de la saturation à `payment_latency` ; vérifier dans les logs et les métriques, pas seulement l'alerte ;
-  - les p95 de Prometheus sont estimés par tranches (7,4 s pour 5,0 s réelles, 4,9 s pour 4,0 s) : valeurs exactes dans `summarize_logs`
-- [x] J6.3 : évaluation de l'agent Ops : 6 scénarios de panne à cause connue (dont une fausse alerte), lanceur autonome (`evals.ops_run`) et notation par du code (`evals.ops_grade`, preuves recoupées avec les vraies réponses d'outils). Vérifié en conditions réelles : `db_errors` et `false_alert` (causes justes ; 2 preuves introuvables sur `db_errors`, d'où la section « Preuves » de la consigne Ops, empreinte `bf42e5b6656d`), puis Ctrl+C en plein scénario (panne désactivée, plus aucun processus) ; détail dans `docs/journal.md`
-- [x] J6.4 : subagents (enquêteur logs, enquêteur métriques) comparés à l'agent seul, sur les mêmes scénarios. 5 scénarios plus difficiles (vérité terrain `1d0c1c3e153b`, notation `11a2215b0643`, consigne Ops `9704eed2dc32`, panne `db_errors_intermittent`) ; référence `reference-v2` de l'agent seul : 12 / 12, 0,78 $. Architecture `subagents` vérifiée en conditions réelles (isolement, auteur de chaque appel), puis **essayée et pas retenue** : 11 / 12 (régression sur `saturation_then_payments`), coût +125 %, durée +93 % ; `solo` reste le défaut, détail dans `docs/journal.md`
-- [x] J6.5 : déclenchement automatique sur alerte, et mode dégradé (modèle indisponible : vérifications sans IA et humain prévenu). Tri et regroupement des alertes, rapport sans IA, page `/investigations`. Vérifié en conditions réelles sur `db_errors` : une seule enquête pour deux alertes (0,059 $), puis avec une fausse clé, enquête en échec `api_unavailable` relayée par un rapport sans IA, `OpsReportWithoutAI` déclenchée et exclue ; détail dans `docs/journal.md`
+- [x] J5 : évaluation de l'agent Support (`evals.run`, `evals.grade`, `evals.compare`), consigne v2 adoptée (91/96, écart non significatif), CI GitHub Actions avec seuils (`evals/thresholds.toml`)
+- [x] J6 : agent Ops (serveur MCP Ops en lecture seule, rapports d'incident aux preuves vérifiables), évaluation sur 11 scénarios (`evals.ops_run`, `evals.ops_grade` : 12/12), subagents essayés et non retenus (`solo` reste le défaut), enquête automatique sur alerte avec regroupement et mode dégradé sans IA (`/investigations`)
+- [ ] J7.1 : AgentPilot dans Docker Compose (tout le système démarre en une commande) et rotation des logs  ← prochaine étape
+- [ ] J7.2 : un vrai canal pour prévenir un humain (alertes et rapports sans IA)
+- [ ] J7.3 : README de présentation : démarrage, architecture, résultats chiffrés, limites
+- [ ] J7.4 : guide d'une page pour les business analysts, et script de démo de 3 minutes
 
-À traiter : défauts restants pour une consigne v3 (catégorie des tickets 30 et 31, faits inventés dans `facts_used`).
+Détails, résultats et leçons de chaque jalon : `docs/journal.md`.
 
-Suite : J7 Livraison et formation (rotation des logs, AgentPilot dans Docker)
+À traiter : consigne Support v3 (catégorie des tickets 30 et 31, faits inventés dans `facts_used`).

@@ -622,8 +622,9 @@ vraie panne (J4.4).
 - Une panne qui dépend du nombre de requêtes dépend du débit du générateur : la régler sur le
   temps écoulé la rend reproductible.
 - Les points d'attention pour l'agent Ops (santé verte pendant une panne de base, signature de
-  la saturation, alerte qui survit à un changement de cause, percentiles estimés) sont notés
-  sous J6.2 dans CLAUDE.md, pour sa consigne et ses évaluations.
+  la saturation, alerte qui survit à un changement de cause, percentiles estimés) sont repris
+  dans sa consigne : section « Pièges connus » de `agents/ops/CLAUDE.md`, et signature de la
+  saturation dans son guide de diagnostic (`agents/ops/skills/diagnostic-guide/SKILL.md`).
 
 ### J6.2 : agent Ops
 
@@ -652,7 +653,7 @@ vraie panne (J4.4).
     touchée ; il resserre de lui-même sa fenêtre de 15 à 3 minutes pour séparer la panne
     actuelle de la saturation précédente, donne la valeur exacte des logs (4,01 s) plutôt que
     l'estimation de Prometheus, et recommande de chercher à part la cause de l'ancienne lenteur ;
-    6 appels, 0,07 $.
+    6 appels, 0,07 $ (0,19 $ pour les trois enquêtes).
   - Toutes les preuves citées (34 au total : 10, 13 et 11) recoupées avec les réponses
     d'outils gardées au journal : toutes exactes. Aucun appel hors des 5 outils Ops.
 
