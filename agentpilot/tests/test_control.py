@@ -67,11 +67,16 @@ def test_the_real_service_starts_paused(
     monkeypatch.setenv("SHOPSIM_URL", "http://127.0.0.1:9")
     app.state.session_factory = running
     # Boucle propre au test : ShopSim injoignable la met en attente, ce qui ne doit pas
-    # rester sur la boucle partagée par les tests suivants (jauge `waiting` des métriques)
-    monkeypatch.setattr(app.state, "worker", Worker(app.state))
-
-    with TestClient(app) as client:
-        status = client.get("/control/status").json()
+    # rester sur la boucle partagée par les tests suivants (jauge `waiting` des métriques).
+    # Remise à la main : `monkeypatch` sur `app.state` (Starlette) supprime l'attribut au lieu
+    # de le rendre
+    shared = app.state.worker
+    app.state.worker = Worker(app.state)
+    try:
+        with TestClient(app) as client:
+            status = client.get("/control/status").json()
+    finally:
+        app.state.worker = shared
 
     assert status["loop_paused"] is True and status["ops_auto"] is False
     assert status["paused_by"] == control.STARTUP
