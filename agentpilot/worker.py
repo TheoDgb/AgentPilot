@@ -51,7 +51,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from agentpilot import control, decisions, metrics, sdk_runner
+from agentpilot import control, decisions, metrics, ops_auto, ops_degraded, sdk_runner
 from agentpilot.approval import ESCALATE, REFUND, REPLY, RESEND, RESOLVE, short_name
 from agentpilot.decisions import Notice
 from agentpilot.env_file import setting
@@ -66,8 +66,10 @@ from agentpilot.models import (
     RunStatus,
     RunTrigger,
     ToolCall,
+    Triage,
 )
 from agentpilot.ops_agent import AlertBrief
+from agentpilot.ops_schemas import DegradedReason
 from agentpilot.sdk_runner import INFRA_ERRORS, AgentResult, ErrorType
 from agentpilot.support_agent import ACTION_TOOL_NAMES, DEFAULT_PROMPT
 from mcp_server.shopsim_client import ShopSimUnavailable, get_json
@@ -96,6 +98,13 @@ PAUSE_ERRORS = INFRA_ERRORS - {ErrorType.SHOPSIM_UNAVAILABLE}
 INFRA_VALUES = sorted(str(e) for e in INFRA_ERRORS)
 
 Launch = Callable[[], Awaitable[AgentResult]]
+COVERED_DETAIL = "même panne qu'une alerte déjà enquêtée"
+DEGRADED_DETAILS = {
+    DegradedReason.BUDGET: "rapport sans IA : budget du jour insuffisant pour une enquête",
+    DegradedReason.AI_UNAVAILABLE: "rapport sans IA : IA indisponible (boucle en pause infra)",
+    DegradedReason.HOURLY_CAP: "rapport sans IA : plafond horaire des enquêtes automatiques",
+    DegradedReason.INFRA_ERROR: "rapport sans IA : l'enquête par l'IA a échoué",
+}
 
 
 class AlreadyRunning(Exception):
@@ -421,6 +430,10 @@ class Worker:
     def running_tickets(self) -> list[int]:
         return sorted(a.ticket_id for a in self.active.values() if a.ticket_id is not None)
 
+    def running_investigations(self) -> int:
+        """Enquêtes, rapports sans IA et vérifications en cours (sans ticket)."""
+        return sum(1 for a in self.active.values() if a.ticket_id is None)
+
     # --- Exécutions ---
 
     async def execute(self, run: Run, launch: Launch) -> None:
@@ -428,7 +441,9 @@ class Worker:
         Tout ce qu'elle écrit dans les logs porte sa trace."""
         context = {"run_id": run.id} | ({"ticket_id": run.ticket_id} if run.ticket_id else {})
         with trace.bind(trace_id=run.trace_id, **context):
-            await self._execute(run.id, run.ticket_id, run.trigger, run.agent, launch)
+            await self._execute(
+                run.id, run.ticket_id, run.trigger, run.agent, launch, alert_id=run.alert_id
+            )
 
     async def _execute(
         self,
@@ -437,6 +452,7 @@ class Worker:
         trigger: RunTrigger,
         agent: AgentKind,
         launch: Launch,
+        alert_id: uuid.UUID | None = None,
     ) -> None:
         active = Active(ticket_id, trigger)
         self.active[run_id] = active
@@ -457,6 +473,17 @@ class Worker:
             await self._db(finish, run_id, result)
             if result is not None and trigger is not RunTrigger.EVAL:
                 await self._after(result, trigger)
+            if (
+                result is not None
+                and agent is AgentKind.OPS
+                and trigger is RunTrigger.ALERT
+                and alert_id is not None
+                and result.error_type in INFRA_ERRORS
+            ):
+                # L'IA n'a pas pu enquêter : un rapport sans IA prend la relève
+                await self._degrade(
+                    alert_id, DegradedReason.INFRA_ERROR, detail=str(result.error_type)
+                )
         finally:
             del self.active[run_id]
             self._log_finished(agent, trigger, result, start)
@@ -529,6 +556,138 @@ class Worker:
             alert, journal=journal, query=query, model=model
         )
 
+    # --- Enquête automatique sur les alertes (J6.5) ---
+
+    def _spawn(self, run: Run, launch: Launch) -> None:
+        task = asyncio.create_task(self.execute(run, launch))
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def _degrade(
+        self, alert_id: uuid.UUID, reason: DegradedReason, detail: str | None = None
+    ) -> None:
+        """Rapport sans IA sur l'alerte, lancé dans une place (coût nul), et tri de l'alerte."""
+        alert = await self._db(load_alert, alert_id)
+        if alert is None:
+            return
+        run = await self._db(
+            new_run,
+            AgentKind.OPS_DEGRADED,
+            None,
+            RunTrigger.ALERT,
+            check_budget=False,
+            alert_id=alert_id,
+        )
+        text = DEGRADED_DETAILS[reason] + (f" ({detail})" if detail else "")
+        await self._db(ops_auto.retriage, alert_id, Triage.DEGRADED, text, run.id, self.clock())
+        journal = DbJournal(self.factory, run.id)
+        connect = getattr(self.state, "ops_tools", None) or ops_degraded.mcp_tools
+
+        async def launch() -> AgentResult:
+            start = time.perf_counter()
+            report = await ops_degraded.degraded_report(
+                alert, reason, journal=journal, connect=connect, reason_detail=detail
+            )
+            return AgentResult(
+                output=report.model_dump(mode="json"),
+                total_cost_usd=0.0,
+                duration_ms=round((time.perf_counter() - start) * 1000),
+            )
+
+        self._spawn(run, launch)
+
+    async def _degraded_reason(self) -> DegradedReason | None:
+        """Pourquoi l'IA ne peut pas enquêter maintenant ; None : elle le peut."""
+        settings = await self._db(control.load)
+        if settings.loop_paused and settings.pause_reason is PauseReason.INFRA:
+            return DegradedReason.AI_UNAVAILABLE
+        if await self._db(ops_auto.launched_last_hour, self.clock()) >= ops_auto.max_per_hour():
+            return DegradedReason.HOURLY_CAP
+
+        def budget(factory: sessionmaker[Session]) -> bool:
+            with factory() as session:
+                return control.budget_allows(session, agent=AgentKind.OPS)
+
+        if not await self._db(budget):
+            return DegradedReason.BUDGET
+        return None
+
+    async def triage_alerts(self) -> float | None:
+        """Trie les alertes reçues (interrupteur actif) et lance une enquête, ou un rapport sans
+        IA, par alerte de tête. Sans place libre, l'alerte attend le tour suivant. Renvoie le
+        délai avant la prochaine alerte prête, s'il y en a une en attente."""
+        settings = await self._db(control.load)
+        if not settings.ops_auto:
+            return None
+        untriaged, heads = await self._db(ops_auto.load)
+        if not untriaged:
+            return None
+        now = self.clock()
+        found = ops_auto.plan(untriaged, heads, now)
+        for alert in found.skipped:
+            await self._db(ops_auto.claim, alert.id, Triage.SKIPPED, "déjà résolue", now)
+        for alert, reason in found.excluded:
+            await self._db(ops_auto.claim, alert.id, Triage.EXCLUDED, reason, now)
+        for alert, head in found.covered:
+            await self._db(
+                ops_auto.claim, alert.id, Triage.COVERED, COVERED_DETAIL, now, covered_by=head
+            )
+        # Places comptées ici : une exécution lancée n'entre dans `active` qu'à son démarrage
+        free = MAX_CONCURRENT_RUNS - len(self.active)
+        for group in found.groups:
+            if free <= 0:
+                break
+            await self._launch_group(group, now)
+            free -= 1
+        delay = None if found.next_ready is None else (found.next_ready - now).total_seconds()
+        return None if delay is None else max(delay, 1.0)
+
+    async def _launch_group(self, group: ops_auto.Group, now: datetime) -> None:
+        head = group.head
+        if not await self._db(
+            ops_auto.claim, head.id, Triage.INVESTIGATED, "enquête de l'agent Ops", now
+        ):
+            return
+        for alert in group.covered:
+            await self._db(
+                ops_auto.claim, alert.id, Triage.COVERED, COVERED_DETAIL, now, covered_by=head.id
+            )
+        log_event(
+            logger,
+            "ops_auto.triaged",
+            logging.WARNING,
+            alertname=head.alertname,
+            count=1 + len(group.covered),
+        )
+        reason = await self._degraded_reason()
+        if reason is None:
+            try:
+                run, launch = await self.start_alert(head.id, RunTrigger.ALERT)
+            except OverBudget:
+                reason = DegradedReason.BUDGET
+            except AlreadyRunning:
+                await self._db(
+                    ops_auto.retriage,
+                    head.id,
+                    Triage.INVESTIGATED,
+                    "enquête déjà en cours (lancée à la main)",
+                    None,
+                    now,
+                )
+                return
+            else:
+                await self._db(
+                    ops_auto.retriage,
+                    head.id,
+                    Triage.INVESTIGATED,
+                    "enquête de l'agent Ops",
+                    run.id,
+                    now,
+                )
+                self._spawn(run, launch)
+                return
+        await self._degrade(head.id, reason)
+
     def _count(self, result: AgentResult) -> None:
         if result.error is None:
             self.failures_in_row = 0
@@ -577,6 +736,16 @@ class Worker:
                 return await self._tick()
 
     async def _tick(self) -> float:
+        # Alertes d'abord, sans dépendre de ShopSim (l'alerte peut être sa panne)
+        try:
+            alerts_delay = await self.triage_alerts()
+        except Exception:  # le tri ne bloque jamais la file de tickets
+            log_event(logger, "ops_auto.error", logging.ERROR, exc_info=True)
+            alerts_delay = None
+        delay = await self._tick_tickets()
+        return delay if alerts_delay is None else min(delay, alerts_delay)
+
+    async def _tick_tickets(self) -> float:
         if self.waiting_until is not None and self.clock() < self.waiting_until:
             return (self.waiting_until - self.clock()).total_seconds()
         settings = await self._db(control.load)

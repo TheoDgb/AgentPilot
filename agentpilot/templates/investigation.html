@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}Enquête{% endblock %}
+{% macro evidence_list(items) %}
+{% if items %}<ul>{% for e in items %}<li><code>{{ e.tool }}</code>{% if e.arguments %} <span class="muted">{{ e.arguments | tojson }}</span>{% endif %} · <code>{{ e.field }}</code> = <strong>{{ e.value | tojson }}</strong></li>{% endfor %}</ul>{% endif %}
+{% endmacro %}
+{% block content %}
+<p><a href="/investigations">← Enquêtes</a></p>
+{% for level, text in notices %}<div class="banner {{ level }}">{{ text }}</div>{% endfor %}
+{% if form_error %}<div class="banner error">{{ form_error }}</div>{% endif %}
+
+{% if without_ai %}
+<h1>Rapport sans IA</h1>
+<div class="banner error">Rapport sans IA : aucune cause n'est avancée, faits relevés par du code. L'agent Ops n'a pas pu enquêter.</div>
+{% else %}
+<h1>Enquête de l'agent Ops</h1>
+{% endif %}
+
+<section>
+  <h2>Alerte de départ</h2>
+  {% if alert %}
+  <dl>
+    <dt>Alerte</dt><dd>{{ alert.alertname }}{% if alert.route %} · <code>{{ alert.route }}</code>{% endif %}</dd>
+    <dt>Statut</dt><dd>{{ alert.status.value }}{% if alert.ends_at %} (résolue à {{ alert.ends_at.strftime("%H:%M:%S") }} UTC){% endif %}</dd>
+    <dt>Début (UTC)</dt><dd>{{ alert.starts_at.strftime("%d/%m/%Y %H:%M:%S") }}</dd>
+    {% if alert.triage %}<dt>Tri</dt><dd>{{ TRIAGE_LABELS.get(alert.triage.value, alert.triage.value) }}{% if alert.triage_detail %} : {{ alert.triage_detail }}{% endif %}</dd>{% endif %}
+    <dt>Alertes couvertes</dt><dd>{% for c in covered %}{{ c.alertname }} <code>{{ c.route or "" }}</code>{% if not loop.last %}, {% endif %}{% else %}<span class="muted">aucune</span>{% endfor %}</dd>
+  </dl>
+  {% else %}<p class="muted">Aucune alerte liée.</p>{% endif %}
+</section>
+
+<section>
+  <h2>Exécution</h2>
+  <dl>
+    <dt>Déclencheur</dt><dd>{{ "alerte" if run.trigger.value == "alert" else ("à la main" if run.trigger.value == "manual" else run.trigger.value) }}</dd>
+    <dt>Statut</dt><dd>{{ run.status.value }}{% if run.error_type %} ({{ run.error_type }}){% endif %}</dd>
+    {% if run.error %}<dt>Erreur</dt><dd class="message">{{ run.error }}</dd>{% endif %}
+    <dt>Début (UTC)</dt><dd>{{ run.created_at.strftime("%d/%m/%Y %H:%M:%S") }}</dd>
+    <dt>Coût · durée</dt><dd>{% if run.total_cost_usd is not none %}{{ "%.4f"|format(run.total_cost_usd) }} ${% else %}—{% endif %}{% if run.duration_ms %} · {{ (run.duration_ms / 1000)|round(1) }} s{% endif %}{% if run.num_turns %} · {{ run.num_turns }} tours{% endif %}</dd>
+    <dt>Trace</dt><dd><code>{{ run.trace_id }}</code></dd>
+  </dl>
+</section>
+
+{% if report and without_ai %}
+<section>
+  <h2>Faits relevés</h2>
+  <dl>
+    <dt>Motif</dt><dd>{{ report.reason }}{% if report.reason_detail %} ({{ report.reason_detail }}){% endif %}</dd>
+    <dt>Relevé à (UTC)</dt><dd>{{ report.generated_at }} · logs des {{ report.since_minutes }} dernières minutes</dd>
+    <dt>Étendue</dt><dd>{% if report.affected_routes %}{{ report.affected_routes | length }} route(s) touchée(s) sur {{ report.observed_routes }} : {% for r in report.affected_routes %}<code>{{ r }}</code>{% if not loop.last %}, {% endif %}{% endfor %}{% else %}aucune route en erreur ni lente sur {{ report.observed_routes }} observées{% endif %}</dd>
+    <dt>Santé</dt><dd>{% for h in report.health %}{{ h.service }} : <strong>{{ h.status }}</strong>{% if h.detail %} <span class="muted">({{ h.detail }})</span>{% endif %}{% if not loop.last %} · {% endif %}{% else %}<span class="muted">inconnue</span>{% endfor %}</dd>
+    {% if report.unavailable %}<dt>Sources injoignables</dt><dd>{% for u in report.unavailable %}{{ u }}{% if not loop.last %}<br>{% endif %}{% endfor %}</dd>{% endif %}
+  </dl>
+  <h2 style="margin-top: 12px">Routes en erreur (5xx &gt; 5 %)</h2>
+  {% if report.error_routes %}
+  <table><thead><tr><th>Route</th><th>Requêtes</th><th>5xx</th><th>Part</th><th>Taux 5 min (Prometheus)</th></tr></thead><tbody>
+  {% for r in report.error_routes %}<tr><td><code>{{ r.route }}</code></td><td>{{ r.requests }}</td><td>{{ r.errors_5xx }}</td><td>{{ "%.0f"|format(r.share * 100) }} %</td><td>{% if r.error_rate_5m is not none %}{{ "%.0f"|format(r.error_rate_5m * 100) }} %{% else %}—{% endif %}</td></tr>{% endfor %}
+  </tbody></table>
+  {% else %}<p class="muted">Aucune.</p>{% endif %}
+  {% if report.error_types %}<p>Erreurs relevées : {% for e in report.error_types %}<code>{{ e.error_type }}</code> × {{ e.count }}{% if e.last %} <span class="muted">(dernière {{ e.last }})</span>{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+  <h2 style="margin-top: 12px">Routes lentes (p95 &gt; 1 s)</h2>
+  {% if report.slow_routes %}
+  <table><thead><tr><th>Route</th><th>p95 (logs)</th><th>p95 maintenant</th><th>p95 il y a 15 min</th></tr></thead><tbody>
+  {% for r in report.slow_routes %}<tr><td><code>{{ r.route }}</code></td><td>{% if r.p95_ms is not none %}{{ r.p95_ms|round|int }} ms{% else %}—{% endif %}</td><td>{% if r.p95_now_s is not none %}{{ r.p95_now_s }} s{% else %}—{% endif %}</td><td>{% if r.p95_15m_ago_s is not none %}{{ r.p95_15m_ago_s }} s{% else %}—{% endif %}</td></tr>{% endfor %}
+  </tbody></table>
+  {% else %}<p class="muted">Aucune.</p>{% endif %}
+  <h2 style="margin-top: 12px">Alertes actives</h2>
+  {% for a in report.active_alerts %}<div>{{ a.alertname }} <code>{{ a.route or "" }}</code> <span class="muted">{{ a.started or "" }}</span></div>{% else %}<p class="muted">Aucune.</p>{% endfor %}
+</section>
+
+<section>
+  <h2>Prise en compte</h2>
+  {% if run.reviewed_at %}
+  <p>Pris en compte par {{ run.reviewed_by }} le {{ run.reviewed_at.strftime("%d/%m/%Y %H:%M:%S") }} (UTC).</p>
+  {% else %}
+  <form method="post" action="/investigations/{{ run.id }}/review">
+    <label for="review-name">Votre nom</label>
+    <input type="text" id="review-name" name="name" maxlength="100" required>
+    <button type="submit" class="approve">Pris en compte</button>
+  </form>
+  {% endif %}
+</section>
+{% elif report %}
+<section>
+  <h2>Rapport d'incident</h2>
+  <p>{{ report.summary }}</p>
+  <dl>
+    <dt>Cause probable</dt><dd><code>{{ report.probable_cause }}</code> · confiance <strong>{{ report.confidence }}</strong></dd>
+    <dt>Routes touchées</dt><dd>{% for r in report.affected_routes %}<code>{{ r }}</code>{% if not loop.last %}, {% endif %}{% else %}<span class="muted">aucune</span>{% endfor %}</dd>
+    <dt>Correctif proposé</dt><dd>{{ report.proposed_fix }}</dd>
+    {% if report.next_checks %}<dt>À vérifier</dt><dd>{% for c in report.next_checks %}{{ c }}{% if not loop.last %}<br>{% endif %}{% endfor %}</dd>{% endif %}
+  </dl>
+</section>
+<section>
+  <h2>Symptômes</h2>
+  {% for s in report.symptoms %}<div style="margin-bottom: 10px"><strong>{{ s.description }}</strong>{% if s.routes %} <span class="muted">{% for r in s.routes %}<code>{{ r }}</code> {% endfor %}</span>{% endif %}{{ evidence_list(s.evidence) }}</div>{% endfor %}
+</section>
+<section>
+  <h2>Hypothèses</h2>
+  {% for h in report.hypotheses %}<div style="margin-bottom: 10px"><code>{{ h.cause }}</code> <span class="badge {{ 'executed' if h.status == 'confirmed' else ('failed' if h.status == 'ruled_out' else 'pending') }}">{{ {"confirmed": "confirmée", "ruled_out": "écartée", "inconclusive": "non tranchée"}.get(h.status, h.status) }}</span><div>{{ h.reasoning }}</div>{{ evidence_list(h.evidence) }}</div>{% endfor %}
+</section>
+{% endif %}
+
+<section>
+  <h2>Journal des appels</h2>
+  {% if calls %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>#</th><th>Outil</th><th>Auteur</th><th>Arguments</th><th>Issue</th><th>Durée</th></tr></thead>
+    <tbody>
+    {% for c in calls %}
+    <tr>
+      <td class="muted">{{ c.seq }}</td>
+      <td><code>{{ c.tool }}</code></td>
+      <td>{{ AUTHOR_LABELS.get(c.agent, c.agent) }}</td>
+      <td class="muted"><code>{{ c.input | tojson }}</code></td>
+      <td>{{ c.outcome.value }}{% if c.error %}<br><span class="muted">{{ c.error }}</span>{% endif %}</td>
+      <td class="muted">{% if c.duration_ms is not none %}{{ c.duration_ms }} ms{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="muted">Aucun appel.</p>{% endif %}
+</section>
+{% endblock %}

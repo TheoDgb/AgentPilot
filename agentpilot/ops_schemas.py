@@ -195,3 +195,85 @@ class OpsSubagentsContextCheck(OpsContextCheck):
     subagents: list[SubagentCheck] = Field(
         description="Réponse de chaque subagent, recopiée telle quelle"
     )
+
+
+# --- Rapport sans IA (J6.5) ----------------------------------------------------------------
+
+
+class DegradedReason(StrEnum):
+    """Pourquoi l'alerte n'a pas eu d'enquête par l'IA."""
+
+    BUDGET = "budget"
+    # Boucle en pause sur une erreur d'infrastructure : l'IA est connue indisponible
+    AI_UNAVAILABLE = "ai_unavailable"
+    HOURLY_CAP = "hourly_cap"
+    # L'enquête par l'IA s'est arrêtée sur une erreur d'infrastructure (API, configuration)
+    INFRA_ERROR = "infra_error"
+
+
+DEGRADED_NOTICE = "Rapport sans IA : aucune cause n'est avancée, faits relevés par du code."
+
+
+class ServiceFact(BaseModel):
+    service: str
+    status: str
+    detail: str | None = None
+
+
+class RouteErrorFact(BaseModel):
+    route: str
+    requests: int
+    errors_5xx: int
+    # Part des 5xx sur la période des logs, et taux sur 5 min selon Prometheus
+    share: float
+    error_rate_5m: float | None = None
+
+
+class ErrorTypeFact(BaseModel):
+    error_type: str
+    count: int
+    last: str | None = None
+
+
+class SlowRouteFact(BaseModel):
+    route: str
+    p95_ms: float | None = None
+    # Tendance de Prometheus (estimée par tranches) : maintenant et il y a 15 min
+    p95_now_s: float | None = None
+    p95_15m_ago_s: float | None = None
+
+
+class AlertFact(BaseModel):
+    alertname: str
+    route: str | None
+    started: str | None
+
+
+class DegradedReport(BaseModel):
+    """Rapport minimal écrit par du code, sans IA, à partir des mêmes outils que l'agent Ops.
+
+    Faits seulement : jamais de cause, jamais d'hypothèse ni de confiance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    without_ai: Literal[True] = True
+    notice: str = DEGRADED_NOTICE
+    reason: DegradedReason
+    # Catégorie de l'erreur d'infrastructure de l'enquête par l'IA, s'il y en a eu une
+    reason_detail: str | None = None
+    alert_id: str
+    alertname: str
+    alert_route: str | None
+    generated_at: str
+    # Fenêtre des logs résumés, en minutes
+    since_minutes: int
+    health: list[ServiceFact]
+    error_routes: list[RouteErrorFact]
+    error_types: list[ErrorTypeFact]
+    slow_routes: list[SlowRouteFact]
+    active_alerts: list[AlertFact]
+    # Étendue : routes touchées (erreurs ou lenteur) sur les routes observées
+    affected_routes: list[str]
+    observed_routes: int
+    # Sources qui n'ont pas répondu, avec le motif
+    unavailable: list[str]

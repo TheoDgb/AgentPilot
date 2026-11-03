@@ -7,8 +7,9 @@
   active par un message arrivé en retard.
 - `GET /alerts` : alertes enregistrées, les plus récentes d'abord.
 
-Les règles sont dans `monitoring/prometheus/rules/alerts.yml`. L'agent Ops partira de ces lignes
-en J6 ; aucune exécution n'est lancée ici.
+Les règles sont dans `monitoring/prometheus/rules/alerts.yml`. Aucune exécution n'est lancée
+ici : le webhook réveille la boucle, qui trie les alertes et lance les enquêtes si l'interrupteur
+de l'enquête automatique est actif (J6.5, `agentpilot/ops_auto.py`).
 """
 
 import logging
@@ -109,7 +110,7 @@ def _factory(request: Request) -> sessionmaker[Session]:
 
 @router.post("/webhook")
 def receive(webhook: AlertmanagerWebhook, request: Request) -> dict[str, int]:
-    """Alertes d'Alertmanager : enregistrées, sans action automatique."""
+    """Alertes d'Alertmanager : enregistrées, puis la boucle est réveillée (tri des alertes)."""
     now = datetime.now(UTC)
     trace_id = trace.current_trace_id()
     with _factory(request)() as session:
@@ -126,6 +127,9 @@ def receive(webhook: AlertmanagerWebhook, request: Request) -> dict[str, int]:
             route=_label(alert.labels.get("route")),
             status=alert.status,
         )
+    worker = getattr(request.app.state, "worker", None)
+    if worker is not None:
+        worker.wake()
     return {"received": len(webhook.alerts)}
 
 

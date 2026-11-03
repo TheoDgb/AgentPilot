@@ -136,6 +136,7 @@ class Stack(Protocol):
     async def firing_alerts(self) -> list[dict[str, Any]]: ...
     async def post_alert(self, payload: dict[str, Any]) -> None: ...
     async def loop_paused(self) -> bool: ...
+    async def ops_auto(self) -> bool: ...
     async def start_run(self, alert_id: str) -> dict[str, Any]: ...
     async def get_run(self, run_id: str) -> dict[str, Any]: ...
     async def abnormal_metrics(self) -> str | None: ...
@@ -295,6 +296,9 @@ class OpsEvaluation:
     async def _check_loop(self) -> None:
         if not await self.stack.loop_paused():
             raise Aborted("boucle de l'agent Support relancée pendant l'évaluation")
+        if await self.stack.ops_auto():
+            # Le service lancerait sa propre enquête sur l'alerte du scénario
+            raise Aborted("enquête automatique de l'agent Ops activée pendant l'évaluation")
 
     async def wait_clean(self, scenario: IncidentScenario) -> None:
         history = timedelta(minutes=scenario.history_min)
@@ -581,6 +585,9 @@ class HttpStack:
 
     async def loop_paused(self) -> bool:
         return bool((await self._service("GET", "/control/status"))["loop_paused"])
+
+    async def ops_auto(self) -> bool:
+        return bool((await self._service("GET", "/control/status")).get("ops_auto"))
 
     async def start_run(self, alert_id: str) -> dict[str, Any]:
         return await self._service("POST", f"/runs/ops/{alert_id}")

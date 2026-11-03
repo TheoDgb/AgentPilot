@@ -114,6 +114,7 @@ app.add_middleware(
 )
 app.include_router(web.router)
 app.include_router(web.control_router)
+app.include_router(web.investigations_router)
 app.include_router(alerts.router)
 # Remplaçables par les tests : sessions de base et fonction `query` du SDK
 app.state.session_factory = SessionLocal

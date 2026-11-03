@@ -191,16 +191,16 @@ def test_ops_isolation_check_fails_on_a_leak(
     assert run["output"] is None
 
 
-def test_init_db_upgrades_an_existing_database_for_ops(agentpilot_engine: Engine) -> None:
+def test_init_db_upgrades_an_existing_database_for_ops(upgraded_engine: Engine) -> None:
     """Base d'avant J6.2 : colonne de l'alerte et index ajoutés ; `init_db` deux fois."""
-    with agentpilot_engine.begin() as connection:
+    with upgraded_engine.begin() as connection:
         # Supprimer la colonne supprime aussi l'index partiel qui l'utilise
         connection.execute(text(f"ALTER TABLE {SCHEMA}.runs DROP COLUMN alert_id"))
 
-    init_db(agentpilot_engine)
-    init_db(agentpilot_engine)
+    init_db(upgraded_engine)
+    init_db(upgraded_engine)
 
-    with agentpilot_engine.connect() as connection:
+    with upgraded_engine.connect() as connection:
         columns = set(
             connection.scalars(
                 text(
@@ -257,15 +257,15 @@ def test_subagent_investigation_records_the_author_of_each_call(
     assert run["tool_calls"][0]["input"]["subagent_type"] == "general-purpose"
 
 
-def test_init_db_adds_the_author_of_each_call(agentpilot_engine: Engine) -> None:
+def test_init_db_adds_the_author_of_each_call(upgraded_engine: Engine) -> None:
     """Base d'avant J6.4 : colonne `tool_calls.agent` ajoutée ; `init_db` deux fois."""
-    with agentpilot_engine.begin() as connection:
+    with upgraded_engine.begin() as connection:
         connection.execute(text(f"ALTER TABLE {SCHEMA}.tool_calls DROP COLUMN agent"))
 
-    init_db(agentpilot_engine)
-    init_db(agentpilot_engine)
+    init_db(upgraded_engine)
+    init_db(upgraded_engine)
 
-    with agentpilot_engine.connect() as connection:
+    with upgraded_engine.connect() as connection:
         columns = set(
             connection.scalars(
                 text(

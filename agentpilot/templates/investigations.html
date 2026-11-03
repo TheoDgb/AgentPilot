@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Enquêtes{% endblock %}
+{% block content %}
+<h1>Enquêtes de l'agent Ops</h1>
+{% if unreviewed %}<div class="banner error">{{ unreviewed }} rapport{{ "s" if unreviewed > 1 }} sans IA à lire : l'agent Ops n'a pas pu enquêter.</div>{% endif %}
+<p class="muted">Enquête automatique sur les alertes : <strong>{{ "active" if ops_auto else "coupée" }}</strong> (<a href="/control">pilotage</a>). Les enquêtes ne font que lire : aucune action sur le système, arrêt d'urgence ou non.</p>
+
+<section>
+  <h2>Enquêtes et rapports</h2>
+  {% if runs %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Début (UTC)</th><th>Alerte</th><th>Rapport</th><th>Déclencheur</th><th>Statut</th><th>Cause</th><th>Alertes couvertes</th><th>Coût · durée</th></tr></thead>
+    <tbody>
+    {% for run in runs %}
+    {% set alert = alerts.get(run.alert_id) %}
+    <tr>
+      <td class="muted"><a href="/investigations/{{ run.id }}">{{ run.created_at.strftime("%d/%m %H:%M:%S") }}</a></td>
+      <td>{% if alert %}{{ alert.alertname }}{% if alert.route %}<br><code>{{ alert.route }}</code>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{% if run.agent.value == "ops_degraded" %}<span class="badge failed">sans IA</span>{% if not run.reviewed_at %} <span class="badge pending">à lire</span>{% endif %}{% else %}<span class="badge executed">IA</span>{% endif %}</td>
+      <td>{{ "alerte" if run.trigger.value == "alert" else ("à la main" if run.trigger.value == "manual" else run.trigger.value) }}</td>
+      <td><span class="badge {{ 'executed' if run.status.value == 'succeeded' else ('pending' if run.status.value == 'running' else 'failed') }}">{{ run.status.value }}</span>{% if run.error_type %}<br><span class="muted">{{ run.error_type }}</span>{% endif %}</td>
+      <td>{% if run.output and run.output.probable_cause %}<code>{{ run.output.probable_cause }}</code> <span class="muted">({{ run.output.confidence }})</span>{% elif run.agent.value == "ops_degraded" %}<span class="muted">aucune (sans IA)</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{% for c in covered.get(run.alert_id, []) %}<code>{{ c.route or c.alertname }}</code>{% if not loop.last %}, {% endif %}{% else %}<span class="muted">—</span>{% endfor %}</td>
+      <td class="muted">{% if run.total_cost_usd is not none %}{{ "%.4f"|format(run.total_cost_usd) }} ${% else %}—{% endif %}{% if run.duration_ms %} · {{ (run.duration_ms / 1000)|round|int }} s{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">Aucune enquête pour l'instant.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Alertes non enquêtées</h2>
+  {% if not_investigated %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Début (UTC)</th><th>Alerte</th><th>Tri</th><th>Motif</th></tr></thead>
+    <tbody>
+    {% for a in not_investigated %}
+    <tr>
+      <td class="muted">{{ a.starts_at.strftime("%d/%m %H:%M:%S") }}</td>
+      <td>{{ a.alertname }}{% if a.route %}<br><code>{{ a.route }}</code>{% endif %}</td>
+      <td>{{ TRIAGE_LABELS.get(a.triage.value, a.triage.value) }}</td>
+      <td>{{ a.triage_detail or "" }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">Aucune.</p>
+  {% endif %}
+</section>
+{% endblock %}

@@ -78,7 +78,7 @@ def main(
         reset_all(bind, seed)
     print(
         "AgentPilot : exécutions, journal, actions en attente et alertes vidés ; boucle en pause, "
-        "arrêt d'urgence levé."
+        "arrêt d'urgence levé, enquête automatique coupée."
     )
     return 0
 

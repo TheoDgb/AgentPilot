@@ -202,6 +202,7 @@ def check_agentpilot_reset(factory: sessionmaker[Session]) -> None:
             )
         }
         stopped = session.scalar(select(Control.emergency_stop).where(Control.id == CONTROL_ID))
+        ops_auto = session.scalar(select(Control.ops_auto).where(Control.id == CONTROL_ID))
     left = [f"{count} {label}" for label, count in counts.items() if count]
     if left:
         raise Refused(
@@ -210,6 +211,10 @@ def check_agentpilot_reset(factory: sessionmaker[Session]) -> None:
         )
     if stopped:
         raise Refused("Arrêt d'urgence actif : lancer python -m agentpilot.reset")
+    if ops_auto:
+        raise Refused(
+            "Enquête automatique de l'agent Ops active : lancer python -m agentpilot.reset"
+        )
 
 
 async def check_shopsim_reset(expected: Sequence[int]) -> None:

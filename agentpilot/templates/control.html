@@ -1,16 +1,17 @@
 {% extends "base.html" %}
 {% block title %}Pilotage{% endblock %}
 {% block content %}
-<h1>Pilotage de l'agent Support</h1>
+<h1>Pilotage des agents</h1>
 {% for level, text in notices %}<div class="banner {{ level }}">{{ text }}</div>{% endfor %}
 {% if form_error %}<div class="banner error">{{ form_error }}</div>{% endif %}
+{% if status.degraded_unreviewed %}<div class="banner error">{{ status.degraded_unreviewed }} rapport{{ "s" if status.degraded_unreviewed > 1 }} sans IA à lire : l'agent Ops n'a pas pu enquêter. <a href="/investigations">Voir les enquêtes</a></div>{% endif %}
 
 <section>
   <h2>Alertes actives</h2>
   {% if status.active_alerts %}
   <div class="table-wrap">
   <table>
-    <thead><tr><th>Alerte</th><th>Gravité</th><th>Route</th><th>Depuis (UTC)</th><th>Résumé</th></tr></thead>
+    <thead><tr><th>Alerte</th><th>Gravité</th><th>Route</th><th>Depuis (UTC)</th><th>Résumé</th><th>Enquête</th></tr></thead>
     <tbody>
     {% for a in status.active_alerts %}
     <tr>
@@ -19,12 +20,13 @@
       <td>{% if a.route %}<code>{{ a.route }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
       <td class="muted">{{ a.starts_at.strftime("%d/%m %H:%M") }}</td>
       <td>{{ a.summary or "" }}</td>
+      <td>{% if a.triage %}{% if a.triage_run_id %}<a href="/investigations/{{ a.triage_run_id }}">{{ TRIAGE_LABELS.get(a.triage.value, a.triage.value) }}</a>{% else %}{{ TRIAGE_LABELS.get(a.triage.value, a.triage.value) }}{% endif %}{% elif status.ops_auto %}<span class="muted">en attente</span>{% else %}<span class="muted">—</span>{% endif %}</td>
     </tr>
     {% endfor %}
     </tbody>
   </table>
   </div>
-  <p class="muted">Enregistrées par AgentPilot depuis Alertmanager ; aucune action automatique. Historique : <code>GET /alerts</code>.</p>
+  <p class="muted">Enregistrées par AgentPilot depuis Alertmanager. Enquête automatique {{ "active" if status.ops_auto else "coupée" }} ; historique : <code>GET /alerts</code>, enquêtes : <a href="/investigations">/investigations</a>.</p>
   {% else %}
   <p class="muted">Aucune alerte active.</p>
   {% endif %}
@@ -48,6 +50,24 @@
     {% else %}
     <button type="submit" class="danger">Activer l'arrêt d'urgence</button>
     {% endif %}
+  </form>
+</section>
+
+<section>
+  <h2>Enquête automatique (agent Ops)</h2>
+  {% if status.ops_auto %}
+  <p class="state" style="color: var(--ok)">Active</p>
+  <p class="muted">Chaque nouvelle alerte de la boutique lance une enquête (une par panne), dans les places et le budget du jour ; sans IA disponible, un rapport sans IA. Lecture seule : l'arrêt d'urgence ne l'arrête pas.</p>
+  {% else %}
+  <p class="state">Coupée</p>
+  <p class="muted">Aucune enquête n'est lancée sur les alertes (enquête à la main : <code>POST /runs/ops/{alert_id}</code>).</p>
+  {% endif %}
+  {% if status.ops_auto_at %}<p class="muted">Dernier changement par {{ status.ops_auto_by }} le {{ status.ops_auto_at.strftime("%d/%m/%Y %H:%M:%S") }}</p>{% endif %}
+  <form method="post" action="/control/ops-auto">
+    <input type="hidden" name="on" value="{{ 'false' if status.ops_auto else 'true' }}">
+    <label for="ops-name">Votre nom</label>
+    <input type="text" id="ops-name" name="name" value="{{ form.get('name', '') }}" maxlength="100" required>
+    <button type="submit">{{ "Couper l'enquête automatique" if status.ops_auto else "Activer l'enquête automatique" }}</button>
   </form>
 </section>
 
@@ -81,8 +101,8 @@
       <br><span class="muted">Relevé à {{ status.queue_checked_at.strftime("%H:%M:%S") }} (UTC)</span>
       {% if status.eligible_tickets == 0 and not status.running_tickets %}<br>Rien à lancer pour l'instant : la boucle attend un ticket éligible.{% endif %}
     {% endif %}</dd>
-    <dt>En cours ({{ status.running_tickets | length }}/{{ status.max_concurrent_runs }})</dt>
-    <dd>{% for t in status.running_tickets %}#{{ t }}{% if not loop.last %}, {% endif %}{% else %}<span class="muted">aucun ticket</span>{% endfor %}</dd>
+    <dt>En cours ({{ (status.running_tickets | length) + status.running_investigations }}/{{ status.max_concurrent_runs }})</dt>
+    <dd>{% for t in status.running_tickets %}#{{ t }}{% if not loop.last %}, {% endif %}{% else %}<span class="muted">aucun ticket</span>{% endfor %}{% if status.running_investigations %} · {{ status.running_investigations }} enquête(s){% endif %}</dd>
     <dt>Abandonnés</dt>
     <dd>{% for t in status.abandoned_tickets %}#{{ t }}{% if not loop.last %}, {% endif %}{% else %}<span class="muted">aucun</span>{% endfor %}
       {% if status.abandoned_tickets %}<span class="muted"> · échecs répétés, à traiter par un humain</span>{% endif %}</dd>

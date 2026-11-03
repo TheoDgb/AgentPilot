@@ -76,6 +76,7 @@ class FakeStack:
     occurrences: list[dict[str, Any]] = field(default_factory=list)
     injected: dict[str, dict[str, Any]] = field(default_factory=dict)
     loop: bool = True
+    auto: bool = False
     abnormal: list[str] = field(default_factory=list)
     run_polls: int = 1
     run: dict[str, Any] = field(
@@ -161,6 +162,9 @@ class FakeStack:
 
     async def loop_paused(self) -> bool:
         return self.loop
+
+    async def ops_auto(self) -> bool:
+        return self.auto
 
     async def start_run(self, alert_id: str) -> dict[str, Any]:
         self.events.append(("run", alert_id))
@@ -422,6 +426,19 @@ async def test_agent_failure_is_graded_and_the_series_goes_on(tmp_path: Path) ->
 
     assert status is RunStatus.COMPLETED
     assert run.report.scenarios[0].status is ScenarioStatus.FAILED
+
+
+async def test_automatic_ops_investigation_aborts(tmp_path: Path) -> None:
+    """J6.5 : le service enquêterait lui-même sur l'alerte du scénario."""
+    clock = FakeClock()
+    stack = FakeStack(clock, [db_rule()], auto=True)
+    run = evaluation(stack, tmp_path)
+
+    status = await run.run([SCENARIOS["db_errors"]])
+
+    assert status is RunStatus.ABORTED
+    assert "enquête automatique" in (run.report.summary.stop_reason or "")
+    assert not any(e[0] == "run" for e in stack.events)
 
 
 async def test_support_loop_running_aborts(tmp_path: Path) -> None:

@@ -71,7 +71,8 @@ def test_prometheus_configuration_and_rules_are_valid() -> None:
         "check", "config", "/etc/prometheus/prometheus.yml",
     )  # fmt: skip
 
-    assert "8 rules found" in output
+    # Toutes les règles du fichier chargées (leur nombre attendu est fixé plus bas)
+    assert f"{len(alert_rules())} rules found" in output
 
 
 def test_alertmanager_configuration_is_valid() -> None:
@@ -99,7 +100,7 @@ def test_rules_are_symptoms_with_severity_and_french_annotations() -> None:
     rules = alert_rules()
     names = [rule["alert"] for rule in rules]
 
-    assert len(names) == len(set(names)) == 8
+    assert len(names) == len(set(names)) == 9
     for rule in rules:
         assert rule["labels"]["severity"] in SEVERITIES
         assert {"summary", "description"} <= rule["annotations"].keys()

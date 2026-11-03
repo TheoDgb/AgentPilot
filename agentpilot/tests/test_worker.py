@@ -910,16 +910,16 @@ def test_infra_pause_is_shown_on_the_control_page(
     assert status["pause_reason"] == "infra" and status["pause_detail"] == "api_unavailable"
 
 
-def test_init_db_upgrades_an_existing_database(agentpilot_engine: Engine) -> None:
+def test_init_db_upgrades_an_existing_database(upgraded_engine: Engine) -> None:
     """Base d'avant ces colonnes : `init_db` les ajoute, et peut tourner deux fois."""
-    with agentpilot_engine.begin() as connection:
+    with upgraded_engine.begin() as connection:
         connection.execute(text(f"ALTER TABLE {SCHEMA}.runs DROP COLUMN error_type"))
         connection.execute(text(f"ALTER TABLE {SCHEMA}.control DROP COLUMN pause_detail"))
 
-    init_db(agentpilot_engine)
-    init_db(agentpilot_engine)
+    init_db(upgraded_engine)
+    init_db(upgraded_engine)
 
-    with agentpilot_engine.connect() as connection:
+    with upgraded_engine.connect() as connection:
         columns = set(
             connection.scalars(
                 text(

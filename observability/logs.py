@@ -64,6 +64,10 @@ FIELDS = frozenset(
         "pause_reason",
         "emergency",
         "count",
+        # Enquête automatique de l'agent Ops (J6.5) : interrupteur, tri d'une alerte
+        "ops_auto",
+        "triage",
+        "alert_id",
         # Alertes reçues d'Alertmanager (nom de la règle, gravité)
         "alertname",
         "severity",

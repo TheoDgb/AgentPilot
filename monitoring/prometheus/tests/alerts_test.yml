@@ -58,6 +58,8 @@ tests:
         values: "5x40"
       - series: 'agentpilot_pending_action_oldest_age_seconds{job="agentpilot",instance="localhost:8001"}'
         values: "0 0 60 120 180 0x36"
+      - series: 'agentpilot_ops_degraded_unreviewed{job="agentpilot",instance="localhost:8001"}'
+        values: "0x40"
     alert_rule_test:
       - {eval_time: 30m, alertname: ShopSimHighErrorRate, exp_alerts: []}
       - {eval_time: 30m, alertname: ShopSimHighLatency, exp_alerts: []}
@@ -67,6 +69,7 @@ tests:
       - {eval_time: 30m, alertname: AgentRunsFailing, exp_alerts: []}
       - {eval_time: 30m, alertname: AgentBudgetNearlyReached, exp_alerts: []}
       - {eval_time: 30m, alertname: PendingActionTooOld, exp_alerts: []}
+      - {eval_time: 30m, alertname: OpsReportWithoutAI, exp_alerts: []}
 
   # --- Erreurs 5xx (panne db_errors sur /orders) -----------------------------------------
   - interval: 1m
@@ -192,6 +195,10 @@ tests:
       # Action en attente depuis la minute 0 : âge en secondes, au-delà d'1 h à la minute 61
       - series: 'agentpilot_pending_action_oldest_age_seconds{job="agentpilot",instance="localhost:8001"}'
         values: "0+60x70"
+      # Un rapport sans IA de la minute 20 à la minute 30 ; un autre à la seule minute 42, pris
+      # en compte avant 1 min (cas limite : rien)
+      - series: 'agentpilot_ops_degraded_unreviewed{job="agentpilot",instance="localhost:8001"}'
+        values: "0x19 1x10 0x10 1 0x29"
     alert_rule_test:
       - eval_time: 11m
         alertname: AgentRunsFailing
@@ -223,3 +230,19 @@ tests:
             exp_annotations:
               summary: "Action en attente d'un humain depuis plus d'une heure"
               description: "Une action attend une décision sur /approvals depuis plus d'une heure."
+      - eval_time: 20m
+        alertname: OpsReportWithoutAI
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: OpsReportWithoutAI
+        exp_alerts:
+          - exp_labels: {severity: warning, job: agentpilot, instance: "localhost:8001"}
+            exp_annotations:
+              summary: "Rapport d'incident sans IA à lire"
+              description: "L'agent Ops n'a pas pu enquêter : un rapport sans IA attend sur /investigations."
+      - eval_time: 35m
+        alertname: OpsReportWithoutAI
+        exp_alerts: []
+      - eval_time: 43m
+        alertname: OpsReportWithoutAI
+        exp_alerts: []

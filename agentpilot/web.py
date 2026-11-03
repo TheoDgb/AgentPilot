@@ -4,9 +4,13 @@
 - `GET /approvals/{id}` : dossier complet et formulaires ;
 - `POST /approvals/{id}/approve | reject | retry | follow-up` : décision, puis redirection
   303 vers le dossier (un rechargement ne renvoie pas le formulaire) ;
-- `GET /control` : pilotage de la boucle et de l'arrêt d'urgence ;
-  `POST /control/loop/pause | resume` et `POST /control/emergency` (champ `name` obligatoire,
-  utilisables aussi par curl : `curl -d name=… localhost:8001/control/loop/pause`).
+- `GET /control` : pilotage de la boucle, de l'arrêt d'urgence et de l'enquête automatique ;
+  `POST /control/loop/pause | resume`, `POST /control/emergency` et `POST /control/ops-auto`
+  (champ `name` obligatoire, utilisables aussi par curl :
+  `curl -d name=… localhost:8001/control/loop/pause`) ;
+- `GET /investigations` : enquêtes de l'agent Ops et rapports sans IA, alertes non enquêtées ;
+  `GET /investigations/{id}` : un rapport ; `POST /investigations/{id}/review` : rapport sans
+  IA pris en compte (nom obligatoire). Lecture seule sur le système : aucune action.
 
 Toutes les pages affichent un bandeau quand l'arrêt d'urgence est actif.
 
@@ -30,11 +34,21 @@ from agentpilot import alerts, control, decisions, worker
 from agentpilot.api_schemas import AlertRead, ControlStatus
 from agentpilot.approval import REASON_LABELS, REPLY, Reason
 from agentpilot.decisions import InvalidInput, Notice
-from agentpilot.models import CallOutcome, PauseReason, PendingAction, PendingStatus
+from agentpilot.models import (
+    AgentKind,
+    Alert,
+    CallOutcome,
+    PauseReason,
+    PendingAction,
+    PendingStatus,
+    Run,
+    Triage,
+)
 from mcp_server.shopsim_client import ShopSimError, get_json
 
 router = APIRouter(prefix="/approvals", tags=["approbations"])
 control_router = APIRouter(prefix="/control", tags=["pilotage"])
+investigations_router = APIRouter(prefix="/investigations", tags=["enquêtes"])
 
 
 def _emergency_banner(request: Request) -> dict[str, Any]:
@@ -315,6 +329,8 @@ CONTROL_NOTICES = {
     "budget": ("error", "Budget du jour atteint : la boucle reste en pause jusqu'à demain."),
     "emergency_on": ("error", "Arrêt d'urgence activé : toute action de l'agent est refusée."),
     "emergency_off": ("ok", "Arrêt d'urgence levé."),
+    "ops_auto_on": ("ok", "Enquête automatique activée : chaque nouvelle alerte sera triée."),
+    "ops_auto_off": ("ok", "Enquête automatique coupée : aucune nouvelle enquête sur alerte."),
 }
 
 
@@ -324,6 +340,7 @@ def control_status(work: worker.Worker, factory: sessionmaker[Session]) -> Contr
     with factory() as session:
         spent = control.spent_today(session)
         firing = [AlertRead.model_validate(a) for a in alerts.active(session)]
+        unreviewed = control.degraded_unreviewed(session)
     return ControlStatus(
         loop_paused=settings.loop_paused,
         pause_reason=settings.pause_reason,
@@ -345,6 +362,11 @@ def control_status(work: worker.Worker, factory: sessionmaker[Session]) -> Contr
         eligible_tickets=queue.eligible if queue else None,
         skipped_tickets={str(k): v for k, v in queue.skipped.items()} if queue else {},
         active_alerts=firing,
+        ops_auto=settings.ops_auto,
+        ops_auto_by=settings.ops_auto_by,
+        ops_auto_at=settings.ops_auto_at,
+        running_investigations=work.running_investigations(),
+        degraded_unreviewed=unreviewed,
     )
 
 
@@ -404,3 +426,138 @@ def switch_emergency(request: Request, on: Flag, name: Text = "") -> Response:
     except InvalidInput as exc:
         return _control_page(request, form_error=str(exc), form={"name": name}, status_code=422)
     return _control_done(request, "emergency_on" if on else "emergency_off")
+
+
+@control_router.post("/ops-auto")
+def switch_ops_auto(request: Request, on: Flag, name: Text = "") -> Response:
+    try:
+        control.set_ops_auto(_factory(request), on, name)
+    except InvalidInput as exc:
+        return _control_page(request, form_error=str(exc), form={"name": name}, status_code=422)
+    return _control_done(request, "ops_auto_on" if on else "ops_auto_off")
+
+
+# --- Enquêtes de l'agent Ops (J6.5) ----------------------------------------------------------
+
+INVESTIGATION_KINDS = (AgentKind.OPS, AgentKind.OPS_DEGRADED)
+TRIAGE_LABELS = {
+    Triage.INVESTIGATED: "enquêtée",
+    Triage.COVERED: "couverte",
+    Triage.EXCLUDED: "exclue",
+    Triage.DEGRADED: "rapport sans IA",
+    Triage.SKIPPED: "déjà résolue",
+}
+AUTHOR_LABELS = {None: "agent principal", "no_ai": "sans IA"}
+templates.env.globals |= {
+    "TRIAGE_LABELS": {str(k): v for k, v in TRIAGE_LABELS.items()},
+    "AUTHOR_LABELS": AUTHOR_LABELS,
+}
+REVIEW_NOTICES = {
+    "reviewed": ("ok", "Rapport sans IA pris en compte."),
+    "already": (
+        "warn",
+        "Ce rapport était déjà pris en compte, ou ce n'est pas un rapport sans IA.",
+    ),
+}
+
+
+def _alerts_by_id(session: Session, ids: set[uuid.UUID]) -> dict[uuid.UUID, Alert]:
+    if not ids:
+        return {}
+    return {a.id: a for a in session.scalars(select(Alert).where(Alert.id.in_(ids)))}
+
+
+def _covered(session: Session, head_ids: set[uuid.UUID]) -> dict[uuid.UUID, list[Alert]]:
+    """Alertes couvertes par chaque alerte de tête."""
+    found: dict[uuid.UUID, list[Alert]] = {}
+    if not head_ids:
+        return found
+    for alert in session.scalars(
+        select(Alert).where(Alert.covered_by.in_(head_ids)).order_by(Alert.starts_at)
+    ):
+        assert alert.covered_by is not None
+        found.setdefault(alert.covered_by, []).append(alert)
+    return found
+
+
+@investigations_router.get("", response_class=HTMLResponse)
+def list_investigations(request: Request) -> Response:
+    with _factory(request)() as session:
+        runs = list(
+            session.scalars(
+                select(Run)
+                .where(Run.agent.in_(INVESTIGATION_KINDS))
+                .order_by(Run.created_at.desc())
+                .limit(LIST_LIMIT)
+            )
+        )
+        alert_ids = {r.alert_id for r in runs if r.alert_id is not None}
+        by_id = _alerts_by_id(session, alert_ids)
+        covered = _covered(session, alert_ids)
+        not_investigated = list(
+            session.scalars(
+                select(Alert)
+                .where(Alert.triage.in_([Triage.EXCLUDED, Triage.SKIPPED]))
+                .order_by(Alert.starts_at.desc())
+                .limit(LIST_LIMIT)
+            )
+        )
+        unreviewed = control.degraded_unreviewed(session)
+    return templates.TemplateResponse(
+        request,
+        "investigations.html",
+        {
+            "runs": runs,
+            "alerts": by_id,
+            "covered": covered,
+            "not_investigated": not_investigated,
+            "unreviewed": unreviewed,
+            "ops_auto": control.load(_factory(request)).ops_auto,
+        },
+    )
+
+
+def _investigation(
+    request: Request,
+    run_id: uuid.UUID,
+    notice: str | None = None,
+    form_error: str | None = None,
+    status_code: int = 200,
+) -> Response:
+    with _factory(request)() as session:
+        run = session.get(Run, run_id)
+        if run is None or run.agent not in INVESTIGATION_KINDS:
+            raise HTTPException(status_code=404, detail="Investigation not found")
+        alert = session.get(Alert, run.alert_id) if run.alert_id else None
+        covered = _covered(session, {run.alert_id} if run.alert_id else set())
+        calls = list(run.tool_calls)
+    return templates.TemplateResponse(
+        request,
+        "investigation.html",
+        {
+            "run": run,
+            "alert": alert,
+            "covered": covered.get(run.alert_id, []) if run.alert_id else [],
+            "calls": calls,
+            "report": run.output,
+            "without_ai": run.agent is AgentKind.OPS_DEGRADED,
+            "notices": [REVIEW_NOTICES[notice]] if notice in REVIEW_NOTICES else [],
+            "form_error": form_error,
+        },
+        status_code=status_code,
+    )
+
+
+@investigations_router.get("/{run_id}", response_class=HTMLResponse)
+def show_investigation(request: Request, run_id: uuid.UUID, notice: str | None = None) -> Response:
+    return _investigation(request, run_id, notice)
+
+
+@investigations_router.post("/{run_id}/review")
+def review_investigation(request: Request, run_id: uuid.UUID, name: Text = "") -> Response:
+    try:
+        reviewed = control.review(_factory(request), run_id, name)
+    except InvalidInput as exc:
+        return _investigation(request, run_id, form_error=str(exc), status_code=422)
+    notice = "reviewed" if reviewed else "already"
+    return RedirectResponse(f"/investigations/{run_id}?notice={notice}", status_code=303)

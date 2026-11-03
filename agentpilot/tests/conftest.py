@@ -293,14 +293,19 @@ class MemoryJournal:
 # --- Base de test ----------------------------------------------------------------------
 
 
+def recreate_schema(engine: Engine) -> None:
+    """Schéma d'AgentPilot supprimé puis recréé par `init_db`."""
+    with engine.begin() as connection:
+        connection.execute(DropSchema(SCHEMA, cascade=True, if_exists=True))
+    init_db(engine)
+
+
 @pytest.fixture(scope="session")
 def agentpilot_engine() -> Iterator[Engine]:
     engine = create_engine(TEST_DATABASE_URL)
     try:
         # Schéma recréé : pas de migrations, les tables peuvent avoir changé
-        with engine.begin() as connection:
-            connection.execute(DropSchema(SCHEMA, cascade=True, if_exists=True))
-        init_db(engine)
+        recreate_schema(engine)
     except OperationalError as exc:
         pytest.fail(
             f"Base de test injoignable ({TEST_DATABASE_URL}). "
@@ -309,6 +314,17 @@ def agentpilot_engine() -> Iterator[Engine]:
         )
     yield engine
     engine.dispose()
+
+
+@pytest.fixture
+def upgraded_engine(agentpilot_engine: Engine) -> Iterator[Engine]:
+    """Pour les tests de mise à niveau, qui abîment le schéma exprès (colonnes, types
+    supprimés) : le schéma est recréé après le test, **même s'il échoue**, pour ne jamais
+    laisser une base cassée aux tests suivants."""
+    try:
+        yield agentpilot_engine
+    finally:
+        recreate_schema(agentpilot_engine)
 
 
 def reset_agentpilot(engine: Engine, loop_paused: bool = True) -> None:

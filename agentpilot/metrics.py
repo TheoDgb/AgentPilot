@@ -229,6 +229,11 @@ def state_registry(
         registry=registry,
     ).set(len(status.running_tickets))
     Gauge(
+        "agentpilot_investigations_running",
+        "Enquêtes de l'agent Ops et rapports sans IA en cours dans ce processus.",
+        registry=registry,
+    ).set(status.running_investigations)
+    Gauge(
         "agentpilot_runs_max_concurrent",
         "Exécutions simultanées au plus.",
         registry=registry,
@@ -259,6 +264,16 @@ def state_registry(
         "Plafond de dépense par jour, en dollars.",
         registry=registry,
     ).set(float(status.daily_budget_usd))
+    Gauge(
+        "agentpilot_ops_auto",
+        "1 si l'enquête automatique de l'agent Ops sur les alertes est active.",
+        registry=registry,
+    ).set(1 if status.ops_auto else 0)
+    Gauge(
+        "agentpilot_ops_degraded_unreviewed",
+        "Rapports sans IA qu'aucun humain n'a encore pris en compte.",
+        registry=registry,
+    ).set(status.degraded_unreviewed)
     Gauge(
         "agentpilot_abandoned_tickets",
         "Tickets ouverts abandonnés après trop d'échecs.",

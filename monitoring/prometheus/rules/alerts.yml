@@ -92,3 +92,14 @@ groups:
         annotations:
           summary: "Action en attente d'un humain depuis plus d'une heure"
           description: "Une action attend une décision sur /approvals depuis plus d'une heure."
+
+      # J6.5 : une alerte a reçu un rapport sans IA (budget, API indisponible…) qu'aucun humain
+      # n'a encore pris en compte. Jamais enquêtée automatiquement (pas de boucle)
+      - alert: OpsReportWithoutAI
+        expr: agentpilot_ops_degraded_unreviewed > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rapport d'incident sans IA à lire"
+          description: "L'agent Ops n'a pas pu enquêter : un rapport sans IA attend sur /investigations."

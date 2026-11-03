@@ -68,7 +68,7 @@
   </style>
 </head>
 <body>
-  <header><nav><a href="/approvals">AgentPilot · Approbations</a><a href="/control">Pilotage</a></nav></header>
+  <header><nav><a href="/approvals">AgentPilot · Approbations</a><a href="/control">Pilotage</a><a href="/investigations">Enquêtes</a></nav></header>
   <main>
     {% if emergency_stop %}<div class="banner error emergency">Arrêt d'urgence actif : l'agent ne fait que proposer, toutes ses actions sont refusées. Les approbations humaines restent possibles.</div>{% endif %}
     {% block content %}{% endblock %}

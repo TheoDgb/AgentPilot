@@ -1,4 +1,5 @@
-"""Pilotage de l'agent Support : pause de la boucle, arrêt d'urgence, budget du jour.
+"""Pilotage : pause de la boucle de l'agent Support, arrêt d'urgence, enquête automatique de
+l'agent Ops sur les alertes (J6.5), budget du jour.
 
 Les interrupteurs sont en base (ligne unique `agentpilot.control`) : ils survivent à un
 redémarrage, et les hooks relisent l'arrêt d'urgence avant chaque action.
@@ -40,6 +41,8 @@ RESERVES_USD = {
     AgentKind.SUPPORT_CHECK: RUN_RESERVE_USD,
     AgentKind.OPS: Decimal(str(ops_agent.MAX_BUDGET_USD)),
     AgentKind.OPS_CHECK: Decimal(str(ops_agent.MAX_BUDGET_USD)),
+    # Rapport sans IA : aucun appel au modèle
+    AgentKind.OPS_DEGRADED: Decimal(0),
 }
 
 
@@ -154,3 +157,46 @@ def set_emergency(factory: sessionmaker[Session], on: bool, name: str) -> None:
     by = _name(name)
     _update(factory, emergency_stop=on, emergency_by=by, emergency_at=_now())
     log_event(logger, "emergency.changed", logging.WARNING, emergency=on)
+
+
+def set_ops_auto(factory: sessionmaker[Session], on: bool, name: str) -> None:
+    """Active ou coupe l'enquête automatique de l'agent Ops sur les alertes (J6.5). Lève
+    `InvalidInput`."""
+    by = _name(name)
+    _update(factory, ops_auto=on, ops_auto_by=by, ops_auto_at=_now())
+    log_event(logger, "ops_auto.changed", logging.WARNING, ops_auto=on)
+
+
+def degraded_unreviewed(session: Session) -> int:
+    """Rapports sans IA qu'aucun humain n'a encore pris en compte (J6.5)."""
+    return int(
+        session.scalar(
+            select(func.count()).where(
+                Run.agent == AgentKind.OPS_DEGRADED,
+                Run.status == RunStatus.SUCCEEDED,
+                Run.reviewed_at.is_(None),
+            )
+        )
+        or 0
+    )
+
+
+def review(factory: sessionmaker[Session], run_id: object, name: str) -> bool:
+    """Rapport sans IA pris en compte par un humain ; False si ce n'en est pas un, ou s'il
+    l'était déjà. Lève `InvalidInput`."""
+    by = _name(name)
+    with factory() as session:
+        done = session.execute(
+            update(Run)
+            .where(
+                Run.id == run_id,
+                Run.agent == AgentKind.OPS_DEGRADED,
+                Run.reviewed_at.is_(None),
+            )
+            .values(reviewed_by=by, reviewed_at=_now())
+        )
+        session.commit()
+    reviewed = bool(done.rowcount)  # type: ignore[attr-defined]
+    if reviewed:
+        log_event(logger, "ops.degraded_reviewed")
+    return reviewed

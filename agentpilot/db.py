@@ -52,6 +52,9 @@ ENUM_ADDITIONS = (
     ("pause_reason", "infra"),
     ("agent_kind", "ops"),
     ("agent_kind", "ops_check"),
+    # J6.5 : enquête automatique et rapport sans IA
+    ("run_trigger", "alert"),
+    ("agent_kind", "ops_degraded"),
 )
 # Colonnes ajoutées aux tables après leur création
 COLUMN_ADDITIONS = (
@@ -60,6 +63,17 @@ COLUMN_ADDITIONS = (
     ("runs", "alert_id", f"UUID REFERENCES {SCHEMA}.alerts(id)"),
     # J6.4 : subagent auteur d'un appel de l'agent Ops
     ("tool_calls", "agent", "VARCHAR(64)"),
+    # J6.5 : déclenchement automatique, tri des alertes, prise en compte des rapports sans IA
+    ("control", "ops_auto", "BOOLEAN NOT NULL DEFAULT false"),
+    ("control", "ops_auto_by", "VARCHAR(100)"),
+    ("control", "ops_auto_at", "TIMESTAMP WITH TIME ZONE"),
+    ("alerts", "triage", f"{SCHEMA}.alert_triage"),
+    ("alerts", "triage_detail", "TEXT"),
+    ("alerts", "triage_run_id", "UUID"),
+    ("alerts", "covered_by", f"UUID REFERENCES {SCHEMA}.alerts(id)"),
+    ("alerts", "triaged_at", "TIMESTAMP WITH TIME ZONE"),
+    ("runs", "reviewed_by", "VARCHAR(100)"),
+    ("runs", "reviewed_at", "TIMESTAMP WITH TIME ZONE"),
 )
 
 
@@ -72,11 +86,6 @@ def init_db(bind: Engine) -> None:
     with bind.begin() as connection:
         connection.execute(CreateSchema(SCHEMA, if_not_exists=True))
         Base.metadata.create_all(connection)
-        connection.execute(
-            insert(models.Control)
-            .values(id=models.CONTROL_ID, loop_paused=True, emergency_stop=False)
-            .on_conflict_do_nothing(index_elements=["id"])
-        )
     # Une valeur d'énumération ajoutée ne peut pas servir dans sa propre transaction (l'index
     # partiel des enquêtes l'utilise) : chacune est validée tout de suite
     with bind.execution_options(isolation_level="AUTOCOMMIT").connect() as connection:
@@ -85,6 +94,16 @@ def init_db(bind: Engine) -> None:
                 text(f"ALTER TYPE {SCHEMA}.{enum} ADD VALUE IF NOT EXISTS '{value}'")
             )
     with bind.begin() as connection:
+        # Types énumérés créés après leur table : `create_all` ne les crée pas pour une table
+        # qui existe déjà
+        for name, values in models.ENUM_TYPES_ADDED.items():
+            labels = ", ".join(f"'{v}'" for v in values)
+            connection.execute(
+                text(
+                    f"DO $$ BEGIN CREATE TYPE {SCHEMA}.{name} AS ENUM ({labels}); "
+                    "EXCEPTION WHEN duplicate_object THEN NULL; END $$"
+                )
+            )
         for table, column, kind in COLUMN_ADDITIONS:
             connection.execute(
                 text(f"ALTER TABLE {SCHEMA}.{table} ADD COLUMN IF NOT EXISTS {column} {kind}")
@@ -94,6 +113,14 @@ def init_db(bind: Engine) -> None:
                 "CREATE UNIQUE INDEX IF NOT EXISTS one_running_run_per_alert "
                 f"ON {SCHEMA}.runs (alert_id) WHERE status = 'running' AND agent = 'ops'"
             )
+        )
+        # Ligne des interrupteurs en dernier, une fois toutes les colonnes là : l'INSERT porte
+        # aussi les valeurs par défaut Python des colonnes ajoutées depuis (`ops_auto`), qui
+        # manqueraient encore à une base existante
+        connection.execute(
+            insert(models.Control)
+            .values(id=models.CONTROL_ID, loop_paused=True, emergency_stop=False)
+            .on_conflict_do_nothing(index_elements=["id"])
         )
 
 
@@ -116,7 +143,8 @@ def service_lock(bind: Engine) -> Iterator[bool]:
 
 def clear(bind: Engine, loop_paused: bool = True) -> None:
     """Vide les exécutions, le journal, les actions en attente et les alertes reçues, et remet
-    les interrupteurs à leur état de départ (boucle en pause, pas d'arrêt d'urgence)."""
+    les interrupteurs à leur état de départ (boucle en pause, pas d'arrêt d'urgence, enquête
+    automatique coupée)."""
     from agentpilot import models
 
     with bind.begin() as connection:
@@ -136,5 +164,8 @@ def clear(bind: Engine, loop_paused: bool = True) -> None:
                 emergency_stop=False,
                 emergency_by=None,
                 emergency_at=None,
+                ops_auto=False,
+                ops_auto_by=None,
+                ops_auto_at=None,
             )
         )

@@ -42,6 +42,8 @@ class RunTrigger(StrEnum):
     LOOP = "loop"
     # Évaluation sur la vérité terrain (`python -m evals.run`)
     EVAL = "eval"
+    # Enquête lancée automatiquement sur une alerte (J6.5, `agentpilot/ops_auto.py`)
+    ALERT = "alert"
 
 
 class PauseReason(StrEnum):
@@ -60,6 +62,8 @@ class AgentKind(StrEnum):
     # Enquête de l'agent Ops sur une alerte, et vérification de son isolement (J6.2)
     OPS = "ops"
     OPS_CHECK = "ops_check"
+    # Rapport sans IA sur une alerte (J6.5, `agentpilot/ops_degraded.py`) : coût nul
+    OPS_DEGRADED = "ops_degraded"
 
 
 class CallOutcome(StrEnum):
@@ -84,6 +88,26 @@ class PendingStatus(StrEnum):
 class AlertStatus(StrEnum):
     FIRING = "firing"
     RESOLVED = "resolved"
+
+
+class Triage(StrEnum):
+    """Suite donnée à une alerte par le déclenchement automatique (J6.5), une fois par
+    occurrence."""
+
+    # Enquête de l'agent Ops lancée (alerte de tête de son groupe)
+    INVESTIGATED = "investigated"
+    # Même panne qu'une alerte déjà enquêtée (même nom, née peu après) : pas d'enquête de plus
+    COVERED = "covered"
+    # Alerte hors de la liste blanche : jamais d'enquête automatique
+    EXCLUDED = "excluded"
+    # Rapport sans IA (budget, IA indisponible, plafond horaire)
+    DEGRADED = "degraded"
+    # Déjà résolue au moment du tri
+    SKIPPED = "skipped"
+
+
+# Types énumérés ajoutés à une table existante (J6.5) : créés par `init_db` s'ils manquent
+ENUM_TYPES_ADDED: dict[str, list[str]] = {"alert_triage": [t.value for t in Triage]}
 
 
 def _enum(enum: type[StrEnum], name: str) -> Enum:
@@ -134,6 +158,9 @@ class Run(Base):
     total_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
     duration_ms: Mapped[int | None]
     num_turns: Mapped[int | None]
+    # Rapport sans IA (J6.5) : pris en compte par un humain (nom déclaratif)
+    reviewed_by: Mapped[str | None] = mapped_column(String(100))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     session_id: Mapped[str | None] = mapped_column(String(100))
     # Outils réellement disponibles (événement d'initialisation)
     available_tools: Mapped[list[str] | None] = mapped_column(JSONB)
@@ -243,6 +270,10 @@ class Control(Base):
     emergency_stop: Mapped[bool] = mapped_column(default=False)
     emergency_by: Mapped[str | None] = mapped_column(String(100))
     emergency_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Enquête automatique de l'agent Ops sur les alertes (J6.5) : coupée au premier démarrage
+    ops_auto: Mapped[bool] = mapped_column(default=False)
+    ops_auto_by: Mapped[str | None] = mapped_column(String(100))
+    ops_auto_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Alert(Base):
@@ -250,7 +281,7 @@ class Alert(Base):
 
     Une ligne par occurrence : même empreinte (`fingerprint`, mêmes étiquettes) et même début.
     Une alerte qui revient après sa résolution est une nouvelle ligne : l'historique dont
-    l'agent Ops partira en J6. Aucune action automatique pour l'instant.
+    l'agent Ops part. Le déclenchement automatique (J6.5) la trie une fois (`triage`).
     """
 
     __tablename__ = "alerts"
@@ -273,3 +304,13 @@ class Alert(Base):
     last_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     # Trace de la dernière réception (logs d'AgentPilot)
     trace_id: Mapped[str | None] = mapped_column(String(32))
+    # Tri par le déclenchement automatique (J6.5), écrit une seule fois : NULL tant que
+    # l'alerte n'est pas triée
+    triage: Mapped[Triage | None] = mapped_column(_enum(Triage, "alert_triage"))
+    triage_detail: Mapped[str | None] = mapped_column(Text)
+    # Enquête ou rapport sans IA lancé pour elle (sans clé étrangère : `runs.alert_id` pointe
+    # déjà vers les alertes)
+    triage_run_id: Mapped[uuid.UUID | None]
+    # Alerte de tête du groupe dont l'enquête la couvre
+    covered_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey(f"{SCHEMA}.alerts.id"))
+    triaged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

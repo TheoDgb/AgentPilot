@@ -15,6 +15,7 @@ from agentpilot.models import (
     PendingStatus,
     RunStatus,
     RunTrigger,
+    Triage,
 )
 
 
@@ -98,6 +99,9 @@ class RunRead(BaseModel):
     pending_actions: list[PendingActionRead]
     created_at: datetime
     finished_at: datetime | None
+    # Rapport sans IA (J6.5) : pris en compte par un humain
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
 
 
 class AlertRead(BaseModel):
@@ -115,6 +119,11 @@ class AlertRead(BaseModel):
     ends_at: datetime | None
     first_received_at: datetime
     last_received_at: datetime
+    # Tri par l'enquête automatique (J6.5) : None tant que l'alerte n'est pas triée
+    triage: Triage | None = None
+    triage_detail: str | None = None
+    triage_run_id: uuid.UUID | None = None
+    covered_by: uuid.UUID | None = None
 
 
 class ControlStatus(BaseModel):
@@ -145,3 +154,11 @@ class ControlStatus(BaseModel):
     skipped_tickets: dict[str, int]
     # Alertes en cours (déclenchées, pas encore résolues), les plus anciennes d'abord
     active_alerts: list[AlertRead] = []
+    # Enquête automatique de l'agent Ops sur les alertes (J6.5)
+    ops_auto: bool = False
+    ops_auto_by: str | None = None
+    ops_auto_at: datetime | None = None
+    # Enquêtes et rapports sans IA en cours dans ce processus
+    running_investigations: int = 0
+    # Rapports sans IA pas encore pris en compte par un humain
+    degraded_unreviewed: int = 0

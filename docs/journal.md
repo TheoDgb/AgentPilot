@@ -917,3 +917,69 @@ pièges dans le même contexte.
 - La CLI a trois comportements invisibles au faux SDK (alias `Task`, nom annoncé à
   l'initialisation, lancement en arrière-plan) : seule une vérification réelle les montre.
 
+### J6.5 : enquête automatique sur alerte et rapport sans IA
+
+*2026-11-03*
+
+**Fait**
+- **Interrupteur** `ops_auto` (coupé au premier démarrage et par la remise à zéro),
+  indépendant de la boucle Support et de l'arrêt d'urgence (l'agent Ops ne fait que lire).
+- **Tri des alertes** dans le tour de boucle, avant les tickets et sans dépendre de ShopSim
+  (l'alerte peut être sa panne). Chaque occurrence est triée une seule fois : déjà résolue,
+  exclue (liste blanche des symptômes de la boutique), enquêtée, rapport sans IA, ou couverte
+  par l'alerte de tête de son groupe.
+- **Regroupement** : même nom d'alerte, né à moins de 5 min de l'alerte de tête, après 60 s
+  d'attente à la réception. Une saturation (5 alertes) donne une enquête ; base et paiements
+  (deux noms) en donnent deux.
+- **Rapport sans IA** (budget, IA indisponible, plafond horaire de 6 enquêtes par heure, ou
+  enquête par l'IA arrêtée sur une erreur d'infrastructure) : du code sur les mêmes outils,
+  par le client MCP, chaque appel au journal ; des faits, jamais de cause.
+- **Prévenir un humain** : bandeau jusqu'à « Pris en compte », log d'erreur, jauge et règle
+  `OpsReportWithoutAI`.
+- **Page `/investigations`** : enquêtes, rapports, alertes couvertes et non enquêtées.
+- Les évaluations refusent de tourner avec l'enquête automatique active (le service
+  enquêterait lui-même sur l'alerte du scénario).
+
+**Décisions**
+- **Liste blanche** plutôt que liste noire : une nouvelle règle d'alerte ne dépense rien tant
+  qu'on ne l'a pas autorisée. Exclues, avec leur motif : `AgentPilotDown`,
+  `AgentPilotStateUnavailable`, `AgentBudgetNearlyReached`, `AgentRunsFailing`,
+  `PendingActionTooOld`, `OpsReportWithoutAI`.
+- **Regroupement par nom d'alerte**, pas par fenêtre seule : deux pannes de natures
+  différentes restent deux enquêtes ; deux pannes de même nom d'alerte sont regroupées
+  (limite connue).
+- **Aucune cause dans le rapport sans IA** : une règle qui classerait les pannes ferait
+  passer une heuristique pour un diagnostic.
+- **Faute de l'agent** (rapport invalide, délai) : pas de rapport sans IA, l'exécution en
+  échec reste visible. Seules les erreurs d'infrastructure passent la main.
+
+**Bugs ou surprises (en codant)**
+- Le client MCP installé (`mcp` 2.3.0) nomme le champ `is_error`, pas `isError` : trouvé par
+  le test qui lance le vrai serveur MCP Ops, et non par les faux outils.
+- **`init_db` cassait la mise à niveau d'une base existante** : la ligne des interrupteurs
+  était insérée avant l'ajout des colonnes manquantes, et l'`INSERT` de SQLAlchemy porte la
+  valeur par défaut Python de chaque colonne, dont `ops_auto` (« column ops_auto of relation
+  control does not exist »). Le service n'aurait pas démarré sur la base réelle. L'insertion
+  vient désormais en dernier.
+- Un test de mise à niveau qui échouait laissait le schéma abîmé (colonnes supprimées) aux
+  tests suivants : 50 erreurs en cascade, dont « pause_detail does not exist ». Les tests de
+  mise à niveau passent par la fixture `upgraded_engine`, qui recrée le schéma après le test,
+  même en cas d'échec.
+- Le test `promtool check` attendait « 8 rules found » en dur : il lit maintenant le nombre de
+  règles du fichier.
+
+**Vérification réelle** (service lancé, générateur de trafic, panne `db_errors`, heures UTC)
+- **Enquête automatique** : les deux alertes `ShopSimHighErrorRate` reçues à 18:20:29,
+  triées 60 s plus tard en un seul groupe ; **une seule** enquête (`trigger: alert`),
+  réussie en 18 s, 0,059 $, 6 tours ; l'autre route couverte. Au démarrage du service,
+  `init_db` a mis à niveau la base réelle sans erreur.
+- **Rapport sans IA** (service relancé avec une fausse clé) : de nouvelles occurrences
+  triées en un groupe ; l'enquête par l'IA échoue en 4,5 s (`api_unavailable`, 0 $), la
+  boucle Support se met en pause `infra` ; le rapport sans IA part aussitôt sur la même
+  alerte (2 s, 0 $, log `ops.degraded_report`), avec les routes en erreur, le type d'erreur,
+  la santé et les alertes actives. `OpsReportWithoutAI` se déclenche 1 min plus tard,
+  arrive dans AgentPilot et y est exclue (pas de boucle). Bandeau sur `/control` jusqu'à
+  « Pris en compte ».
+- Pages vérifiées : liste des enquêtes, alerte couverte, alertes non enquêtées avec leur
+  motif, rapport sans IA lisible, bandeau levé après la prise en compte.
+
