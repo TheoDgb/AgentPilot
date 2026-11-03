@@ -200,3 +200,31 @@ def review(factory: sessionmaker[Session], run_id: object, name: str) -> bool:
     if reviewed:
         log_event(logger, "ops.degraded_reviewed")
     return reviewed
+
+
+PAUSE_ON_START_ENV = "AGENTPILOT_PAUSE_ON_START"
+# Nom affiché sur /control pour la pause du démarrage
+STARTUP = "démarrage du service"
+
+
+def pause_on_start(factory: sessionmaker[Session]) -> None:
+    """Démarrer ne dépense rien (J7.1) : boucle Support en pause et enquête automatique coupée,
+    sauf `AGENTPILOT_PAUSE_ON_START=0`. Une pause déjà en place garde son motif (budget,
+    erreur d'infrastructure)."""
+    if setting(PAUSE_ON_START_ENV) == "0":
+        return
+    settings = load(factory)
+    now = _now()
+    if not settings.loop_paused:
+        _update(
+            factory,
+            loop_paused=True,
+            pause_reason=PauseReason.MANUAL,
+            pause_detail=None,
+            paused_by=STARTUP,
+            paused_at=now,
+        )
+        log_event(logger, "loop.paused", logging.WARNING, pause_reason=PauseReason.MANUAL)
+    if settings.ops_auto:
+        _update(factory, ops_auto=False, ops_auto_by=STARTUP, ops_auto_at=now)
+        log_event(logger, "ops_auto.changed", logging.WARNING, ops_auto=False)

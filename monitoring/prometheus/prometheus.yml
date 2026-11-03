@@ -1,26 +1,25 @@
 # Collecte des métriques de ShopSim et d'AgentPilot (J4.2).
 #
-# Prometheus tourne en réseau hôte (docker-compose.yml) : il joint ShopSim par son port publié
-# sur l'hôte et AgentPilot, lancé en local hors Docker sur 127.0.0.1:8001. AgentPilot arrêté :
-# up{job="agentpilot"} = 0, rien d'anormal.
+# Réseau Docker (docker-compose.yml, J7.1) : ShopSim (`app`) et AgentPilot (`agentpilot`) par le
+# nom de leur service. AgentPilot arrêté (évaluation, service local) : up{job="agentpilot"} = 0.
 global:
   scrape_interval: 10s
   scrape_timeout: 5s
   evaluation_interval: 10s
 
-# Règles d'alerte (J4.4), envoyées à Alertmanager (réseau hôte, 127.0.0.1:9093)
+# Règles d'alerte (J4.4), envoyées à Alertmanager (service `alertmanager`)
 rule_files:
   - /etc/prometheus/rules/*.yml
 
 alerting:
   alertmanagers:
     - static_configs:
-        - targets: ["localhost:9093"]
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
   - job_name: shopsim
     static_configs:
-      - targets: ["localhost:8000"]
+      - targets: ["app:8000"]
   - job_name: agentpilot
     static_configs:
-      - targets: ["localhost:8001"]
+      - targets: ["agentpilot:8001"]

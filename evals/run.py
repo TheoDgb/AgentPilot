@@ -29,7 +29,7 @@ Pas de notation ici (J5.2).
 
 Écran : progression (ticket lancé, ticket terminé avec son statut et son coût), puis un
 résumé avec le chemin du fichier de résultats ; refus sur stderr. Les logs JSON vont seulement
-dans `logs/agentpilot.jsonl` (`python -m observability.query --trace <trace_id>`).
+dans `logs/agentpilot-<jour>.jsonl` (`python -m observability.query --trace <trace_id>`).
 
 Erreur d'infrastructure (`sdk_runner.INFRA_ERRORS` : API Anthropic, ShopSim, configuration, CLI)
 pendant un ticket ou la vérification d'isolement : le passage s'arrête (`aborted`), donc la série
@@ -860,7 +860,8 @@ def main(
         if not locked:
             print(
                 "Évaluation refusée : le service AgentPilot est lancé (ou une remise à zéro) : "
-                "l'arrêter avant d'évaluer.",
+                "l'arrêter avant d'évaluer (`docker compose stop agentpilot`, ou le service "
+                "local).",
                 file=sys.stderr,
             )
             return 1

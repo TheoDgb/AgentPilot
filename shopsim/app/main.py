@@ -1,8 +1,8 @@
 """Application FastAPI ShopSim.
 
 Logs JSON (`observability`) : une ligne par requête, sur stderr et dans
-`$LOG_DIR/shopsim.jsonl`. Les requêtes vers `/chaos` vont seulement dans
-`$LOG_DIR/chaos.jsonl` (nulle part sans `LOG_DIR`) : l'activation d'une panne ne doit pas se
+`$LOG_DIR/shopsim-<jour>.jsonl`. Les requêtes vers `/chaos` vont seulement dans
+`$LOG_DIR/chaos-<jour>.jsonl` (nulle part sans `LOG_DIR`) : l'activation d'une panne ne doit pas se
 lire dans les logs que l'agent Ops consultera.
 
 Métriques Prometheus (`GET /metrics`, J4.2) : toutes les requêtes sauf `/chaos` (même raison) et

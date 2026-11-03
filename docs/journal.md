@@ -984,3 +984,73 @@ pièges dans le même contexte.
 - Pages vérifiées : liste des enquêtes, alerte couverte, alertes non enquêtées avec leur
   motif, rapport sans IA lisible, bandeau levé après la prise en compte.
 
+
+## J7 — Livraison et formation
+
+### J7.1 : AgentPilot dans Docker Compose, et rotation des logs
+
+*2026-11-03*
+
+**Fait**
+- **Image d'AgentPilot** (`agentpilot/Dockerfile`) : `python:3.12-slim` et uv, comme ShopSim,
+  extras `mcp` et `agent` (le Claude Agent SDK embarque la CLI). Copies explicites :
+  `agentpilot/`, `mcp_server/`, `observability/`, `agents/`, et de `evals/` les seuls modules
+  sans données (`__init__.py`, `policy.py`, `ground_truth.py`, qui n'est que le schéma des
+  énumérations importé par `agentpilot/schemas.py`). Jamais la vérité terrain, le CLAUDE.md
+  développeur, `.env` ni les tests. Utilisateur non root (UID 1000, celui de l'hôte dans
+  Compose), `HOME=/tmp`.
+- **Serveurs MCP des agents** lancés par `sys.executable` au lieu de `.venv/bin/python` : le
+  même interpréteur en local, celui de l'image dans le conteneur.
+- **Compose** : service `agentpilot` (après `db` et `app` en bonne santé, santé lue sur
+  `/control/status`), publié sur 127.0.0.1:8001, environnement champ par champ (jamais
+  `env_file`, CHAOS_TOKEN absent), clé d'API par l'interpolation de Compose.
+- **Démarrer ne dépense rien** : `AGENTPILOT_PAUSE_ON_START` (1 par défaut, en local comme
+  dans Docker) met la boucle Support en pause et coupe l'enquête automatique à chaque
+  démarrage (« par démarrage du service » sur `/control`). Une pause automatique garde son
+  motif. Les actions approuvées par un humain restent réessayées.
+- **Supervision sur le réseau Docker** : `network_mode: host` retiré partout. Prometheus
+  collecte `app:8000` et `agentpilot:8001`, Alertmanager envoie à `agentpilot:8001`, Grafana
+  lit `prometheus:9090` ; ports publiés sur 127.0.0.1 seulement.
+- **Évaluation de l'agent Ops** : le lanceur démarre le conteneur
+  (`docker compose up -d --build --wait agentpilot`, budget et architecture passés à
+  Compose), et l'arrête à la fin ; son gardien aussi, après un `kill -9`. `evals.run` et
+  `agentpilot.reset` disent d'arrêter le conteneur quand le verrou est pris.
+- **Rotation des logs** : un fichier par jour UTC (`shopsim-2026-11-03.jsonl`), choisi par
+  l'heure de l'événement, jamais renommé ni tronqué ; conservation `LOG_RETENTION_DAYS`
+  (7 jours par défaut). Les outils de lecture parcourent les fichiers du plus récent au plus
+  ancien et lisent encore l'ancien fichier sans date.
+
+**Décisions**
+- **Un fichier par jour plutôt qu'un renommage** : plusieurs processus écrivent les mêmes
+  logs (le service, un serveur MCP par exécution, ShopSim dans son conteneur). Avec un
+  renommage, un processus écrirait encore dans le fichier renommé ou en perdrait des
+  lignes ; ici chacun ouvre le fichier du jour en ajout (`O_APPEND`) et écrit chaque ligne
+  en un seul `write`.
+- **Pause à chaque démarrage**, plus seulement au premier : l'état gardé en base relançait
+  une boucle laissée en marche, donc un `docker compose up` pouvait dépenser. Un humain
+  relance après chaque démarrage.
+- **`--build` au démarrage du conteneur par l'évaluation Ops** (écart avec le plan, qui
+  prévoyait `up -d --wait`) : une image plus ancienne évaluerait un autre code que le commit
+  noté dans les résultats ; le cache de Docker rend la reconstruction rapide.
+- **Durée de conservation invalide** (pas un entier, moins d'un jour) : valeur par défaut.
+  Sinon l'erreur tombait dans l'écriture du log et la première ligne de chaque jour était
+  perdue.
+
+**Vérification réelle** (2026-11-03, heures UTC)
+- `pytest` complet réussi. `docker compose up -d --build` : les 6 services démarrent,
+  `db`, `app` et `agentpilot` en bonne santé, tous les ports sur 127.0.0.1.
+- `check_health` : ShopSim, AgentPilot, Prometheus et Alertmanager `ok`. Prometheus collecte
+  `app:8000` et `agentpilot:8001` (cible à 0 les premières secondes, le temps du démarrage).
+- **Démarrage sans dépense** : une boucle laissée en marche avant l'arrêt est remise en pause
+  à 21:22:24 (`loop.paused`), enquête automatique coupée (vu sur `/control`).
+- **Isolement depuis le conteneur** : `/checks/support` (14 outils, aucune réponse piège,
+  0,030 $) et `/checks/ops` (5 outils Ops, aucune réponse piège, 0,030 $) réussis.
+- **Secrets** : aucun `CHAOS_TOKEN` dans l'environnement du conteneur, pas de `/srv/.env`,
+  UID 1000.
+- **Alerte par le réseau Docker** : générateur et `db_errors` ; deux `ShopSimHighErrorRate`
+  (`/orders/{order_id}`, `/customers/{customer_id}/orders`) reçues par AgentPilot depuis
+  Alertmanager ; aucune enquête (interrupteur coupé).
+- **Rotation** : `shopsim-`, `agentpilot-` et `ops_mcp-2026-11-03.jsonl` écrits par les
+  conteneurs avec l'utilisateur de l'hôte ; `observability.query --since 5` retrouve les
+  lignes. Les anciens fichiers sans date restent lus, et seront supprimés une fois plus
+  vieux que la conservation.

@@ -9,7 +9,7 @@ Par défaut, le serveur est en lecture seule. Les outils d'action ne sont charg�
 Le serveur s'arrête avec le processus qui l'a lancé (la CLI Claude Code), même tué brutalement :
 pas de serveur orphelin (`mcp_server/parent_watch.py`).
 
-Logs JSON sur stderr et dans `$LOG_DIR/mcp.jsonl` : une ligne `tool.call` par appel d'outil
+Logs JSON sur stderr et dans `$LOG_DIR/mcp-<jour>.jsonl` : une ligne `tool.call` par appel d'outil
 (identifiants et montant seulement, jamais le texte d'une réponse ni un motif) et une ligne
 `shopsim.call` par requête. Toute la vie du serveur appartient à la trace reçue dans
 `TRACEPARENT` (AgentPilot lance un serveur par exécution) ; sans elle, il en crée une.

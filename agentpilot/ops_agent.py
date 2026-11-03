@@ -18,6 +18,7 @@ consigne donne l'heure réelle du lancement, jamais la date de la simulation.
 
 import hashlib
 import os
+import sys
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -264,7 +265,8 @@ def mcp_server_config(
         env[trace.TRACEPARENT_ENV] = trace.traceparent(trace_id)
     return {
         "type": "stdio",
-        "command": str(REPO_ROOT / ".venv" / "bin" / "python"),
+        # Interpréteur du service : `.venv` en local, celui de l'image dans Docker
+        "command": sys.executable,
         "args": ["-m", "mcp_server.ops.server"],
         "env": env,
     }

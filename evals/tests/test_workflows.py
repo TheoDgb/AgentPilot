@@ -153,6 +153,9 @@ def test_grading_checks_the_versioned_thresholds_and_artifacts_skip_chaos_logs()
     assert "--thresholds evals/thresholds.toml" in " ".join(grade["run"].split())
     [upload] = [s for s in steps(workflow) if "upload-artifact@" in s.get("uses", "")]
     assert "chaos" not in upload["with"]["path"]
+    # Logs du jour (rotation, J7.1) : un motif par service, aucun autre nom
+    logs = [line for line in upload["with"]["path"].split() if line.startswith("logs/")]
+    assert logs == ["logs/agentpilot-*.jsonl", "logs/mcp-*.jsonl", "logs/shopsim-*.jsonl"]
     assert upload["if"] == "always()"
 
 

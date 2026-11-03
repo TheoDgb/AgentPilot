@@ -7,3 +7,7 @@
 .ruff_cache
 **/__pycache__
 *.egg-info
+# Données locales, volumineuses ou privées : jamais dans une image
+logs
+runs
+evals/results

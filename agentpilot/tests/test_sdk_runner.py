@@ -1,6 +1,7 @@
 """Lancement de l'agent Support par le Claude Agent SDK, avec un faux SDK (aucun appel réel)."""
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -118,7 +119,7 @@ async def test_options_use_empty_temporary_dirs_and_mcp_with_actions() -> None:
     assert options.env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
     assert options.env["ANTHROPIC_API_KEY"] == "sk-ant-test"
     server = options.mcp_servers["shopsim"]  # type: ignore[index]
-    assert server["command"] == str(REPO_ROOT / ".venv" / "bin" / "python")
+    assert server["command"] == sys.executable
     # Actions ouvertes pour le serveur MCP de cet agent seulement (valeur exacte)
     assert server["env"]["SHOPSIM_MCP_ACTIONS"] == "1"
     assert "SHOPSIM_MCP_ACTIONS" not in options.env

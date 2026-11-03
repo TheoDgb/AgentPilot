@@ -1,10 +1,13 @@
 """Lecture des logs JSON, base des outils de logs du serveur MCP Ops (`mcp_server/ops/`).
 
-Le service se choisit dans une liste fixe (`SERVICES`), jamais par un chemin : `chaos.jsonl`,
-et tout autre fichier, restent hors de portée ; un lien symbolique est refusé.
+Le service se choisit dans une liste fixe (`SERVICES`), jamais par un chemin : les fichiers
+`chaos-…`, et tout autre nom, restent hors de portée ; un lien symbolique est refusé.
 
-Avec une fenêtre (`since`), le fichier est lu depuis la fin et la lecture s'arrête une fois la
-fenêtre passée (à `ORDER_MARGIN` près) : les logs ne sont jamais découpés et grossissent vite.
+Un service a un fichier par jour (`shopsim-2026-11-04.jsonl`, rotation de
+`observability.logs`), plus l'ancien fichier sans date tant qu'il existe. Avec une fenêtre
+(`since`), les fichiers sont lus du plus récent au plus ancien, chacun depuis la fin, et la
+lecture s'arrête une fois la fenêtre passée (à `ORDER_MARGIN` près) : une fenêtre à cheval sur
+minuit lit les deux fichiers.
 
 En ligne de commande, les trois services fusionnés par heure :
 `python -m observability.query --trace <trace_id>` (voir `--help`).
@@ -16,9 +19,11 @@ import os
 import sys
 from collections import deque
 from collections.abc import Iterator, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import IO, Any
+
+from observability.logs import segments as _segments
 
 SERVICES = ("shopsim", "mcp", "agentpilot")
 LEVELS = ("debug", "info", "warning", "error", "critical")
@@ -29,13 +34,17 @@ ORDER_MARGIN = timedelta(seconds=60)
 BLOCK_SIZE = 64 * 1024
 
 
-def log_file(log_dir: Path, service: str) -> Path:
+def log_files(log_dir: Path, service: str) -> list[tuple[date | None, Path]]:
+    """Fichiers d'un service de la liste fixe, du plus récent au plus ancien (l'ancien fichier
+    sans date en dernier). Un lien symbolique est refusé."""
     if service not in SERVICES:
         raise ValueError(f"service inconnu : {service!r} (attendu : {', '.join(SERVICES)})")
-    path = log_dir / f"{service}.jsonl"
-    if path.is_symlink():
+    found = _segments(log_dir, service)
+    if any(path.is_symlink() for _, path in found):
         raise ValueError(f"fichier de logs refusé (lien symbolique) : {service}")
-    return path
+    dated = [(day, path) for day, path in found if day is not None]
+    legacy = [(day, path) for day, path in found if day is None]
+    return dated[::-1] + legacy
 
 
 def _parse(raw: bytes | str) -> dict[str, Any] | None:
@@ -52,14 +61,16 @@ def _open(path: Path, mode: str) -> IO[Any]:
     return os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), mode, encoding=None)
 
 
-def _lines(path: Path) -> Iterator[dict[str, Any]]:
-    if not path.is_file():
-        return
-    with _open(path, "rb") as file:
-        for raw in file:
-            line = _parse(raw)
-            if line is not None:
-                yield line
+def _lines(paths: Sequence[Path]) -> Iterator[dict[str, Any]]:
+    """Lignes des fichiers donnés, dans cet ordre."""
+    for path in paths:
+        if not path.is_file():
+            continue
+        with _open(path, "rb") as file:
+            for raw in file:
+                line = _parse(raw)
+                if line is not None:
+                    yield line
 
 
 def _reversed_raw(path: Path) -> Iterator[bytes]:
@@ -83,19 +94,22 @@ def _reversed_raw(path: Path) -> Iterator[bytes]:
 def recent_lines(log_dir: Path, service: str, since: datetime) -> Iterator[dict[str, Any]]:
     """Lignes depuis `since`, de la plus récente à la plus ancienne ; la lecture s'arrête une
     fois passée `since - ORDER_MARGIN`."""
-    path = log_file(log_dir, service)
-    if not path.is_file():
-        return
     stop = since - ORDER_MARGIN
-    for raw in _reversed_raw(path):
-        line = _parse(raw)
-        if line is None:
-            continue
-        at = datetime.fromisoformat(line["ts"])
-        if at < stop:
+    for day, path in log_files(log_dir, service):
+        # Fichier d'un jour entièrement avant la fenêtre : les suivants le sont aussi
+        if day is not None and day < stop.date():
             return
-        if at >= since:
-            yield line
+        if not path.is_file():
+            continue
+        for raw in _reversed_raw(path):
+            line = _parse(raw)
+            if line is None:
+                continue
+            at = datetime.fromisoformat(line["ts"])
+            if at < stop:
+                return
+            if at >= since:
+                yield line
 
 
 def read_logs(
@@ -114,7 +128,7 @@ def read_logs(
     `level` : niveau minimal ; `status_min` : code HTTP minimal (500 = erreurs serveur). Avec
     `since`, lecture depuis la fin du fichier (`recent_lines`).
     """
-    path = log_file(log_dir, service)
+    paths = [path for _, path in log_files(log_dir, service)][::-1]
     if level is not None and level not in LEVELS:
         raise ValueError(f"niveau inconnu : {level!r}")
     minimum = LEVELS.index(level) if level is not None else 0
@@ -139,7 +153,7 @@ def read_logs(
                     break
         return newest[::-1]
     found: deque[dict[str, Any]] = deque(maxlen=limit)
-    for line in _lines(path):
+    for line in _lines(paths):
         if keep(line):
             found.append(line)
     return list(found)

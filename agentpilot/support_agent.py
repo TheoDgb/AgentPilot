@@ -5,6 +5,7 @@ sous hooks), contrôle des outils réellement disponibles, validation de la déc
 vérification de la consigne reçue (`--check`).
 """
 
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -156,7 +157,7 @@ def mcp_server_config(
 ) -> dict[str, Any]:
     """Serveur MCP shopsim en chemins absolus ; lecture seule sauf `actions` (service
     AgentPilot, avec hooks). `trace_id` : trace de l'exécution, que le serveur transmet à
-    ShopSim ; `log_dir` : dossier de ses logs JSON (`mcp.jsonl`)."""
+    ShopSim ; `log_dir` : dossier de ses logs JSON (`mcp-<jour>.jsonl`)."""
     env = {
         "PYTHONPATH": str(REPO_ROOT),
         "SHOPSIM_URL": shopsim_url,
@@ -169,7 +170,8 @@ def mcp_server_config(
         env["LOG_DIR"] = str(log_dir)
     return {
         "type": "stdio",
-        "command": str(REPO_ROOT / ".venv" / "bin" / "python"),
+        # Interpréteur du service : `.venv` en local, celui de l'image dans Docker
+        "command": sys.executable,
         "args": ["-m", "mcp_server.server"],
         "env": env,
     }

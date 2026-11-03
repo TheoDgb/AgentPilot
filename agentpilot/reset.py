@@ -71,7 +71,7 @@ def main(
         if not locked:
             print(
                 "Le service AgentPilot est lancé (ou une autre remise à zéro) : l'arrêter "
-                "avant de remettre à zéro.",
+                "avant de remettre à zéro (`docker compose stop agentpilot`, ou le service local).",
                 file=sys.stderr,
             )
             return 1

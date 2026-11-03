@@ -3,11 +3,14 @@
     python -m evals.ops_run --scenarios db_errors,false_alert --name verif
     python -m evals.ops_run --passes 2 --max-budget-usd 5
 
-Prérequis : la pile Docker en marche (ShopSim, Prometheus, Alertmanager), le service AgentPilot
-**arrêté** (le lanceur le démarre lui-même), `CHAOS_TOKEN` dans `.env` seulement, la clé d'API.
+Prérequis : la pile Docker en marche (ShopSim, Prometheus, Alertmanager), AgentPilot **arrêté**
+(`docker compose stop agentpilot` : le lanceur démarre lui-même son conteneur), `CHAOS_TOKEN`
+dans `.env` seulement, la clé d'API.
 
-Déroulé : pannes désactivées, remise à zéro complète (`agentpilot.reset.reset_all`), puis
-AgentPilot et le générateur de trafic lancés en sous-processus (liés au lanceur). Pour chaque
+Déroulé : pannes désactivées, remise à zéro complète (`agentpilot.reset.reset_all`, verrou de la
+base libre), puis AgentPilot dans son conteneur (`docker compose up -d --wait agentpilot`, avec
+le budget et l'architecture de l'évaluation : Prometheus et Alertmanager le joignent par le
+réseau Docker) et le générateur de trafic en sous-processus (lié au lanceur). Pour chaque
 scénario : attente d'un état propre (aucune panne, aucune alerte active, `history_min` minutes
 de trafic normal, latences et erreurs normales selon Prometheus), pannes activées et arrêtées
 aux minutes prévues, charge de remboursements ou fausse alerte, attente de l'alerte attendue,
@@ -18,11 +21,12 @@ La boucle de l'agent Support reste en pause pendant toute l'évaluation : le lan
 relance jamais et s'arrête (`aborted`) s'il la trouve en marche.
 
 Fin, toujours (fin normale, Ctrl+C, SIGTERM, erreur) : charge arrêtée et vidée, pannes
-désactivées, fausse alerte résolue, générateur et AgentPilot arrêtés. Lanceur tué (`kill -9`) :
+désactivées, fausse alerte résolue, générateur et conteneur d'AgentPilot arrêtés. Lanceur tué
+(`kill -9`) :
 son gardien (`evals.ops_guard`) fait le même nettoyage, dans le même ordre.
 
 Le lanceur n'écrit jamais dans les logs que lit l'agent Ops : son journal va dans
-`logs/ops_eval.jsonl`, hors de la liste fixe des services lisibles.
+`logs/ops_eval-<jour>.jsonl`, hors de la liste fixe des services lisibles.
 
 Budget : une enquête n'est lancée que si la dépense de l'évaluation plus 1 $ (plafond d'une
 enquête) reste sous `--max-budget-usd`. Erreur d'infrastructure pendant une enquête : la série
@@ -670,6 +674,35 @@ def stop_process(process: subprocess.Popen[str] | None) -> None:
 # --- Ligne de commande ---------------------------------------------------------------------
 
 
+COMPOSE = ["docker", "compose"]
+
+
+def compose_up() -> list[str]:
+    """Démarre le conteneur d'AgentPilot et attend qu'il soit en bonne santé (J7.1). Image
+    reconstruite si le code a changé (cache de Docker sinon) : l'évaluation porte sur le commit
+    noté dans ses résultats, jamais sur une image plus ancienne."""
+    return [*COMPOSE, "up", "-d", "--build", "--wait", "agentpilot"]
+
+
+def compose_stop() -> list[str]:
+    return [*COMPOSE, "stop", "agentpilot"]
+
+
+def start_container(env: Mapping[str, str]) -> None:
+    """AgentPilot dans son conteneur, avec le budget et l'architecture de l'évaluation, passés à
+    Compose par l'environnement (`docker-compose.yml`). Il démarre en pause, enquête automatique
+    coupée. Prometheus et Alertmanager le joignent par le réseau Docker."""
+    done = subprocess.run(
+        compose_up(), cwd=REPO_ROOT, env=dict(env), capture_output=True, text=True, timeout=600
+    )
+    if done.returncode != 0:
+        raise Refused(f"conteneur AgentPilot non démarré : {done.stderr.strip()[-500:]}")
+
+
+def stop_container() -> None:
+    subprocess.run(compose_stop(), cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
+
+
 def reachable(url: str) -> bool:
     try:
         return httpx.get(url, timeout=3).status_code < 500
@@ -690,7 +723,8 @@ def check_ready(environ: Mapping[str, str], probe: Callable[[str], bool] = reach
         raise Refused(str(exc)) from None
     if probe(f"{SERVICE_URL}/control/status"):
         raise Refused(
-            "Le service AgentPilot tourne déjà : l'arrêter, le lanceur le démarre lui-même."
+            "Le service AgentPilot tourne déjà : l'arrêter (`docker compose stop agentpilot`, ou "
+            "le service local), le lanceur démarre lui-même son conteneur."
         )
     for name, url in (
         ("ShopSim", f"{SHOPSIM_URL}/health"),
@@ -817,7 +851,8 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
     stack = HttpStack(token)
     guard = Guard(environ)
     guard.notify({"shopsim_url": SHOPSIM_URL, "agentpilot_url": SERVICE_URL})
-    service = traffic = None
+    traffic = None
+    container = False
     evaluation: OpsEvaluation | None = None
     status = RunStatus.INTERRUPTED
     started = datetime.now(UTC)
@@ -832,11 +867,10 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
                 )
             reset_all(engine)
         env = service_env(environ, args.max_budget_usd, args.architecture)
-        service = spawn(
-            [str(REPO_ROOT / ".venv" / "bin" / "uvicorn"), "agentpilot.app:app", "--port", "8001"],
-            env,
-        )
-        guard.notify({"service": service.pid})
+        # Le gardien l'arrête aussi si le lanceur meurt pendant le démarrage
+        guard.notify({"compose": True})
+        container = True
+        start_container(env)
         wait_ready(f"{SERVICE_URL}/control/status")
         traffic = spawn([sys.executable, "-m", "traffic"], environ)
         guard.notify({"traffic": traffic.pid})
@@ -917,7 +951,8 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] = os.envi
         with contextlib.suppress(Exception):
             asyncio.run(stack.turn_off_all())
         stop_process(traffic)
-        stop_process(service)
+        if container:
+            stop_container()
         guard.done()
     print(f"État : {status.value}")
     return 0 if status is RunStatus.COMPLETED else 2

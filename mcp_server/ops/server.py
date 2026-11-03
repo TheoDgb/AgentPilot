@@ -5,11 +5,11 @@ protocole MCP.
 
 Séparé du serveur de l'agent Support (`mcp_server.server`), dont il n'importe aucun outil :
 aucun outil d'écriture, aucun outil sur les tickets, les commandes ou les clients. Aucun accès
-au Chaos : ni `chaos.jsonl` (services de logs sur liste fixe, jamais un chemin), ni `/chaos`
+au Chaos : ni `chaos-…` (services de logs sur liste fixe, jamais un chemin), ni `/chaos`
 (adresses et chemins fixes, `mcp_server/ops/sources.py`), ni jeton.
 
 Variables : `LOG_DIR` (dossier des logs à lire, `logs/` par défaut ; aussi celui où le serveur
-écrit ses propres logs, `ops_mcp.jsonl`, que les outils ne lisent jamais), `PROMETHEUS_URL`,
+écrit ses propres logs, `ops_mcp-<jour>.jsonl`, que les outils ne lisent jamais), `PROMETHEUS_URL`,
 `AGENTPILOT_URL`, `SHOPSIM_URL`, `ALERTMANAGER_URL`, `OPS_HTTP_TIMEOUT_S` (5 s).
 
 S'arrête avec le processus qui l'a lancé (`mcp_server/parent_watch.py`). Trace reçue dans
@@ -33,7 +33,7 @@ from mcp_server.tool_logging import logged  # noqa: E402
 from observability import trace  # noqa: E402
 from observability.logs import configure, log_event  # noqa: E402
 
-# Fichier de logs du serveur lui-même (`ops_mcp.jsonl`), hors de la liste lue par les outils
+# Fichier de logs du serveur lui-même (`ops_mcp-<jour>.jsonl`), hors de la liste lue par les outils
 LOG_SERVICE = "ops_mcp"
 # Seuls arguments d'outil écrits dans les logs (valeurs de listes fermées ou nombres), et le nom
 # de leur champ : `service`, `level` et `status` ont déjà un sens dans chaque ligne

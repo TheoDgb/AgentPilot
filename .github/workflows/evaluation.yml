@@ -129,13 +129,14 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: evaluation-${{ github.run_id }}
-          # Logs JSON sur liste blanche (ni secret ni texte de client) ; jamais chaos.jsonl
+          # Logs JSON sur liste blanche (ni secret ni texte de client), un fichier par jour
+          # (J7.1) ; jamais ceux des pannes
           path: |
             evals/results/*.json
             report.md
-            logs/agentpilot.jsonl
-            logs/mcp.jsonl
-            logs/shopsim.jsonl
+            logs/agentpilot-*.jsonl
+            logs/mcp-*.jsonl
+            logs/shopsim-*.jsonl
           if-no-files-found: warn
           retention-days: 30
 

@@ -4,6 +4,7 @@ d'isolement. Aucun appel réel, aucune base."""
 
 import json
 import re
+import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -267,6 +268,8 @@ async def test_options_isolate_the_ops_agent(
     # Serveur MCP Ops, environnement construit champ par champ
     assert set(options.mcp_servers) == {"ops"}  # type: ignore[arg-type]
     server = options.mcp_servers["ops"]  # type: ignore[index]
+    # Interpréteur du service (J7.1) : `.venv` en local, celui de l'image dans Docker
+    assert server["command"] == sys.executable
     assert server["args"] == ["-m", "mcp_server.ops.server"]
     env = server["env"]
     assert env["PROMETHEUS_URL"] == "http://prometheus.test:9090"
@@ -458,7 +461,7 @@ async def test_isolation_check_passes(monkeypatch: pytest.MonkeyPatch) -> None:
     ("trap", "value"),
     [
         ("fault_token_header", "X-Chaos-Token"),
-        ("fault_log_file", "chaos.jsonl"),
+        ("fault_log_file", "chaos-2026-11-03.jsonl"),
         ("incidents_ground_truth_path", "evals/incidents.jsonl"),
         ("tickets_ground_truth_path", "evals/tickets.jsonl"),
         ("postgres_host_port", "5433"),
@@ -495,6 +498,14 @@ def test_developer_only_facts_are_in_the_developer_claude_md() -> None:
     """Les réponses pièges existent bien dans le CLAUDE.md développeur : une fuite serait
     détectée."""
     developer = (ops_agent.REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-    for fact in ("X-Chaos-Token", "chaos.jsonl", "incidents.jsonl", "evals/tickets.jsonl", "5433"):
+    # Logs des pannes : un fichier par jour depuis J7.1 (`chaos-<jour>.jsonl`)
+    facts = (
+        "X-Chaos-Token",
+        "chaos-<jour>.jsonl",
+        "incidents.jsonl",
+        "evals/tickets.jsonl",
+        "5433",
+    )
+    for fact in facts:
         assert fact in developer
     assert re.search(r"Agent Ops", developer)

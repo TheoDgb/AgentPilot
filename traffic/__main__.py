@@ -6,9 +6,10 @@
 
 Réglages : options, sinon variables `TRAFFIC_RPS`, `TRAFFIC_TICKETS_PER_HOUR`,
 `TRAFFIC_MAX_TICKETS`, `TRAFFIC_DURATION_S`, `TRAFFIC_SEED`. ShopSim : `SHOPSIM_URL`
-(`http://localhost:8000` par défaut). Logs JSON sur stderr, et dans `$LOG_DIR/traffic.jsonl` si
-`LOG_DIR` est défini : un compte rendu toutes les 30 s (requêtes par route et code, abandons,
-tickets créés). Arrêt : Ctrl+C ou SIGTERM (`docker compose stop traffic`).
+(`http://localhost:8000` par défaut). Logs JSON sur stderr, et dans
+`$LOG_DIR/traffic-<jour>.jsonl` si `LOG_DIR` est défini : un compte rendu toutes les 30 s
+(requêtes par route et code, abandons, tickets créés). Arrêt : Ctrl+C ou SIGTERM
+(`docker compose stop traffic`).
 """
 
 import argparse

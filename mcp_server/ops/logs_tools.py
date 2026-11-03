@@ -1,7 +1,7 @@
 """Outils de logs : recherche filtrée et résumé d'une période, sur une liste fixe de services.
 
 Le service se choisit parmi `observability.query.SERVICES` (`shopsim`, `mcp`, `agentpilot`) :
-jamais un chemin, jamais `chaos.jsonl`. Le dossier vient de l'environnement (`LOG_DIR`), pas
+jamais un chemin, jamais `chaos-…`. Le dossier vient de l'environnement (`LOG_DIR`), pas
 des arguments. Les docstrings (en anglais) sont les descriptions lues par le modèle.
 """
 
@@ -16,7 +16,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from mcp_server.ops import common
-from observability.query import LEVELS, log_file, recent_lines
+from observability.query import LEVELS, log_files, recent_lines
 
 LOG_DIR_ENV = "LOG_DIR"
 DEFAULT_LOG_DIR = Path("logs")
@@ -38,10 +38,10 @@ def _window(service: str, since_minutes: int) -> tuple[datetime, list[dict[str, 
     """Heure actuelle, lignes de la fenêtre (les plus récentes d'abord) et note éventuelle."""
     reference = common.now()
     try:
-        path = log_file(log_dir(), service)
+        files = log_files(log_dir(), service)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
-    if not path.is_file():
+    if not any(path.is_file() for _, path in files):
         return reference, [], f"Aucun fichier de logs pour {service}."
     since = reference - timedelta(minutes=since_minutes)
     try:

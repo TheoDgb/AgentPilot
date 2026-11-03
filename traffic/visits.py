@@ -5,7 +5,7 @@ jusqu'au premier 404 (les ids du seed sont contigus), puis leurs commandes. Les 
 demandent que ce qui existe : pas de livraison pour une commande non expédiée. Seul le parcours
 « numéro mal tapé » donne un 404, rarement : sans panne, le taux d'erreurs reste proche de 0.
 
-Chaque parcours a sa trace (`traceparent`) : ses requêtes se suivent dans `shopsim.jsonl`.
+Chaque parcours a sa trace (`traceparent`) : ses requêtes se suivent dans `shopsim-<jour>.jsonl`.
 """
 
 import functools

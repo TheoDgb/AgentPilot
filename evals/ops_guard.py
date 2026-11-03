@@ -9,12 +9,14 @@ Entrée fermée sans `done` (lanceur mort) : nettoyage, **dans cet ordre** :
 1. arrêt de la charge de remboursements, et attente de sa fin (l'envoi en cours va au bout) ;
 2. pannes désactivées (seulement ensuite : un remboursement parti après la panne réussirait) ;
 3. fausse alerte résolue ;
-4. arrêt du générateur de trafic, puis d'AgentPilot.
+4. arrêt du générateur de trafic, puis d'AgentPilot (conteneur `agentpilot` de Docker Compose,
+   J7.1, ou processus).
 """
 
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterable
@@ -26,13 +28,17 @@ import httpx
 
 from shopsim import chaos_cli
 
-ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+ENV_FILE = REPO_ROOT / ".env"
 GRACE_S = 30.0
+COMPOSE_STOP = ["docker", "compose", "stop", "agentpilot"]
 
 
 @dataclass
 class GuardState:
     service: int | None = None
+    # AgentPilot lancé par Docker Compose (J7.1) : arrêté par `docker compose stop agentpilot`
+    compose: bool = False
     traffic: int | None = None
     load: int | None = None
     fake_alert: dict[str, Any] | None = None
@@ -93,12 +99,17 @@ def resolve_alert(agentpilot_url: str, payload: dict[str, Any]) -> None:
     httpx.post(f"{agentpilot_url}/alerts/webhook", json=payload, timeout=10)
 
 
+def stop_compose() -> None:
+    subprocess.run(COMPOSE_STOP, cwd=REPO_ROOT, check=True, timeout=120, capture_output=True)
+
+
 def cleanup(
     state: GuardState,
     *,
     stop: Callable[[int], None] = stop_pid,
     disable_faults: Callable[[str], None] = faults_off,
     resolve: Callable[[str, dict[str, Any]], None] = resolve_alert,
+    stop_container: Callable[[], None] = stop_compose,
 ) -> list[str]:
     """Nettoyage après la mort du lanceur ; renvoie les étapes faites, dans l'ordre."""
     steps = []
@@ -121,6 +132,8 @@ def cleanup(
         attempt("traffic", lambda: stop(traffic))
     if service is not None:
         attempt("service", lambda: stop(service))
+    if state.compose:
+        attempt("service", stop_container)
     return steps
 
 

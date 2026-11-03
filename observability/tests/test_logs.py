@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from observability import logs, query, trace
-from observability.logs import configure, configure_isolated, log_event, register_secret
+from observability.logs import configure, configure_isolated, log_event, read_lines, register_secret
 from observability.query import main, read_logs, recent_lines
 
 REQUIRED = {"ts", "level", "service", "event", "trace_id", "logger"}
@@ -163,7 +163,7 @@ def test_service_file_and_stderr(tmp_path: Path) -> None:
     log_event(logger, "loop.resumed")
 
     assert lines(out.getvalue())[0]["event"] == "loop.resumed"
-    assert lines((tmp_path / "test.jsonl").read_text())[0]["event"] == "loop.resumed"
+    assert json.loads(read_lines(tmp_path, "test.jsonl")[0])["event"] == "loop.resumed"
 
 
 def test_isolated_logger_writes_only_its_file(tmp_path: Path, stream: io.StringIO) -> None:
@@ -173,8 +173,8 @@ def test_isolated_logger_writes_only_its_file(tmp_path: Path, stream: io.StringI
     log_event(private, "http.request", logging.WARNING, status=403)
 
     assert stream.getvalue() == ""
-    assert lines((tmp_path / "private.jsonl").read_text())[0]["status"] == 403
-    assert not (tmp_path / "test.jsonl").exists()
+    assert json.loads(read_lines(tmp_path, "private.jsonl")[0])["status"] == 403
+    assert read_lines(tmp_path, "test.jsonl") == []
 
 
 def test_isolated_logger_without_directory_writes_nowhere(

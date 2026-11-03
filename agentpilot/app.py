@@ -24,7 +24,7 @@ de démarrer s'il est déjà tenu : un seul service par base, et jamais pendant 
 Au démarrage, une boucle de fond (`agentpilot/worker.py`) traite les tickets ouverts et
 reprend ce qui a été interrompu ; elle démarre en pause au premier lancement.
 
-Logs JSON (`observability`) sur stderr et dans `<AGENTPILOT_LOG_DIR>/agentpilot.jsonl`
+Logs JSON (`observability`) sur stderr et dans `<AGENTPILOT_LOG_DIR>/agentpilot-<jour>.jsonl`
 (`logs/` à la racine du dépôt par défaut), configurés au démarrage : les tests n'écrivent
 aucun fichier sans le demander.
 """
@@ -42,7 +42,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from agentpilot import alerts, metrics, ops_agent, sdk_runner, web
+from agentpilot import alerts, control, metrics, ops_agent, sdk_runner, web
 from agentpilot.api_schemas import ControlStatus, RunCreated, RunRead
 from agentpilot.db import SessionLocal, engine, init_db, service_lock
 from agentpilot.env_file import setting
@@ -97,6 +97,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with app.state.session_factory() as session:
             # Reprise : le premier tour de la boucle relance ces tickets
             mark_interrupted(session)
+        # Démarrer ne dépense rien : un humain relance la boucle et l'enquête automatique
+        control.pause_on_start(app.state.session_factory)
         worker: Worker = app.state.worker
         serving = asyncio.create_task(worker.serve())
         yield

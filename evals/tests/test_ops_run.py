@@ -705,6 +705,72 @@ def test_real_guard_stops_the_processes_when_its_pipe_closes(tmp_path: Path) -> 
         assert sleeper.wait(timeout=10) is not None
 
 
+def test_guard_stops_the_agentpilot_container_last() -> None:
+    """AgentPilot dans son conteneur (J7.1) : le gardien l'arrête, après le générateur."""
+    state = ops_guard.read_state([json.dumps({"compose": True, "traffic": 12})])
+    calls: list[str] = []
+
+    steps = ops_guard.cleanup(
+        state,
+        stop=lambda pid: calls.append(f"stop {pid}"),
+        disable_faults=lambda url: calls.append("faults"),
+        stop_container=lambda: calls.append("compose stop"),
+    )
+
+    assert calls == ["faults", "stop 12", "compose stop"]
+    assert steps == ["faults", "traffic", "service"]
+    assert ops_guard.COMPOSE_STOP == ["docker", "compose", "stop", "agentpilot"]
+
+
+# --- AgentPilot dans son conteneur (J7.1) ----------------------------------------------------
+
+
+def test_compose_commands() -> None:
+    assert ops_run.compose_up() == [
+        "docker",
+        "compose",
+        "up",
+        "-d",
+        "--build",
+        "--wait",
+        "agentpilot",
+    ]
+    assert ops_run.compose_stop() == ["docker", "compose", "stop", "agentpilot"]
+
+
+def test_container_gets_the_budget_and_architecture_through_compose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Budget et architecture passés à Compose par l'environnement, qui les met dans le
+    conteneur (`${AGENTPILOT_DAILY_BUDGET_USD:-5}` de docker-compose.yml)."""
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
+        calls.append((command, kwargs.get("env") or {}))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    env = service_env({"PATH": "/bin"}, Decimal("4.5"), ops_agent.Architecture.SUBAGENTS)
+
+    ops_run.start_container(env)
+    ops_run.stop_container()
+
+    [(up, up_env), (stop, _)] = calls
+    assert up == ops_run.compose_up() and stop == ops_run.compose_stop()
+    assert up_env["AGENTPILOT_DAILY_BUDGET_USD"] == "4.5"
+    assert up_env["AGENTPILOT_OPS_ARCHITECTURE"] == "subagents"
+
+
+def test_container_that_does_not_start_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
+        return subprocess.CompletedProcess(command, 1, "", "dependency failed to start")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    with pytest.raises(Refused, match="dependency failed"):
+        ops_run.start_container({})
+
+
 # --- Charge : l'envoi en cours va au bout, plus aucun ensuite ------------------------------
 
 
@@ -754,7 +820,9 @@ def env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     ("environ", "up", "message"),
     [
         ({"CHAOS_TOKEN": "x", "ANTHROPIC_API_KEY": "k"}, set(), "CHAOS_TOKEN est dans le shell"),
-        ({"ANTHROPIC_API_KEY": "k"}, {"control"}, "tourne déjà"),
+        # Conteneur ou service local : le verrou de la base serait pris, et le lanceur démarre
+        # lui-même le conteneur
+        ({"ANTHROPIC_API_KEY": "k"}, {"control"}, "docker compose stop agentpilot"),
         ({"ANTHROPIC_API_KEY": "k"}, set(), "ShopSim injoignable"),
         ({"ANTHROPIC_API_KEY": "k"}, {"health"}, "Prometheus injoignable"),
     ],
@@ -786,8 +854,9 @@ def test_launcher_never_writes_where_the_agent_reads(tmp_path: Path) -> None:
     logs.configure_isolated("evals.ops_run", "ops_eval", tmp_path, ops_run.LOG_FILE)
     logs.log_event(ops_run.logger, "ops_eval.scenario", phase="db_errors")
 
-    assert [p.name for p in tmp_path.iterdir()] == ["ops_eval.jsonl"]
-    assert "db_errors" in (tmp_path / "ops_eval.jsonl").read_text()
+    # Un fichier par jour (J7.1), sous le nom du lanceur seulement
+    [written] = tmp_path.iterdir()
+    assert written.name.startswith("ops_eval-") and "db_errors" in written.read_text()
 
 
 # --- Architecture de l'agent Ops (J6.4) -------------------------------------------------------

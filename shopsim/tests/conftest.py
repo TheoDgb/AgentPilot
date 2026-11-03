@@ -16,7 +16,7 @@ from sqlalchemy import Engine, create_engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from observability.logs import configure, configure_isolated
+from observability.logs import configure, configure_isolated, read_lines
 from shopsim.app import clock
 from shopsim.app.db import Base, get_session
 from shopsim.app.main import CHAOS_LOGGER, app
@@ -56,11 +56,9 @@ class JsonLogs:
     stderr: io.StringIO
 
     def read(self, name: str) -> list[dict[str, Any]]:
-        """Lignes de `<dir>/<name>.jsonl` ; chacune doit être un objet JSON complet."""
-        path = self.dir / f"{name}.jsonl"
-        if not path.exists():
-            return []
-        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        """Lignes écrites sous le nom `<name>` (un fichier par jour) ; chacune doit être un
+        objet JSON complet."""
+        return [json.loads(line) for line in read_lines(self.dir, f"{name}.jsonl")]
 
     def stderr_lines(self) -> list[dict[str, Any]]:
         return [json.loads(line) for line in self.stderr.getvalue().splitlines()]

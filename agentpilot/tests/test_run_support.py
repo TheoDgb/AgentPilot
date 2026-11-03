@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -169,7 +170,7 @@ def test_mcp_config_uses_absolute_paths_and_no_secret(
     run_support.main(["36"], runs_dir=tmp_path)
 
     server = json.loads(fake.option("--mcp-config"))["mcpServers"]["shopsim"]
-    assert server["command"] == str(REPO_ROOT / ".venv" / "bin" / "python")
+    assert server["command"] == sys.executable
     assert Path(server["command"]).is_absolute()
     assert server["args"] == ["-m", "mcp_server.server"]
     assert server["env"]["PYTHONPATH"] == str(REPO_ROOT)

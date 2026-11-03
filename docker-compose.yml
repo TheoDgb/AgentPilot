@@ -28,9 +28,10 @@ services:
       CHAOS_TOKEN: ${CHAOS_TOKEN:-}
       # 1 = horloge figée au 2026-07-06 12:00 (évaluations) ; sinon elle avance depuis le seed
       SHOPSIM_FREEZE_CLOCK: ${SHOPSIM_FREEZE_CLOCK:-0}
-      # Logs JSON : shopsim.jsonl (et chaos.jsonl pour les requêtes /chaos), à côté de ceux
+      # Logs JSON : shopsim-<jour>.jsonl (et chaos-<jour>.jsonl pour les requêtes /chaos), à côté de ceux
       # d'AgentPilot et du serveur MCP
       LOG_DIR: /srv/logs
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-7}
     # Fichiers de logs à l'utilisateur de l'hôte, pas à root
     user: "${UID:-1000}:${GID:-1000}"
     volumes:
@@ -70,18 +71,58 @@ services:
       app:
         condition: service_healthy
 
-  # Supervision (J4.2). Réseau hôte (Linux seulement) : Prometheus joint ShopSim par son port
-  # publié et AgentPilot, lancé en local hors Docker sur 127.0.0.1:8001, sans que celui-ci
-  # écoute ailleurs. Les deux n'écoutent eux-mêmes que sur 127.0.0.1. À revoir quand AgentPilot
-  # passera dans Docker (J7).
+  # AgentPilot (J7.1) : service, boucle de l'agent Support, enquêtes de l'agent Ops, pages.
+  # Démarre en pause et enquête automatique coupée (AGENTPILOT_PAUSE_ON_START) : `up` ne dépense
+  # rien. Environnement champ par champ, jamais `env_file` : `.env` contient CHAOS_TOKEN, qui
+  # n'entre jamais dans ce conteneur (un test le vérifie). La clé d'API vient de `.env` par
+  # l'interpolation de Compose, dans l'environnement du conteneur seulement.
+  agentpilot:
+    build:
+      context: .
+      dockerfile: agentpilot/Dockerfile
+    environment:
+      AGENTPILOT_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-shopsim}:${POSTGRES_PASSWORD:-shopsim}@db:5432/${POSTGRES_DB:-shopsim}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AGENTPILOT_LOG_DIR: /srv/logs
+      AGENTPILOT_DAILY_BUDGET_USD: ${AGENTPILOT_DAILY_BUDGET_USD:-5}
+      AGENTPILOT_OPS_ARCHITECTURE: ${AGENTPILOT_OPS_ARCHITECTURE:-solo}
+      AGENTPILOT_OPS_MAX_PER_HOUR: ${AGENTPILOT_OPS_MAX_PER_HOUR:-6}
+      AGENTPILOT_PAUSE_ON_START: ${AGENTPILOT_PAUSE_ON_START:-1}
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-7}
+      # Sources des agents (serveurs MCP lancés dans ce conteneur), par le réseau Docker
+      SHOPSIM_URL: http://app:8000
+      PROMETHEUS_URL: http://prometheus:9090
+      ALERTMANAGER_URL: http://alertmanager:9093
+      AGENTPILOT_URL: http://localhost:8001
+    # Fichiers de logs à l'utilisateur de l'hôte, pas à root
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./logs:/srv/logs
+    # Publié sur l'hôte seulement, pas sur le réseau local
+    ports:
+      - "127.0.0.1:8001:8001"
+    depends_on:
+      db:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/control/status')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Supervision (J4.2), sur le réseau Docker (J7.1) : Prometheus collecte `app` et `agentpilot`
+  # par leur nom, Alertmanager envoie à `agentpilot`, Grafana lit `prometheus`. Ports publiés
+  # sur 127.0.0.1 seulement.
   prometheus:
     image: prom/prometheus:v3.15.1
-    network_mode: host
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=15d
-      - --web.listen-address=127.0.0.1:9090
+    ports:
+      - "127.0.0.1:9090:9090"
     volumes:
       # Configuration, règles d'alerte et leurs tests
       - ./monitoring/prometheus:/etc/prometheus:ro
@@ -90,23 +131,20 @@ services:
   # Alertes (J4.4) : reçues de Prometheus, envoyées à AgentPilot (POST /alerts/webhook)
   alertmanager:
     image: prom/alertmanager:v0.34.1
-    network_mode: host
     command:
       - --config.file=/etc/alertmanager/alertmanager.yml
       - --storage.path=/alertmanager
-      - --web.listen-address=127.0.0.1:9093
-      # Pas de mode haute disponibilité : il ouvrirait le port 9094 sur toutes les interfaces
+      # Pas de mode haute disponibilité : il ouvrirait le port 9094
       - --cluster.listen-address=
+    ports:
+      - "127.0.0.1:9093:9093"
     volumes:
       - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager-data:/alertmanager
 
   grafana:
     image: grafana/grafana:13.2.5
-    network_mode: host
     environment:
-      GF_SERVER_HTTP_ADDR: 127.0.0.1
-      GF_SERVER_HTTP_PORT: "3000"
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       # Lecture du tableau de bord sans compte ; l'administration reste derrière le mot de passe
@@ -116,6 +154,8 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_NEWS_NEWS_FEED_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
     # Tout vient des fichiers du dépôt : source de données et tableau de bord provisionnés,
     # pas de volume de données
     volumes:

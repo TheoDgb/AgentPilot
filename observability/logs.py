@@ -1,4 +1,12 @@
-"""Logs JSON : une ligne par événement, sur stderr et dans `<log_dir>/<service>.jsonl`.
+"""Logs JSON : une ligne par événement, sur stderr et dans `<log_dir>/<service>-<jour>.jsonl`.
+
+Rotation (J7.1) : un fichier par jour UTC (`shopsim-2026-11-04.jsonl`), choisi par l'heure de
+l'événement, jamais renommé ni tronqué. Plusieurs processus écrivent dans le même fichier (un
+serveur MCP par exécution dans `mcp-…`) : chacun l'ouvre en ajout (`O_APPEND`) et écrit chaque
+ligne en un seul appel système. Au changement de jour, un processus supprime les fichiers de
+son nom plus vieux que `LOG_RETENTION_DAYS` (7 par défaut) ; une suppression déjà faite par un
+autre est ignorée. L'ancien fichier sans date (`shopsim.jsonl`, d'avant J7.1) est relu par les
+outils de lecture, et supprimé quand il n'a pas été écrit depuis la durée de conservation.
 
 Chaque ligne a toujours `ts` (heure réelle UTC), `level`, `service`, `event`, `trace_id` (null
 hors trace) et `logger`, puis le contexte lié (`run_id`, `ticket_id`, `action_id`) et les
@@ -19,7 +27,7 @@ import logging
 import os
 import re
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -174,6 +182,112 @@ class JsonFormatter(logging.Formatter):
         return scrub(json.dumps(line, ensure_ascii=False, default=str))
 
 
+RETENTION_ENV = "LOG_RETENTION_DAYS"
+DEFAULT_RETENTION_DAYS = 7
+SUFFIX = ".jsonl"
+_DATED = re.compile(r"^(?P<stem>.+)-(?P<day>\d{4}-\d{2}-\d{2})\.jsonl$")
+
+
+def retention_days() -> int:
+    """Durée de conservation, relue à chaque changement de jour ; une valeur invalide (pas un
+    entier, ou moins d'un jour) donne la valeur par défaut : un log ne fait jamais tomber
+    l'appelant, et ne supprime jamais le fichier du jour."""
+    try:
+        days = int(os.environ.get(RETENTION_ENV) or DEFAULT_RETENTION_DAYS)
+    except ValueError:
+        return DEFAULT_RETENTION_DAYS
+    return days if days >= 1 else DEFAULT_RETENTION_DAYS
+
+
+def dated_name(stem: str, day: date) -> str:
+    return f"{stem}-{day.isoformat()}{SUFFIX}"
+
+
+def segments(log_dir: Path, stem: str) -> list[tuple[date | None, Path]]:
+    """Fichiers d'un nom de logs, du plus ancien au plus récent : l'ancien fichier sans date
+    (`<stem>.jsonl`, date inconnue) d'abord, puis un fichier par jour. Nom exact : `mcp` ne
+    prend jamais `ops_mcp-…`."""
+    found: list[tuple[date | None, Path]] = []
+    legacy = log_dir / f"{stem}{SUFFIX}"
+    if legacy.exists() or legacy.is_symlink():
+        found.append((None, legacy))
+    dated = []
+    for path in log_dir.glob(f"{stem}-*{SUFFIX}"):
+        match = _DATED.match(path.name)
+        if match is None or match["stem"] != stem:
+            continue
+        try:
+            dated.append((date.fromisoformat(match["day"]), path))
+        except ValueError:
+            continue
+    return found + sorted(dated)
+
+
+def purge(log_dir: Path, stem: str, today: date, days: int) -> None:
+    """Supprime les fichiers de ce nom plus vieux que `days` jours (l'ancien fichier sans date :
+    selon sa dernière écriture). Déjà supprimé par un autre processus : ignoré."""
+    oldest = today - timedelta(days=days)
+    for day, path in segments(log_dir, stem):
+        if day is None:
+            written = datetime.fromtimestamp(path.lstat().st_mtime, UTC).date()
+            expired = written < oldest
+        else:
+            expired = day < oldest
+        if expired:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+class DailyFileHandler(logging.Handler):
+    """Un fichier par jour UTC de l'événement, ouvert en ajout ; une ligne = un `write`."""
+
+    def __init__(self, log_dir: Path, stem: str) -> None:
+        super().__init__()
+        self.log_dir = log_dir
+        self.stem = stem
+        self._day: date | None = None
+        self._fd: int | None = None
+
+    def _open(self, day: date) -> int:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+        path = self.log_dir / dated_name(self.stem, day)
+        # Jamais à travers un lien symbolique
+        self._fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+        self._day = day
+        try:
+            purge(self.log_dir, self.stem, day, retention_days())
+        except OSError:
+            pass
+        return self._fd
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            data = (self.format(record) + "\n").encode("utf-8")
+            day = datetime.fromtimestamp(record.created, UTC).date()
+            fd = self._fd if day == self._day and self._fd is not None else self._open(day)
+            # Un seul appel en général ; une écriture partielle (rare) est complétée
+            while data:
+                written = os.write(fd, data)
+                data = data[written:]
+        except Exception:  # noqa: BLE001  (comme logging : un log ne fait jamais tomber l'appelant)
+            self.handleError(record)
+
+    def close(self) -> None:
+        self.acquire()
+        try:
+            if self._fd is not None:
+                os.close(self._fd)
+                self._fd = None
+                self._day = None
+        finally:
+            self.release()
+        super().close()
+
+
 def _handlers(
     service: str, log_dir: Path | None, filename: str, stream: TextIO | None
 ) -> list[logging.Handler]:
@@ -183,8 +297,8 @@ def _handlers(
         handlers.append(logging.StreamHandler(stream))
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
-        # Ajout en fin de fichier : plusieurs processus peuvent écrire dans le même
-        handlers.append(logging.FileHandler(log_dir / filename, encoding="utf-8", delay=True))
+        # Fichier du jour, en ajout : plusieurs processus peuvent écrire dans le même
+        handlers.append(DailyFileHandler(log_dir, filename.removesuffix(SUFFIX)))
     for handler in handlers:
         handler.setFormatter(formatter)
         handler._observability = True  # type: ignore[attr-defined]
@@ -207,7 +321,7 @@ def configure(
     logger_name: str | None = None,
     stream: TextIO | None = sys.stderr,
 ) -> None:
-    """Logs JSON du service : stderr (`stream`) et `<log_dir>/<service>.jsonl`.
+    """Logs JSON du service : stderr (`stream`) et `<log_dir>/<service>-<jour>.jsonl`.
 
     Par défaut sur le logger racine, avec ceux de uvicorn (son journal d'accès est coupé : le
     middleware `observability.http` le remplace). `logger_name` : un seul logger, qui ne
@@ -237,8 +351,8 @@ def configure(
 def configure_isolated(
     logger_name: str, service: str, log_dir: str | Path | None, filename: str
 ) -> None:
-    """Logger écrit dans un seul fichier, et nulle part ailleurs (ni stderr, ni la racine).
-    Sans `log_dir`, rien n'est écrit."""
+    """Logger écrit dans un seul nom de fichier (un fichier par jour), et nulle part ailleurs
+    (ni stderr, ni la racine). Sans `log_dir`, rien n'est écrit."""
     logger = logging.getLogger(logger_name)
     handlers = _handlers(service, Path(log_dir) if log_dir else None, filename, None)
     _install(logger, handlers or [_null()])
@@ -254,3 +368,12 @@ def _null() -> logging.Handler:
 def log_dir() -> Path | None:
     """Dossier des logs du service (configuré à la racine), à transmettre aux sous-processus."""
     return _log_dir
+
+
+def read_lines(log_dir: Path, filename: str) -> list[str]:
+    """Toutes les lignes écrites sous un nom de fichier (`shopsim.jsonl`), tous jours
+    confondus, du plus ancien fichier au plus récent (tests, outils)."""
+    lines: list[str] = []
+    for _, path in segments(log_dir, filename.removesuffix(SUFFIX)):
+        lines += path.read_text(encoding="utf-8").splitlines()
+    return lines
