@@ -30,7 +30,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import case, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from agentpilot import alerts, control, decisions, worker
+from agentpilot import alerts, control, decisions, notify, worker
 from agentpilot.api_schemas import AlertRead, ControlStatus
 from agentpilot.approval import REASON_LABELS, REPLY, Reason
 from agentpilot.decisions import InvalidInput, Notice
@@ -367,6 +367,7 @@ def control_status(work: worker.Worker, factory: sessionmaker[Session]) -> Contr
         ops_auto_at=settings.ops_auto_at,
         running_investigations=work.running_investigations(),
         degraded_unreviewed=unreviewed,
+        notify_channel=notify.configured(),
     )
 
 

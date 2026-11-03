@@ -1567,6 +1567,62 @@
           "range": false
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Messages Discord, par résultat",
+      "description": "Messages de fin d'enquête automatique sur le canal Discord (J7.2) : envoyés, en échec, abandonnés au-delà de la limite de fréquence. Les alertes passent par Alertmanager, pas par ce compteur.",
+      "id": 28,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 65
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (result) (increase(agentpilot_notifications_total[1h]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

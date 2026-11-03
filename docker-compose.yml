@@ -88,6 +88,11 @@ services:
       AGENTPILOT_OPS_ARCHITECTURE: ${AGENTPILOT_OPS_ARCHITECTURE:-solo}
       AGENTPILOT_OPS_MAX_PER_HOUR: ${AGENTPILOT_OPS_MAX_PER_HOUR:-6}
       AGENTPILOT_PAUSE_ON_START: ${AGENTPILOT_PAUSE_ON_START:-1}
+      # Canal Discord (J7.2) : secret, vide par défaut ; retiré de l'environnement du service au
+      # démarrage (jamais vu par la CLI de l'agent ni par les serveurs MCP)
+      AGENTPILOT_DISCORD_WEBHOOK_URL: ${AGENTPILOT_DISCORD_WEBHOOK_URL:-}
+      AGENTPILOT_NOTIFY_MAX_PER_HOUR: ${AGENTPILOT_NOTIFY_MAX_PER_HOUR:-10}
+      AGENTPILOT_PUBLIC_URL: ${AGENTPILOT_PUBLIC_URL:-http://localhost:8001}
       LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-7}
       # Sources des agents (serveurs MCP lancés dans ce conteneur), par le réseau Docker
       SHOPSIM_URL: http://app:8000
@@ -128,18 +133,23 @@ services:
       - ./monitoring/prometheus:/etc/prometheus:ro
       - prometheus-data:/prometheus
 
-  # Alertes (J4.4) : reçues de Prometheus, envoyées à AgentPilot (POST /alerts/webhook)
+  # Alertes (J4.4) : reçues de Prometheus, envoyées à AgentPilot (POST /alerts/webhook), et au
+  # canal Discord si son adresse est dans `.env` (J7.2) : start.sh choisit la configuration
   alertmanager:
     image: prom/alertmanager:v0.34.1
+    entrypoint: ["/bin/sh", "/etc/alertmanager/start.sh"]
     command:
-      - --config.file=/etc/alertmanager/alertmanager.yml
       - --storage.path=/alertmanager
       # Pas de mode haute disponibilité : il ouvrirait le port 9094
       - --cluster.listen-address=
+    environment:
+      # Secret, vide par défaut (pas de canal) ; jamais écrit dans le dépôt
+      AGENTPILOT_DISCORD_WEBHOOK_URL: ${AGENTPILOT_DISCORD_WEBHOOK_URL:-}
     ports:
       - "127.0.0.1:9093:9093"
     volumes:
-      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Les deux configurations (sans et avec Discord) et le script de démarrage
+      - ./monitoring/alertmanager:/etc/alertmanager:ro
       - alertmanager-data:/alertmanager
 
   grafana:

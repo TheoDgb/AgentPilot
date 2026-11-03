@@ -95,6 +95,15 @@ ACTION_EXECUTIONS = Counter(
     ["tool", "result"],
     registry=EVENTS,
 )
+# Messages de fin d'enquête sur le canal Discord (J7.2) : envoyé, en échec, ou abandonné au-delà
+# de la limite de fréquence
+NOTIFICATION_RESULTS = ("sent", "failed", "dropped")
+NOTIFICATIONS = Counter(
+    "agentpilot_notifications_total",
+    "Messages de fin d'enquête envoyés sur le canal de notification, par résultat.",
+    ["result"],
+    registry=EVENTS,
+)
 
 # Séries présentes à zéro dès le démarrage : les graphiques et `rate()` n'attendent pas le
 # premier événement
@@ -111,6 +120,8 @@ for _tool in HELD_TOOLS:
         ACTION_DECISIONS.labels(tool=_tool, decision=_decision)
     for _result in EXECUTION_RESULTS:
         ACTION_EXECUTIONS.labels(tool=_tool, result=_result)
+for _result in NOTIFICATION_RESULTS:
+    NOTIFICATIONS.labels(result=_result)
 
 
 def tool_label(name: str) -> str:
@@ -147,6 +158,11 @@ def action_decided(tool: str, decision: PendingStatus) -> None:
 def action_executed(tool: str, result: str) -> None:
     if result in EXECUTION_RESULTS:
         ACTION_EXECUTIONS.labels(tool=tool_label(tool), result=result).inc()
+
+
+def notification(result: str) -> None:
+    if result in NOTIFICATION_RESULTS:
+        NOTIFICATIONS.labels(result=result).inc()
 
 
 # --- État, relu à chaque collecte ------------------------------------------------------

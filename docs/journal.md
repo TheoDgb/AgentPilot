@@ -1054,3 +1054,61 @@ pièges dans le même contexte.
   conteneurs avec l'utilisateur de l'hôte ; `observability.query --since 5` retrouve les
   lignes. Les anciens fichiers sans date restent lus, et seront supprimés une fois plus
   vieux que la conservation.
+
+### J7.2 : un vrai canal de notification (Discord)
+
+*2026-11-03*
+
+**Fait**
+- **Alertmanager → Discord** : les alertes `critical` (`ShopSimHighErrorRate`, `ShopSimDown`,
+  `AgentPilotStateUnavailable`), `OpsReportWithoutAI` et `PendingActionTooOld`, avec leur
+  résolution. Les autres restent dans Grafana, Alertmanager et `/control`. AgentPilot reçoit
+  toujours tout.
+- **AgentPilot → Discord** (`agentpilot/notify.py`) : un message à la fin de chaque enquête
+  automatique (alerte, route, alertes couvertes, cause, confiance, lien vers
+  `/investigations/{id}`), ou « à lire » si l'enquête échoue par la faute de l'agent.
+- **Secret** `AGENTPILOT_DISCORD_WEBHOOK_URL`, dans `.env` seulement, donné aux deux seuls
+  services qui envoient. Sans adresse, tout marche comme avant.
+- **Pas de rafale** : regroupement par nom d'alerte et 5 min entre deux messages d'un groupe
+  côté Alertmanager ; une enquête par groupe d'alertes et 10 messages par heure au plus côté
+  AgentPilot.
+- État du canal sur `/control`, compteur `agentpilot_notifications_total` et panneau Grafana.
+
+**Décisions**
+- **Deux émetteurs pour un même secret** : Alertmanager garde la livraison des alertes, pour
+  que le canal ne dépende pas d'AgentPilot ; AgentPilot n'envoie que la fin d'enquête, que lui
+  seul connaît.
+- **Adresse hors de l'environnement** : la CLI de l'agent et les serveurs MCP héritent de
+  l'environnement du service. Le service la retire au démarrage et la garde en mémoire ;
+  Alertmanager l'écrit dans un fichier privé et la retire avant de démarrer.
+- **Deux configurations d'Alertmanager** plutôt qu'une seule : Alertmanager ne lit pas de
+  variable d'environnement, et une configuration Discord sans adresse produirait une erreur
+  à chaque envoi. Sans adresse, c'est la configuration d'avant J7.2, inchangée ; un test
+  vérifie que les deux envoient pareil à AgentPilot.
+- **Liste blanche du contenu** : seulement des noms d'alerte, des gabarits de route et des
+  énumérations. Jamais le résumé ni le correctif écrits par l'agent, qui pourraient recopier
+  une valeur lue.
+- **Adresse refusée** si ce n'est pas celle d'un webhook Discord : une erreur de configuration
+  n'envoie jamais rien ailleurs.
+
+**Bugs ou surprises (en codant et en vérifiant)**
+- Le test des étiquettes bornées des métriques ne connaissait, pour `result`, que les valeurs
+  des actions approuvées : le nouveau compteur des messages y a été ajouté.
+- **Le générateur de trafic ne démarre pas sur une panne déjà active** : au lancement, il
+  relève les commandes des clients (`/customers/{id}/orders`) ; avec `db_errors`, ce relevé
+  échoue en boucle (`traffic.discovery_failed`) et aucun parcours ne part, donc aucune alerte.
+  Il faut lancer le générateur avant la panne.
+- Le conteneur `traffic` d'avant J7.1 pointait vers l'ancien réseau Docker
+  (`network … not found`) : `--force-recreate` le recrée, et `--build` reconstruit son image
+  (qui écrivait encore `traffic.jsonl`, sans date).
+
+**Vérification réelle** (2026-11-03, salon Discord de test)
+- `pytest` complet réussi, dont les tests de routage par `amtool`.
+- Aucune adresse Discord dans le conteneur `app`.
+- **Alertes** : générateur de trafic, puis `db_errors` ; **un seul** message
+  `ShopSimHighErrorRate` pour les deux routes, puis le message « Résolue » après l'arrêt de
+  la panne.
+- **Fin d'enquête automatique** (interrupteur activé) : le message d'alerte, puis
+  « Enquête terminée » avec la cause, la confiance et le lien vers `/investigations/{id}`,
+  qui s'ouvre.
+- **Sans adresse** (ligne mise en commentaire) : `/control` affiche « non configuré ».

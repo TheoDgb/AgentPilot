@@ -42,7 +42,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from agentpilot import alerts, control, metrics, ops_agent, sdk_runner, web
+from agentpilot import alerts, control, metrics, notify, ops_agent, sdk_runner, web
 from agentpilot.api_schemas import ControlStatus, RunCreated, RunRead
 from agentpilot.db import SessionLocal, engine, init_db, service_lock
 from agentpilot.env_file import setting
@@ -83,6 +83,9 @@ class ServiceAlreadyRunning(RuntimeError):
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure("agentpilot", log_dir())
+    # Adresse du canal Discord (J7.2) : hors de l'environnement, dont héritent la CLI de l'agent
+    # et les serveurs MCP, avant tout lancement
+    notify.capture()
     # Architecture de l'agent Ops : une valeur inconnue empêche le démarrage (relue à chaque
     # enquête ensuite)
     ops_agent.architecture()

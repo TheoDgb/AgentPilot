@@ -14,6 +14,7 @@ import shutil
 import subprocess
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -75,13 +76,81 @@ def test_prometheus_configuration_and_rules_are_valid() -> None:
     assert f"{len(alert_rules())} rules found" in output
 
 
-def test_alertmanager_configuration_is_valid() -> None:
+@pytest.mark.parametrize("config", ["alertmanager.yml", "alertmanager-discord.yml"])
+def test_alertmanager_configuration_is_valid(config: str) -> None:
     output = run_tool(
         "amtool", "prom/alertmanager", ALERTMANAGER_DIR, "/etc/alertmanager",
-        "check-config", "/etc/alertmanager/alertmanager.yml",
+        "check-config", f"/etc/alertmanager/{config}",
     )  # fmt: skip
 
     assert "SUCCESS" in output
+
+
+# Canal Discord (J7.2) : ce qui demande un humain, rien d'autre
+DISCORD_ALERTS = {
+    "ShopSimHighErrorRate",
+    "ShopSimDown",
+    "AgentPilotStateUnavailable",
+    "OpsReportWithoutAI",
+    "PendingActionTooOld",
+}
+
+
+def receivers(config: str, labels: dict[str, str]) -> list[str]:
+    """Receveurs d'une alerte selon l'arbre de routage (`amtool config routes test`)."""
+    output = run_tool(
+        "amtool", "prom/alertmanager", ALERTMANAGER_DIR, "/etc/alertmanager",
+        "config", "routes", "test", f"--config.file=/etc/alertmanager/{config}",
+        *(f"{key}={value}" for key, value in labels.items()),
+    )  # fmt: skip
+    return output.strip().splitlines()[-1].split(",")
+
+
+@pytest.mark.parametrize("rule", alert_rules(), ids=lambda rule: rule["alert"])
+def test_discord_gets_what_needs_a_human_and_agentpilot_gets_everything(
+    rule: dict[str, Any],
+) -> None:
+    labels = {"alertname": rule["alert"], "severity": rule["labels"]["severity"]}
+
+    with_discord = receivers("alertmanager-discord.yml", labels)
+    without = receivers("alertmanager.yml", labels)
+
+    expected = ["discord", "agentpilot"] if rule["alert"] in DISCORD_ALERTS else ["agentpilot"]
+    assert with_discord == expected
+    assert without == ["agentpilot"]
+
+
+def test_discord_rules_are_the_critical_ones_plus_the_human_ones() -> None:
+    critical = {r["alert"] for r in alert_rules() if r["labels"]["severity"] == "critical"}
+    assert DISCORD_ALERTS == critical | {"OpsReportWithoutAI", "PendingActionTooOld"}
+
+
+def test_both_configurations_send_the_same_way_to_agentpilot() -> None:
+    """Avec Discord, AgentPilot reçoit tout, regroupé comme sans Discord."""
+    base = yaml.safe_load((ALERTMANAGER_DIR / "alertmanager.yml").read_text(encoding="utf-8"))
+    found = yaml.safe_load(
+        (ALERTMANAGER_DIR / "alertmanager-discord.yml").read_text(encoding="utf-8")
+    )
+    routes = found["route"].pop("routes")
+
+    assert found["route"] == base["route"]
+    assert routes[-1] == {"receiver": "agentpilot"}
+    assert all(r["receiver"] == "discord" and r["continue"] is True for r in routes[:-1])
+    # Pas de rafale : regroupement par nom d'alerte, 5 min entre deux messages d'un groupe
+    assert all(r["group_by"] == ["alertname"] and r["group_interval"] == "5m" for r in routes[:-1])
+    receivers_by_name = {r["name"]: r for r in found["receivers"]}
+    assert receivers_by_name["agentpilot"] == base["receivers"][0]
+    [discord] = receivers_by_name["discord"]["discord_configs"]
+    # Adresse dans un fichier écrit au démarrage, jamais dans la configuration
+    assert "webhook_url" not in discord and discord["webhook_url_file"].startswith("/tmp/")
+
+
+def test_annotations_carry_no_customer_data() -> None:
+    """Les messages Discord recopient les annotations : seulement des libellés des règles
+    (gabarit de route), jamais de valeur venue d'une requête."""
+    for rule in alert_rules():
+        for text in rule["annotations"].values():
+            assert set(re.findall(r"{{(.*?)}}", text)) <= {" $labels.route "}, rule["alert"]
 
 
 def test_rule_expressions_match_the_exposed_series() -> None:
@@ -117,3 +186,70 @@ def test_every_rule_has_a_firing_case_and_a_silent_case() -> None:
 
     for rule in alert_rules():
         assert cases[rule["alert"]] == {True, False}, rule["alert"]
+
+
+# --- Démarrage d'Alertmanager (start.sh), avec une fausse commande `alertmanager` -------------
+
+FAKE_ALERTMANAGER = """#!/bin/sh
+printf '%s\\n' "$@" > "$OUT/args"
+env > "$OUT/env"
+"""
+WEBHOOK = "https://discord.com/api/webhooks/123456/secret-token-for-tests"
+
+
+def start(tmp_path: Path, url: str | None) -> tuple[list[str], str, Path]:
+    """Lance start.sh ; renvoie les arguments et l'environnement reçus par Alertmanager, et le
+    fichier de l'adresse."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "alertmanager"
+    fake.write_text(FAKE_ALERTMANAGER)
+    fake.chmod(0o755)
+    url_file = tmp_path / "discord_webhook_url"
+    env = {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "OUT": str(tmp_path),
+        "ALERTMANAGER_CONFIG_DIR": "/etc/alertmanager",
+        "DISCORD_URL_FILE": str(url_file),
+    }
+    if url is not None:
+        env["AGENTPILOT_DISCORD_WEBHOOK_URL"] = url
+    done = subprocess.run(
+        ["sh", str(ALERTMANAGER_DIR / "start.sh"), "--storage.path=/alertmanager"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert done.returncode == 0, done.stderr
+    assert WEBHOOK not in done.stdout + done.stderr
+    args = (tmp_path / "args").read_text().splitlines()
+    return args, (tmp_path / "env").read_text(), url_file
+
+
+@pytest.mark.parametrize("url", [None, ""])
+def test_without_address_alertmanager_starts_as_before(tmp_path: Path, url: str | None) -> None:
+    args, _, url_file = start(tmp_path, url)
+
+    assert args == [
+        "--config.file=/etc/alertmanager/alertmanager.yml",
+        "--storage.path=/alertmanager",
+    ]
+    assert not url_file.exists()
+
+
+def test_with_address_alertmanager_gets_discord_and_a_private_file(tmp_path: Path) -> None:
+    args, env, url_file = start(tmp_path, WEBHOOK)
+
+    assert args[0] == "--config.file=/etc/alertmanager/alertmanager-discord.yml"
+    assert url_file.read_text() == WEBHOOK
+    assert url_file.stat().st_mode & 0o777 == 0o600
+    # Retirée de l'environnement d'Alertmanager
+    assert WEBHOOK not in env and "AGENTPILOT_DISCORD_WEBHOOK_URL" not in env
+
+
+def test_an_address_of_another_site_is_refused(tmp_path: Path) -> None:
+    args, env, url_file = start(tmp_path, "https://example.com/collect?token=secret-token")
+
+    assert args[0] == "--config.file=/etc/alertmanager/alertmanager.yml"
+    assert not url_file.exists() and "secret-token" not in env

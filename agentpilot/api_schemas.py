@@ -162,3 +162,5 @@ class ControlStatus(BaseModel):
     running_investigations: int = 0
     # Rapports sans IA pas encore pris en compte par un humain
     degraded_unreviewed: int = 0
+    # Canal de notification Discord configuré (J7.2) ; jamais l'adresse elle-même
+    notify_channel: bool = False

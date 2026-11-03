@@ -36,7 +36,8 @@ ALLOWED_LABELS = {
     "tool": set(metrics.TOOLS) | {metrics.OTHER_TOOL},
     "outcome": {outcome.value for outcome in CallOutcome},
     "decision": {"approved", "rejected"},
-    "result": set(metrics.EXECUTION_RESULTS),
+    # Actions approuvées exécutées, et messages du canal Discord (J7.2)
+    "result": set(metrics.EXECUTION_RESULTS) | set(metrics.NOTIFICATION_RESULTS),
     "state": set(metrics.LOOP_STATES) | {"open", "eligible"},
     "reason": {"running", "held", "abandoned", "handled", "proposal", "cooldown"},
     "le": None,

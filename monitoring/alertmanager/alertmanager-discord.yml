@@ -1,0 +1,53 @@
+# Alertmanager avec le canal Discord (J7.2) : choisi par start.sh quand
+# AGENTPILOT_DISCORD_WEBHOOK_URL est définie, sinon alertmanager.yml (même arbre vers AgentPilot,
+# sans Discord ; un test vérifie qu'ils ne diffèrent que par Discord).
+#
+# AgentPilot reçoit toujours toutes les alertes (dernière route). Discord ne reçoit que ce qui
+# demande un humain : les alertes critiques, le rapport sans IA à lire et l'action en attente
+# depuis trop longtemps. Les autres restent dans Grafana, Alertmanager et /control.
+#
+# Pas de rafale : regroupement par nom d'alerte seulement (une saturation sur 5 routes = un
+# message), 5 min au moins entre deux messages d'un même groupe, rappel toutes les 12 h.
+# Adresse du webhook lue dans un fichier écrit par start.sh, jamais dans ce fichier.
+route:
+  receiver: agentpilot
+  group_by: [alertname, route]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 4h
+  routes:
+    - receiver: discord
+      matchers: ['severity="critical"']
+      group_by: [alertname]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      continue: true
+    - receiver: discord
+      matchers: ['alertname=~"OpsReportWithoutAI|PendingActionTooOld"']
+      group_by: [alertname]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      continue: true
+    # Tout, comme sans Discord
+    - receiver: agentpilot
+
+receivers:
+  - name: agentpilot
+    webhook_configs:
+      - url: http://agentpilot:8001/alerts/webhook
+        # La résolution est envoyée aussi : AgentPilot enregistre la fin de l'alerte
+        send_resolved: true
+  - name: discord
+    discord_configs:
+      - webhook_url_file: /tmp/discord_webhook_url
+        send_resolved: true
+        # Libellés et annotations des règles seulement (gabarits de route, jamais de donnée de
+        # client) ; heure réelle UTC
+        title: >-
+          {{ if eq .Status "firing" }}🚨 Alerte{{ else }}✅ Résolue{{ end }} :
+          {{ .CommonLabels.alertname }}
+        message: |-
+          {{ range .Alerts }}• [{{ .Labels.severity }}] {{ .Annotations.summary }} (depuis {{ .StartsAt.UTC.Format "15:04" }} UTC)
+          {{ end }}Détail : http://localhost:8001/control

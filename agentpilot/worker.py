@@ -51,7 +51,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from agentpilot import control, decisions, metrics, ops_auto, ops_degraded, sdk_runner
+from agentpilot import control, decisions, metrics, notify, ops_auto, ops_degraded, sdk_runner
 from agentpilot.approval import ESCALATE, REFUND, REPLY, RESEND, RESOLVE, short_name
 from agentpilot.decisions import Notice
 from agentpilot.env_file import setting
@@ -319,6 +319,28 @@ def abandoned(factory: sessionmaker[Session]) -> list[int]:
         )
 
 
+def investigation(
+    factory: sessionmaker[Session], run_id: uuid.UUID, alert_id: uuid.UUID, result: AgentResult
+) -> notify.Investigation | None:
+    """Ce que le message de fin d'enquête dit : alerte de tête, alertes couvertes, cause et
+    confiance du rapport (énumérations seulement)."""
+    with factory() as session:
+        alert = session.get(Alert, alert_id)
+        if alert is None:
+            return None
+        covered = session.scalar(
+            select(func.count()).select_from(Alert).where(Alert.covered_by == alert_id)
+        )
+        return notify.Investigation.from_output(
+            run_id,
+            alert.alertname,
+            alert.route,
+            int(covered or 0),
+            result.output if isinstance(result.output, dict) else None,
+            None if result.error_type is None else str(result.error_type),
+        )
+
+
 def load_alert(factory: sessionmaker[Session], alert_id: uuid.UUID) -> AlertBrief | None:
     """L'alerte de départ d'une enquête, lue par la plateforme (jamais par l'agent)."""
     with factory() as session:
@@ -414,6 +436,9 @@ class Worker:
         # d'autres ; le service garde toujours ceux par défaut)
         self.model = sdk_runner.DEFAULT_MODEL
         self.prompt_version = DEFAULT_PROMPT
+        # Canal de notification (J7.2) : message de fin d'enquête automatique, limite de fréquence
+        # de ce processus ; l'envoi est remplaçable par les tests (`state.notify_post`)
+        self.notifier = notify.Notifier(getattr(state, "notify_post", None) or notify.http_post)
 
     @property
     def factory(self) -> sessionmaker[Session]:
@@ -484,6 +509,15 @@ class Worker:
                 await self._degrade(
                     alert_id, DegradedReason.INFRA_ERROR, detail=str(result.error_type)
                 )
+            elif (
+                result is not None
+                and agent is AgentKind.OPS
+                and trigger is RunTrigger.ALERT
+                and alert_id is not None
+            ):
+                # Enquête automatique terminée (réussie, ou en échec par la faute de l'agent) :
+                # un humain est prévenu. Rapport sans IA : `OpsReportWithoutAI`, par Alertmanager
+                self._notify(run_id, alert_id, result)
         finally:
             del self.active[run_id]
             self._log_finished(agent, trigger, result, start)
@@ -557,6 +591,19 @@ class Worker:
         )
 
     # --- Enquête automatique sur les alertes (J6.5) ---
+
+    def _notify(self, run_id: uuid.UUID, alert_id: uuid.UUID, result: AgentResult) -> None:
+        """Message de fin d'enquête, en tâche de fond : un canal lent ou en panne ne retient
+        jamais l'exécution."""
+
+        async def send() -> None:
+            found = await self._db(investigation, run_id, alert_id, result)
+            if found is not None:
+                await self.notifier.investigation_finished(found, self.clock())
+
+        task = asyncio.create_task(send())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
 
     def _spawn(self, run: Run, launch: Launch) -> None:
         task = asyncio.create_task(self.execute(run, launch))

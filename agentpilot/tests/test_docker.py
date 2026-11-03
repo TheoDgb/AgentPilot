@@ -160,3 +160,26 @@ def test_ground_truth_module_in_the_image_holds_no_data() -> None:
     `evals/tickets.jsonl`, qui ne va jamais dans l'image."""
     text = (REPO_ROOT / "evals" / "ground_truth.py").read_text(encoding="utf-8")
     assert '.jsonl"' not in text and "open(" not in text and "read_text" not in text
+
+
+# --- Canal Discord (J7.2) ----------------------------------------------------------------------
+
+
+def test_discord_address_goes_only_to_alertmanager_and_agentpilot(
+    services: dict[str, Any],
+) -> None:
+    holders = [name for name, spec in services.items() if "DISCORD" in yaml.safe_dump(spec).upper()]
+    assert sorted(holders) == ["agentpilot", "alertmanager"]
+    for name in holders:
+        # Vide par défaut : sans adresse, le système marche comme avant
+        env = services[name]["environment"]
+        assert env["AGENTPILOT_DISCORD_WEBHOOK_URL"] == "${AGENTPILOT_DISCORD_WEBHOOK_URL:-}"
+
+
+def test_alertmanager_starts_through_its_script(services: dict[str, Any]) -> None:
+    alertmanager = services["alertmanager"]
+    assert alertmanager["entrypoint"] == ["/bin/sh", "/etc/alertmanager/start.sh"]
+    # Le script choisit la configuration : jamais en dur dans la commande
+    assert not any("config.file" in arg for arg in alertmanager["command"])
+    assert "./monitoring/alertmanager:/etc/alertmanager:ro" in alertmanager["volumes"]
+    assert (REPO_ROOT / "monitoring" / "alertmanager" / "start.sh").is_file()

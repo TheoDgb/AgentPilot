@@ -176,3 +176,65 @@ def test_log_dir_is_absolute_for_the_mcp_server(
 
     assert found.is_absolute()
     assert found == (REPO_ROOT / value if not value.startswith("/") else Path(value))
+
+
+DISCORD = "https://discord.com/api/webhooks/123456789/token-of-the-env-test"
+DISCORD_SERVICE = """\
+import json, os, subprocess, sys
+from pathlib import Path
+
+from agentpilot import env_file
+
+env_file.ENV_FILE = Path(sys.argv[1])
+from fastapi.testclient import TestClient
+
+from agentpilot.app import app
+
+with TestClient(app) as client:
+    status = client.get("/control/status").json()
+    child = subprocess.run(["env"], capture_output=True, text=True, check=True).stdout
+print(json.dumps({
+    "channel": status["notify_channel"],
+    "in_service": "AGENTPILOT_DISCORD_WEBHOOK_URL" in os.environ,
+    "in_child": "discord.com" in child,
+}))
+"""
+
+
+def test_discord_address_leaves_the_service_environment_at_startup(
+    tmp_path: Path, session_factory: sessionmaker[Session]
+) -> None:
+    """Comme dans le conteneur : l'adresse arrive par l'environnement du service, qui la retire
+    au démarrage. Ni lui ni un processus qu'il lance (CLI, serveur MCP) ne l'ont ensuite, et
+    elle n'apparaît dans aucun log."""
+    logs = tmp_path / "logs"
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        f"AGENTPILOT_DATABASE_URL={TEST_DATABASE_URL}\nAGENTPILOT_LOG_DIR={logs}\n",
+        encoding="utf-8",
+    )
+    environ = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("CHAOS_TOKEN", "ANTHROPIC_API_KEY") and not key.startswith("AGENTPILOT_")
+    }
+    environ |= {
+        "SHOPSIM_URL": "http://127.0.0.1:9",
+        "AGENTPILOT_DISCORD_WEBHOOK_URL": DISCORD,
+        "PYTHONPATH": str(REPO_ROOT),
+    }
+
+    done = subprocess.run(
+        [sys.executable, "-c", DISCORD_SERVICE, str(dotenv)],
+        cwd=tmp_path,
+        env=environ,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert done.returncode == 0, done.stderr
+    result = json.loads(done.stdout.strip().splitlines()[-1])
+    assert result == {"channel": True, "in_service": False, "in_child": False}
+    written = "".join(p.read_text() for p in logs.iterdir()) + done.stderr
+    assert "token-of-the-env-test" not in written

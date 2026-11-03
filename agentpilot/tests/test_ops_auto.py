@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from agentpilot import control, ops_agent, ops_auto, ops_degraded
+from agentpilot import control, notify, ops_agent, ops_auto, ops_degraded
 from agentpilot.app import app
 from agentpilot.journal import CallEntry
 from agentpilot.models import (
@@ -35,6 +35,7 @@ from agentpilot.models import (
 from agentpilot.ops_agent import AlertBrief
 from agentpilot.ops_auto import AlertRow, plan
 from agentpilot.ops_schemas import DegradedReason, DegradedReport
+from agentpilot.sdk_runner import AgentResult, ErrorType
 from agentpilot.tests.conftest import FakeQuery, MemoryJournal, result_message
 from agentpilot.tests.test_ops_agent import ops_init, report
 from agentpilot.worker import MAX_CONCURRENT_RUNS, Worker
@@ -759,3 +760,98 @@ def test_init_db_upgrades_an_existing_database_for_j6_5(upgraded_engine: Engine)
         )
     assert {("control", "ops_auto"), ("alerts", "triage"), ("runs", "reviewed_at")} <= columns
     assert "ops_degraded" in kinds
+
+
+# --- Message de fin d'enquête sur le canal Discord (J7.2) --------------------------------------
+
+WEBHOOK = "https://discord.com/api/webhooks/123456789/token-of-the-tests"
+
+
+class FakePost:
+    def __init__(self) -> None:
+        self.contents: list[str] = []
+
+    async def __call__(self, url: str, body: dict[str, Any]) -> int:
+        self.contents.append(body["content"])
+        return 204
+
+
+async def finished(
+    factory: sessionmaker[Session],
+    trigger: RunTrigger,
+    result: AgentResult,
+    covered: int = 0,
+) -> list[str]:
+    """Une enquête sur une alerte (et ses alertes couvertes) se termine sur `result` ; renvoie
+    les messages envoyés."""
+    head = add_alert(factory, ERRORS)
+    with factory() as session:
+        for n in range(covered):
+            other = session.get_one(Alert, add_alert(factory, ERRORS, route=f"/r{n}"))
+            other.covered_by = head
+            session.add(other)
+        session.commit()
+    post = FakePost()
+    work = make_worker(factory)
+    work.notifier = notify.Notifier(post)
+    run, _ = await work.start_alert(head, trigger)
+
+    async def launch() -> AgentResult:
+        return result
+
+    work._spawn(run, launch)
+    await work.drain()
+    return post.contents
+
+
+@pytest.fixture
+def channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(notify, "_captured", None)
+    monkeypatch.setenv(notify.WEBHOOK_ENV, WEBHOOK)
+
+
+@pytest.mark.usefixtures("api_key", "channel")
+async def test_automatic_investigation_sends_its_cause(
+    session_factory: sessionmaker[Session],
+) -> None:
+    result = AgentResult(output=report(), total_cost_usd=0.05)
+
+    [content] = await finished(session_factory, RunTrigger.ALERT, result, covered=2)
+
+    assert content.startswith(
+        "🔎 Enquête terminée — ShopSimHighErrorRate sur /orders/{order_id} (+2 alertes couvertes)"
+    )
+    assert "erreurs de la base de données · confiance : élevée" in content
+    [run] = runs_of(session_factory)
+    assert content.endswith(f"/investigations/{run.id}")
+    # Jamais le résumé écrit par l'agent
+    assert report()["summary"] not in content
+
+
+@pytest.mark.usefixtures("api_key", "channel")
+async def test_agent_fault_sends_a_failure_message(session_factory: sessionmaker[Session]) -> None:
+    result = AgentResult(error="sortie invalide", error_type=ErrorType.INVALID_OUTPUT)
+
+    [content] = await finished(session_factory, RunTrigger.ALERT, result)
+
+    assert content.startswith("⚠️ Enquête en échec (invalid_output)")
+
+
+@pytest.mark.usefixtures("api_key", "channel")
+async def test_infrastructure_error_sends_nothing_here(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Le rapport sans IA prend la relève ; `OpsReportWithoutAI` passe par Alertmanager."""
+    result = AgentResult(error="API Error: 400", error_type=ErrorType.API_UNAVAILABLE)
+
+    assert await finished(session_factory, RunTrigger.ALERT, result) == []
+
+
+@pytest.mark.usefixtures("api_key", "channel")
+@pytest.mark.parametrize("trigger", [RunTrigger.MANUAL, RunTrigger.EVAL])
+async def test_manual_and_evaluation_investigations_send_nothing(
+    session_factory: sessionmaker[Session], trigger: RunTrigger
+) -> None:
+    result = AgentResult(output=report(), total_cost_usd=0.05)
+
+    assert await finished(session_factory, trigger, result) == []
