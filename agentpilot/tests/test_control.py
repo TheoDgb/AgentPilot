@@ -11,6 +11,7 @@ from agentpilot import control
 from agentpilot.app import app
 from agentpilot.models import PauseReason
 from agentpilot.tests.conftest import reset_agentpilot
+from agentpilot.worker import Worker
 
 
 @pytest.fixture
@@ -65,6 +66,9 @@ def test_the_real_service_starts_paused(
     monkeypatch.setattr(app_module, "engine", agentpilot_engine)
     monkeypatch.setenv("SHOPSIM_URL", "http://127.0.0.1:9")
     app.state.session_factory = running
+    # Boucle propre au test : ShopSim injoignable la met en attente, ce qui ne doit pas
+    # rester sur la boucle partagée par les tests suivants (jauge `waiting` des métriques)
+    monkeypatch.setattr(app.state, "worker", Worker(app.state))
 
     with TestClient(app) as client:
         status = client.get("/control/status").json()
