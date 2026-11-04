@@ -119,7 +119,7 @@ Règle d'architecture centrale : **les agents n'accèdent à ShopSim que via le 
 
 ## Avancement
 
-Jalons J0 à J7 terminés (J7 — Livraison et formation)
+Jalons J0 à J7 terminés (J7 — Livraison et formation). Détails, résultats et leçons de chaque jalon : `docs/journal.md`.
 
 - [x] J0 : dépôt, Python 3.12 (uv), pyproject, commande /test
 - [x] J1 : ShopSim terminé (vérité terrain dans `evals/tickets.jsonl`). Ses API ne changent plus sans accord. Ajouts validés depuis : `GET /customers/{id}/refunds`, `POST /orders/{id}/resend`, `GET /clock` et `SHOPSIM_FREEZE_CLOCK`, `author` sur `POST /tickets/{id}/reply`, `GET /metrics`, `POST /tickets` (jamais exposé aux agents).
@@ -133,6 +133,4 @@ Jalons J0 à J7 terminés (J7 — Livraison et formation)
 - [x] J7.3 : README de présentation en français et en anglais (démarrage, architecture, résultats chiffrés, limites), données de démo au premier démarrage de ShopSim
 - [x] J7.4 : guide d'une page pour les business analysts (`docs/guide-metier.md`), et script de démo de 3 minutes (`docs/demo.md`)
 
-Détails, résultats et leçons de chaque jalon : `docs/journal.md`.
-
-À traiter : consigne Support v3 (catégorie des tickets 30 et 31, faits inventés dans `facts_used`).
+Pistes d'amélioration (choix assumés, non urgents) : consigne Support v3 (catégorie des tickets 30 et 31, faits inventés dans `facts_used`) ; évaluation Ops sur plusieurs passages pour mesurer la stabilité ; authentification des pages pour un usage hors local.
