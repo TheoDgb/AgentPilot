@@ -9,6 +9,9 @@ COPY shopsim ./shopsim
 COPY observability ./observability
 # Générateur de trafic (service `traffic` du profil du même nom) : bibliothèque standard
 COPY traffic ./traffic
+# Données de démo au premier démarrage (`shopsim/seed.py`) : de evals/, les seuils de la politique
+# et le schéma des tickets, jamais la vérité terrain (`evals/*.jsonl`)
+COPY evals/__init__.py evals/policy.py evals/ground_truth.py ./evals/
 RUN uv pip install --system --no-cache .
 
 EXPOSE 8000

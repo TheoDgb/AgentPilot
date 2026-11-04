@@ -183,3 +183,21 @@ def test_alertmanager_starts_through_its_script(services: dict[str, Any]) -> Non
     assert not any("config.file" in arg for arg in alertmanager["command"])
     assert "./monitoring/alertmanager:/etc/alertmanager:ro" in alertmanager["volumes"]
     assert (REPO_ROOT / "monitoring" / "alertmanager" / "start.sh").is_file()
+
+
+def test_shopsim_image_copies_no_ground_truth() -> None:
+    """L'image ShopSim embarque le seed (données de démo au premier démarrage, J7.3) et donc
+    les modules de evals/ qu'il importe : jamais la vérité terrain."""
+    text = (REPO_ROOT / "shopsim" / "Dockerfile").read_text(encoding="utf-8")
+    sources = [
+        source
+        for line in text.splitlines()
+        if line.startswith("COPY ") and "--from" not in line
+        for source in line.split()[1:-1]
+    ]
+    assert sorted(s for s in sources if s.startswith("evals/")) == [
+        "evals/__init__.py",
+        "evals/ground_truth.py",
+        "evals/policy.py",
+    ]
+    assert not [s for s in sources if s.endswith(".jsonl") or s in ("evals", "evals/", ".")]

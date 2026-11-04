@@ -19,5 +19,17 @@ __pycache__/
 /.zprofile
 /.gitconfig
 /.ripgreprc
+/.gitmodules
+/.vscode
+/.claude/agents
+/.claude/hooks
+/.claude/launch.json
+/.claude/loop.md
+/.claude/output-styles
+/.claude/routines
+/.claude/scheduled_tasks.json
+/.claude/settings.json
+/.claude/skills
+/.claude/workflows
 # Résultats des évaluations (J5.1) : réponses aux clients, coûts
 /evals/results/

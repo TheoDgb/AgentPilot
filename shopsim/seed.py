@@ -10,13 +10,20 @@ et sont cohérentes avec le statut de la commande.
 
 La vérité terrain des tickets open est écrite dans `evals/tickets.jsonl`, jamais
 en base : voir `shopsim/seed_tickets.py`.
+
+Au démarrage de ShopSim (`seed_on_startup`), une base **vide** reçoit ces données, avec les
+mêmes ids que `main()` : sinon un visiteur qui suit le README tombe sur une boutique vide. Une
+base qui a déjà des données n'est jamais touchée. La vérité terrain n'est alors pas réécrite :
+le seed est déterministe, le fichier versionné est déjà le bon (et l'image ne l'a pas).
 """
 
+import os
 import random
 from collections import Counter
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from evals.ground_truth import TicketGroundTruth
@@ -387,6 +394,51 @@ def print_distribution(truths: list[TicketGroundTruth]) -> None:
     for action, n in sorted(Counter(gt.expected_action for gt in truths).items()):
         print(f"  {action:<28} {n:>3}")
     print(f"Avec validation humaine : {sum(gt.requires_human_approval for gt in truths)}")
+
+
+SEED_ON_START_ENV = "SHOPSIM_SEED_IF_EMPTY"
+# Verrou consultatif PostgreSQL : un seul remplissage à la fois, même avec deux ShopSim
+SEED_LOCK_KEY = 7_051_042
+# Tables des données de la boutique : la base est vide si toutes le sont (les pannes actives et
+# l'horloge ne comptent pas)
+DATA_TABLES = (
+    "customers",
+    "orders",
+    "payments",
+    "refunds",
+    "shipments",
+    "shipment_events",
+    "tickets",
+    "ticket_messages",
+    "resends",
+)
+
+
+def seed_if_empty(session: Session) -> bool:
+    """Insère les données de démo (sans commit) si la boutique est vide ; renvoie True si elle
+    l'était. Jamais rien d'écrasé : la moindre ligne de client, de commande ou de ticket et
+    rien n'est fait.
+
+    Les séquences repartent de 1 (tables vides, `TRUNCATE … RESTART IDENTITY`), pour les
+    mêmes ids que `main()` et que la vérité terrain."""
+    session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": SEED_LOCK_KEY})
+    # Noms de tables fixes (jamais une entrée) : la requête peut les citer
+    for table in DATA_TABLES:
+        if session.scalar(text(f"SELECT 1 FROM {table} LIMIT 1")) is not None:
+            return False
+    session.execute(text(f"TRUNCATE {', '.join(DATA_TABLES)} RESTART IDENTITY"))
+    seed(session)
+    return True
+
+
+def seed_on_startup() -> bool:
+    """Au démarrage de ShopSim : remplit une base vide (sauf `SHOPSIM_SEED_IF_EMPTY=0`)."""
+    if os.environ.get(SEED_ON_START_ENV) == "0":
+        return False
+    with SessionLocal() as session:
+        seeded = seed_if_empty(session)
+        session.commit()
+    return seeded
 
 
 def main() -> None:

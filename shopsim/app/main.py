@@ -7,6 +7,8 @@ lire dans les logs que l'agent Ops consultera.
 
 Métriques Prometheus (`GET /metrics`, J4.2) : toutes les requêtes sauf `/chaos` (même raison) et
 `/metrics` lui-même, collecté toutes les 10 s, qui n'est pas non plus journalisé.
+
+Au démarrage, une base vide reçoit les données de démo (`shopsim.seed.seed_on_startup`).
 """
 
 import logging
@@ -17,7 +19,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from observability.http import RequestLogMiddleware
-from observability.logs import configure, configure_isolated
+from observability.logs import configure, configure_isolated, log_event
 from shopsim.app.db import init_db
 from shopsim.app.routers import (
     chaos,
@@ -60,6 +62,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure("shopsim", log_dir)
     configure_isolated(CHAOS_LOGGER, "shopsim", log_dir, "chaos.jsonl")
     init_db()
+    # Base vide (premier démarrage) : données de démo ; base remplie : jamais touchée.
+    # Import ici : le seed ne sert qu'au démarrage, pas aux requêtes
+    from shopsim.seed import N_CUSTOMERS, seed_on_startup
+
+    if seed_on_startup():
+        log_event(logger, "shopsim.seeded", count=N_CUSTOMERS)
     yield
 
 

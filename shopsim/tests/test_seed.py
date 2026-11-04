@@ -1,20 +1,38 @@
+import json
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from evals.policy import APPROVAL_THRESHOLD_CENTS, REFUND_WINDOW
 from shopsim.app.clock import SIMULATION_NOW, simulation_today
-from shopsim.app.models import Customer, Order, OrderStatus, Refund, Shipment, ShipmentStatus
+from shopsim.app.db import Base
+from shopsim.app.models import (
+    Customer,
+    Order,
+    OrderStatus,
+    Refund,
+    Shipment,
+    ShipmentStatus,
+    Ticket,
+    TicketStatus,
+)
 from shopsim.seed import (
+    DATA_TABLES,
+    GROUND_TRUTH_PATH,
     N_CUSTOMERS,
     N_ORDERS,
     N_SMALL_ORDERS,
     ORDER_AGE_BY_STATUS,
     PAYMENT_STATUS_BY_ORDER_STATUS,
+    SEED_ON_START_ENV,
     seed,
+    seed_if_empty,
+    seed_on_startup,
 )
+from shopsim.tests.conftest import MakeCustomer
 
 SHIPMENT_STATUSES_BY_ORDER_STATUS = {
     OrderStatus.SHIPPED: {
@@ -165,3 +183,39 @@ def test_seed_small_orders_are_recent_and_under_threshold(session: Session) -> N
         assert order.total_cents <= APPROVAL_THRESHOLD_CENTS
         assert order.shipment is not None and order.shipment.delivered_at is not None
         assert SIMULATION_NOW - order.shipment.delivered_at <= REFUND_WINDOW
+
+
+# --- Données de démo au premier démarrage (`seed_if_empty`) -------------------------------------
+
+
+def test_empty_database_is_seeded_with_the_ids_of_the_ground_truth(session: Session) -> None:
+    """Premier démarrage : la boutique vide reçoit les données de démo, avec les mêmes ids que
+    `python shopsim/seed.py` (ceux de la vérité terrain versionnée)."""
+    assert seed_if_empty(session) is True
+
+    assert session.scalar(select(func.count()).select_from(Customer)) == N_CUSTOMERS
+    assert session.scalar(select(func.count()).select_from(Order)) == N_ORDERS + N_SMALL_ORDERS
+    open_ids = set(session.scalars(select(Ticket.id).where(Ticket.status == TicketStatus.OPEN)))
+    truth = {json.loads(line)["ticket_id"] for line in GROUND_TRUTH_PATH.read_text().splitlines()}
+    assert open_ids == truth
+
+
+def test_filled_database_is_left_untouched(session: Session, make_customer: MakeCustomer) -> None:
+    """Une seule ligne suffit : rien n'est ajouté ni effacé."""
+    existing = make_customer()
+
+    assert seed_if_empty(session) is False
+
+    assert list(session.scalars(select(Customer.id))) == [existing.id]
+    assert session.scalar(select(func.count()).select_from(Ticket)) == 0
+
+
+def test_every_shop_table_counts_for_emptiness() -> None:
+    """Une nouvelle table de données oubliée laisserait remplir une base qui en a."""
+    assert set(DATA_TABLES) == set(Base.metadata.tables) - {"simulation_clock", "chaos_faults"}
+
+
+def test_startup_seed_can_be_turned_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(SEED_ON_START_ENV, "0")
+
+    assert seed_on_startup() is False
