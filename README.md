@@ -288,11 +288,26 @@ Le détail de chaque jalon, avec ses bugs et ses surprises, est dans
 
 ## Captures d'écran
 
-<!-- Captures à déposer dans docs/images/, puis décommenter :
+**Validation humaine** (`/approvals`) : un remboursement de 264,95 € mis en attente par le hook
+(montant au-dessus du seuil), avec les faits relus dans ShopSim, la décision de l'agent et sa
+réponse au client.
+
+![Page d'approbation d'un remboursement mis en attente](docs/images/approvals.png)
+
+**Enquête de l'agent Ops** (`/investigations/{id}`) : lancée automatiquement sur une alerte de
+la boutique (panne de base de données), avec la cause, les preuves, les hypothèses écartées et
+le journal des appels.
+
+![Rapport d'enquête de l'agent Ops](docs/images/investigations.png)
+
+**Canal Discord** : alertes critiques et leurs résolutions envoyées par Alertmanager, fins
+d'enquête envoyées par AgentPilot.
+
+![Messages du canal Discord](docs/images/discord.png)
+
+**Grafana** : le tableau de bord pendant une panne de latence du service Paiements.
+
 ![Tableau de bord Grafana](docs/images/grafana.png)
-![Page d'approbation](docs/images/approvals.png)
-![Page des enquêtes](docs/images/investigations.png)
--->
 
 ## Limites connues
 

@@ -277,11 +277,25 @@ Every milestone, with its bugs and surprises, is detailed in
 
 ## Screenshots
 
-<!-- Screenshots to drop in docs/images/, then uncomment:
+**Human approval** (`/approvals`): a €264.95 refund held by the hook (amount above the
+threshold), with the facts re-read in ShopSim, the agent's decision and its reply to the
+customer.
+
+![Approval page for a held refund](docs/images/approvals.png)
+
+**Ops agent investigation** (`/investigations/{id}`): started automatically on a shop alert (a
+database fault), with the cause, the evidence, the ruled-out hypotheses and the call log.
+
+![Ops agent investigation report](docs/images/investigations.png)
+
+**Discord channel**: critical alerts and their resolution sent by Alertmanager, finished
+investigations sent by AgentPilot.
+
+![Discord channel messages](docs/images/discord.png)
+
+**Grafana**: the dashboard during a latency fault of the Payments service.
+
 ![Grafana dashboard](docs/images/grafana.png)
-![Approval page](docs/images/approvals.png)
-![Investigations page](docs/images/investigations.png)
--->
 
 ## Known limitations
 
