@@ -2,6 +2,7 @@
 .env
 /.venv/
 /RAPPELPERSO.md
+/PROJECT.md
 /agentpilot.egg-info/
 # Sorties des lancements d'agents
 /runs/
