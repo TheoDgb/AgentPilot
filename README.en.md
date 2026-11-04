@@ -118,6 +118,10 @@ python -m agentpilot.reset
 docker compose start agentpilot
 ```
 
+To wipe everything, volumes included (database, Prometheus, Alertmanager):
+`docker compose --profile traffic down -v`. The profile also removes the traffic generator's
+container, which `down` alone leaves behind with the old network.
+
 **Starting costs nothing.** On every start, the Support agent's loop is paused and automatic
 investigation is off. A human turns them back on, on `/control`.
 
@@ -129,6 +133,9 @@ investigation is off. A human turns them back on, on `/control`.
 - turn on automatic investigation: without a key, the AI investigation fails on a configuration
   error, and a **no-AI report** (zero cost, facts without a cause) appears on `/investigations`;
 - run the tests and read the evaluation reports in [`docs/evals/`](docs/evals/).
+
+For a presentation, follow the [demo script](docs/demo.md) (3 minutes, about <span>$</span>0.10,
+in French).
 
 **With a key** (`ANTHROPIC_API_KEY` in `.env`), you can turn the loop back on in `/control`, or
 check the agents' isolation (`curl -X POST localhost:8001/checks/support`, then `/checks/ops`,
@@ -338,8 +345,9 @@ uv venv && source .venv/bin/activate
 uv pip install -e ".[dev,mcp,agent]"
 pytest
 
-# Traffic (before a fault), faults, alerts
-docker compose --profile traffic up -d traffic
+# Traffic (before a fault), faults, alerts. --force-recreate: after a `down`, the generator's
+# container (a separate profile, which `down` does not remove) would keep the old Docker network
+docker compose --profile traffic up -d --force-recreate traffic
 python -m shopsim.chaos_cli on db_errors
 python -m shopsim.chaos_cli status
 python -m shopsim.chaos_cli off all
@@ -387,6 +395,11 @@ python -m observability.query --trace <trace_id>
 
 ## Going further
 
+- [`docs/guide-metier.md`](docs/guide-metier.md): for a business analyst, without jargon: what
+  the agents do, where their rules come from, how to read their decisions and propose an
+  improvement (in French).
+- [`docs/demo.md`](docs/demo.md): a 3-minute demo script, with its preparation, its fallback and
+  its cost (in French).
 - [`docs/journal.md`](docs/journal.md): every milestone, its decisions, bugs and lessons (in
   French).
 - [`docs/evals/`](docs/evals/): all evaluation reports, versioned (in French).

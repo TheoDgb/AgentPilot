@@ -1160,3 +1160,38 @@ pièges dans le même contexte.
   restent intactes.
 - Sur GitHub : check « Tests » vert, schémas Mermaid rendus, liens vers le journal et ligne de
   langue fonctionnels dans les deux README.
+
+### J7.4 : guide pour les business analysts et script de démonstration
+
+*2026-11-04*
+
+**Fait**
+- **`docs/guide-metier.md`**, une page sans jargon. On y trouve :
+  - ce que chaque agent sait faire et ne sait pas faire ;
+  - le chemin d'une règle métier (seuil de 50 €, délai de 30 jours) : un seul fichier de
+    règles, lu par la consigne de l'agent, par le hook et par les réponses attendues, avec un
+    test et la vérification d'isolement pour garder tout le monde d'accord ;
+  - comment lire une décision de l'agent Support (ticket 20) et un rapport de l'agent Ops ;
+  - la validation humaine, l'arrêt d'urgence et le budget du jour ;
+  - comment proposer une amélioration puis la vérifier (cas d'exemple, évaluation,
+    comparaison, décision humaine).
+- **`docs/demo.md`**, un script de 3 minutes. On y trouve :
+  - la préparation, la veille puis 15 minutes avant (ticket 20 lancé à T − 10 min, panne à
+    T − 6 min) ;
+  - le script minute par minute, avec l'approbation en direct ;
+  - le nettoyage ;
+  - une solution de repli si l'API ne répond pas (le rapport sans IA) ;
+  - le coût, avec ses sources.
+- Liens depuis les deux README, et `docs/` décrit dans CLAUDE.md.
+
+**Décisions**
+- **Rien ne s'attend en direct** : une panne met environ 4 minutes à devenir une enquête
+  terminée (règle d'alerte de 2 minutes, regroupement, 60 s avant le tri, enquête). La panne
+  et le ticket se lancent donc avant la démo.
+- **Exemples réels**, ceux des captures du README (ticket 20, enquête sur une panne de base),
+  et chiffres tirés des rapports, comme dans le README.
+
+**Vérification réelle** : liens des quatre fichiers vérifiés. **Répétition chronométrée non
+faite** : le délai d'environ 4 minutes est calculé d'après la configuration, et le coût
+d'environ 0,10 $ vient des rapports, sans mesure sur une vraie démo. À confirmer à la première
+répétition, et à corriger dans `docs/demo.md` s'il le faut.

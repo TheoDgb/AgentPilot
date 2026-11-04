@@ -121,6 +121,10 @@ python -m agentpilot.reset
 docker compose start agentpilot
 ```
 
+Pour tout effacer, volumes compris (base, Prometheus, Alertmanager) :
+`docker compose --profile traffic down -v`. Le profil fait supprimer aussi le conteneur du
+générateur de trafic, que `down` seul laisse derrière lui avec l'ancien réseau.
+
 **Démarrer ne dépense rien.** À chaque démarrage, la boucle de l'agent Support est en pause et
 l'enquête automatique est coupée. C'est un humain qui les relance, sur `/control`.
 
@@ -134,6 +138,9 @@ l'enquête automatique est coupée. C'est un humain qui les relance, sur `/contr
   configuration, et un **rapport sans IA** (coût nul, des faits sans cause) apparaît sur
   `/investigations` ;
 - lancer les tests et lire les rapports d'évaluation de [`docs/evals/`](docs/evals/).
+
+Pour une présentation, suivre le [script de démonstration](docs/demo.md) (3 minutes, environ
+0,10 <span>$</span>).
 
 **Avec une clé** (`ANTHROPIC_API_KEY` dans `.env`), on peut relancer la boucle sur `/control`,
 ou vérifier l'isolement des agents (`curl -X POST localhost:8001/checks/support`, puis
@@ -351,8 +358,9 @@ uv venv && source .venv/bin/activate
 uv pip install -e ".[dev,mcp,agent]"
 pytest
 
-# Trafic (avant une panne), pannes, alertes
-docker compose --profile traffic up -d traffic
+# Trafic (avant une panne), pannes, alertes. --force-recreate : après un `down`, le conteneur du
+# générateur (profil à part, que `down` ne supprime pas) garderait l'ancien réseau Docker
+docker compose --profile traffic up -d --force-recreate traffic
 python -m shopsim.chaos_cli on db_errors
 python -m shopsim.chaos_cli status
 python -m shopsim.chaos_cli off all
@@ -400,6 +408,8 @@ actives, `off all` pour tout arrêter). Le jeton `CHAOS_TOKEN` est à choisir da
 
 ## Pour aller plus loin
 
+- [`docs/guide-metier.md`](docs/guide-metier.md) : pour un business analyst, sans jargon : ce que font les agents, d'où viennent leurs règles, comment lire leurs décisions et proposer une amélioration.
+- [`docs/demo.md`](docs/demo.md) : script de démonstration de 3 minutes, avec sa préparation, sa solution de repli et son coût.
 - [`docs/journal.md`](docs/journal.md) : chaque jalon, ses décisions, ses bugs et ses leçons.
 - [`docs/evals/`](docs/evals/) : tous les rapports d'évaluation, versionnés.
 - [`CLAUDE.md`](CLAUDE.md) : référence complète des commandes, réglages et règles du projet.
