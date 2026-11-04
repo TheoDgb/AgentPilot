@@ -130,8 +130,8 @@ Jalon en cours : **J7 — Livraison et formation**
 - [x] J6 : agent Ops (serveur MCP Ops en lecture seule, rapports d'incident aux preuves vérifiables), évaluation sur 11 scénarios (`evals.ops_run`, `evals.ops_grade` : 12/12), subagents essayés et non retenus (`solo` reste le défaut), enquête automatique sur alerte avec regroupement et mode dégradé sans IA (`/investigations`)
 - [x] J7.1 : AgentPilot dans Docker Compose (tout le système démarre en une commande, sans rien dépenser), supervision sur le réseau Docker, rotation des logs par jour
 - [x] J7.2 : un vrai canal pour prévenir un humain (Discord : alertes critiques et à lire par Alertmanager, fins d'enquête automatique par AgentPilot)
-- [ ] J7.3 : README de présentation : démarrage, architecture, résultats chiffrés, limites  ← prochaine étape
-- [ ] J7.4 : guide d'une page pour les business analysts, et script de démo de 3 minutes
+- [x] J7.3 : README de présentation en français et en anglais (démarrage, architecture, résultats chiffrés, limites), données de démo au premier démarrage de ShopSim
+- [ ] J7.4 : guide d'une page pour les business analysts, et script de démo de 3 minutes  ← prochaine étape
 
 Détails, résultats et leçons de chaque jalon : `docs/journal.md`.
 

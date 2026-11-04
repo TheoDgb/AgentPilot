@@ -1112,3 +1112,51 @@ pièges dans le même contexte.
   « Enquête terminée » avec la cause, la confiance et le lien vers `/investigations/{id}`,
   qui s'ouvre.
 - **Sans adresse** (ligne mise en commentaire) : `/control` affiche « non configuré ».
+
+### J7.3 : README de présentation, données de démo au premier démarrage
+
+*2026-11-04*
+
+**Fait**
+- **README en français** (`README.md`) et **traduction complète en anglais**
+  (`README.en.md`), avec une ligne pour passer de l'un à l'autre. Au sommaire :
+  - résumé et ce que le projet démontre ;
+  - schéma d'architecture en Mermaid ;
+  - démarrage, et ce qui marche sans clé d'API ;
+  - les deux agents et leurs garde-fous ;
+  - résultats chiffrés, avec un lien vers chaque rapport de `docs/evals/` ;
+  - leçons, limites connues, structure du dépôt, commandes (pannes comprises), coûts.
+- **Données de démo au premier démarrage de ShopSim** (`shopsim.seed.seed_on_startup`) : une
+  base vide est remplie, avec les mêmes ids que le seed complet. Une base qui a la moindre
+  ligne de données n'est jamais touchée. L'image ShopSim embarque pour cela les modules de
+  `evals/` qu'importe le seed, jamais la vérité terrain.
+- Points de montage vides du bac à sable de Claude Code (`.gitmodules`, `.vscode`, dix
+  éléments de `.claude/`) ajoutés à `.gitignore`.
+
+**Décisions**
+- **Chaque chiffre vient d'un rapport**, avec son lien. Quand aucun rapport n'existe (coût
+  d'une vérification d'isolement, coût en CI, durée de l'évaluation Ops), le README le dit.
+- **Transparence sur la notation** : le README dit que la version `8e959d276b3f` a été
+  corrigée après la série v2, sur des formulations que la v2 employait. Les deux séries sont
+  notées avec la même règle, et la correction a ses tests négatifs. Ce passage explique
+  l'écart avec le 87/96 de J5.3.
+- **Base vide = aucune ligne dans aucune table de données** (toutes sauf l'horloge et les
+  pannes), plutôt qu'une table témoin : la règle la plus stricte pour ne jamais écraser.
+  Un test fait échouer l'ajout d'une table oubliée.
+- **La vérité terrain n'est pas réécrite au démarrage** : le seed est déterministe, et le
+  fichier versionné est déjà le bon.
+
+**Bugs ou surprises**
+- Un visiteur qui suivait le démarrage tombait sur une boutique vide, alors que le README
+  promettait d'explorer ses données : c'est ce qui a motivé le remplissage au premier
+  démarrage.
+- `CHAOS_TOKEN` est vide dans `.env.example`, et un jeton vide ferme les pannes : le README
+  le précise, sinon la première commande de panne échoue.
+
+**Vérification réelle**
+- `docker compose down -v`, puis `up -d --build` : `shopsim.seeded` écrit au démarrage, les
+  clients 1 et 50 lisibles, 48 tickets ouverts, date simulée au 2026-07-06 12:00.
+- `docker compose restart app` : ShopSim redémarre sans nouveau remplissage, et les données
+  restent intactes.
+- Sur GitHub : check « Tests » vert, schémas Mermaid rendus, liens vers le journal et ligne de
+  langue fonctionnels dans les deux README.
